@@ -39,6 +39,20 @@ class GridSettings(BaseModel):
     max_grid_lot: float = Field(1.0, ge=0.01, le=100.0)
 
 
+class BreakEvenSettings(BaseModel):
+    """Dời SL về break-even sau khi lợi nhuận đạt trigger_pips."""
+    enabled: bool = False
+    trigger_pips: float = Field(20.0, ge=1.0)   # pips lợi nhuận để kích hoạt
+    offset_pips: float = Field(2.0, ge=0.0)      # SL = entry ± offset_pips
+
+
+class TimeBasedExitSettings(BaseModel):
+    """Đóng lệnh bị kẹt quá lâu mà không đạt ngưỡng lợi nhuận tối thiểu."""
+    enabled: bool = False
+    max_duration_minutes: float = Field(240.0, ge=1.0)   # thời gian tối đa (phút)
+    min_profit_pips: float = Field(0.0, ge=0.0)           # chỉ đóng nếu profit < ngưỡng này
+
+
 # ── Main settings ──────────────────────────────────────────────────────── #
 
 class RobotSettings(BaseModel):
@@ -102,6 +116,8 @@ class RobotSettings(BaseModel):
     partial_close: PartialCloseSettings = Field(default_factory=PartialCloseSettings)
     trailing: TrailingSettings = Field(default_factory=TrailingSettings)
     grid: GridSettings = Field(default_factory=GridSettings)
+    break_even: BreakEvenSettings = Field(default_factory=BreakEvenSettings)
+    time_based_exit: TimeBasedExitSettings = Field(default_factory=TimeBasedExitSettings)
 
     # Risk management
     max_account_equity: float = 0.0
@@ -114,6 +130,11 @@ class RobotSettings(BaseModel):
 
     # Wave direction filter
     wave_direction_filter: str = "BOTH"  # BOTH | BUY_ONLY | SELL_ONLY
+
+    # AutoPilot entry controls
+    entry_cooldown_secs: float = Field(30.0, ge=0.0)    # min seconds between signals
+    min_atr_ratio: float = Field(0.0, ge=0.0)            # min ATR/price ratio; 0=off
+    allow_subwave_retrace: bool = True                    # allow retrace entry in sub_wave
 
     # Capital profile — auto-tune lot/risk by balance bracket
     capital_profile: str = "AUTO"  # AUTO | NANO_500 | NANO_600 | NANO_700 | NANO_800 | NANO_900 | MICRO | SMALL | MEDIUM | LARGE | CUSTOM

@@ -1,5 +1,6 @@
 """
-Trade Manager — Partial close, trailing stop, grid system, trade lifecycle.
+Trade Manager — Partial close, trailing stop, break-even, time-based exit,
+grid system, trade lifecycle.
 """
 
 from __future__ import annotations
@@ -82,6 +83,25 @@ class GridConfig:
     distance_multiplier: float = 1.5
     volume_multiplier: float = 1.5
     max_grid_lot: float = 1.0
+
+
+@dataclass
+class BreakEvenConfig:
+    """Move SL to break-even (entry price + offset) after profit reaches trigger_pips."""
+    enabled: bool = False
+    trigger_pips: float = 20.0   # pips in profit before moving SL to BE
+    offset_pips: float = 2.0     # SL = entry ± offset_pips (covers spread)
+    pip_size: float = 0.0001
+
+
+@dataclass
+class TimeBasedExitConfig:
+    """Close a stagnant trade if it has been open longer than max_duration_minutes
+    without reaching min_profit_pips.  Set min_profit_pips=0 to close regardless
+    of PnL direction."""
+    enabled: bool = False
+    max_duration_minutes: float = 240.0   # 4 hours default
+    min_profit_pips: float = 0.0          # only exit if profit < this threshold
 
 
 class PartialCloseManager:
@@ -214,10 +234,124 @@ class GridManager:
         return levels
 
 
+class BreakEvenManager:
+    """
+    Moves SL to break-even once trade profit reaches trigger_pips.
+
+    Triggered once per trade.  After BE is set the SL can only move
+    further in the direction of the trade (never backward) — the
+    TrailingStopManager handles that.
+    """
+
+    def __init__(self, config: BreakEvenConfig) -> None:
+        self.config = config
+        self._triggered: Dict[str, bool] = {}
+
+    def check_and_move(
+        self, trade: TradeRecord, current_price: float
+    ) -> Optional[float]:
+        """
+        Returns new SL price if break-even should trigger, else None.
+        Marks trade.be_moved = True on trigger.
+        """
+        if not self.config.enabled:
+            return None
+        if self._triggered.get(trade.trade_id):
+            return None
+        if trade.be_moved:
+            # already moved (e.g. by partial close manager)
+            self._triggered[trade.trade_id] = True
+            return None
+
+        pip = self.config.pip_size
+        trigger_dist = self.config.trigger_pips * pip
+        offset_dist = self.config.offset_pips * pip
+
+        is_buy = trade.direction.upper() == "BUY"
+        if is_buy:
+            profit_dist = current_price - trade.entry_price
+            if profit_dist >= trigger_dist:
+                new_sl = round(trade.entry_price + offset_dist, 5)
+                if new_sl > trade.sl:   # only move SL in profitable direction
+                    trade.sl = new_sl
+                    trade.be_moved = True
+                    self._triggered[trade.trade_id] = True
+                    logger.info(
+                        "BreakEven: trade %s SL → %.5f (BE+%.1f pips)",
+                        trade.trade_id, new_sl, self.config.offset_pips,
+                    )
+                    return new_sl
+        else:
+            profit_dist = trade.entry_price - current_price
+            if profit_dist >= trigger_dist:
+                new_sl = round(trade.entry_price - offset_dist, 5)
+                if new_sl < trade.sl:   # only move SL in profitable direction
+                    trade.sl = new_sl
+                    trade.be_moved = True
+                    self._triggered[trade.trade_id] = True
+                    logger.info(
+                        "BreakEven: trade %s SL → %.5f (BE-%.1f pips)",
+                        trade.trade_id, new_sl, self.config.offset_pips,
+                    )
+                    return new_sl
+
+        return None
+
+
+class TimeBasedExitManager:
+    """
+    Closes a stagnant trade that has been open longer than max_duration_minutes
+    and has not reached min_profit_pips.
+
+    This prevents capital being tied up in directionless positions.
+    """
+
+    def __init__(self, config: TimeBasedExitConfig) -> None:
+        self.config = config
+
+    def should_close(
+        self, trade: TradeRecord, current_price: float, pip_size: float = 0.0001
+    ) -> bool:
+        """
+        Returns True if the trade should be time-closed.
+        """
+        if not self.config.enabled:
+            return False
+
+        elapsed_minutes = (time.time() - trade.open_time) / 60.0
+        if elapsed_minutes < self.config.max_duration_minutes:
+            return False
+
+        # Calculate current profit in pips
+        is_buy = trade.direction.upper() == "BUY"
+        if is_buy:
+            profit_pips = (current_price - trade.entry_price) / pip_size
+        else:
+            profit_pips = (trade.entry_price - current_price) / pip_size
+
+        if profit_pips < self.config.min_profit_pips:
+            logger.info(
+                "TimeBasedExit: trade %s open %.1f min, profit=%.1f pips < threshold %.1f — closing",
+                trade.trade_id, elapsed_minutes, profit_pips, self.config.min_profit_pips,
+            )
+            return True
+
+        return False
+
+
 class TradeManager:
     """
     Orchestrates the full trade lifecycle:
-    open → partial close → trailing stop → grid → close.
+    open → break-even → partial close → trailing stop → time-based exit → grid → close.
+
+    Exit priority per tick
+    ----------------------
+    1. SL hit (using candle high/low, not just close)
+    2. TP hit (using candle high/low)
+    3. Time-based exit (stagnant trade too long)
+    4. Break-even SL move (once, when profit >= trigger_pips)
+    5. Partial close (once, when TP% reached)
+    6. Trailing stop update (continuous)
     """
 
     def __init__(
@@ -225,12 +359,18 @@ class TradeManager:
         partial_config: Optional[PartialCloseConfig] = None,
         trailing_config: Optional[TrailingConfig] = None,
         grid_config: Optional[GridConfig] = None,
+        break_even_config: Optional[BreakEvenConfig] = None,
+        time_exit_config: Optional[TimeBasedExitConfig] = None,
         pip_value: float = 10.0,
+        pip_size: float = 0.0001,
     ) -> None:
         self.pip_value = pip_value
+        self.pip_size = pip_size
         self._partial = PartialCloseManager(partial_config or PartialCloseConfig())
         self._trailing = TrailingStopManager(trailing_config or TrailingConfig())
         self._grid = GridManager(grid_config or GridConfig())
+        self._break_even = BreakEvenManager(break_even_config or BreakEvenConfig())
+        self._time_exit = TimeBasedExitManager(time_exit_config or TimeBasedExitConfig())
         self._trades: Dict[str, TradeRecord] = {}
         self._closed_trades: List[TradeRecord] = []
 
@@ -266,35 +406,71 @@ class TradeManager:
         return trade
 
     def update_trade(
-        self, trade_id: str, current_price: float, atr: float = 0.0
+        self,
+        trade_id: str,
+        current_price: float,
+        atr: float = 0.0,
+        candle_high: Optional[float] = None,
+        candle_low: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Update a trade with current price, apply partial / trailing."""
+        """
+        Update a trade with current price, apply all exit and management logic.
+
+        Parameters
+        ----------
+        trade_id      : trade to update
+        current_price : current bid/ask price (close of last candle)
+        atr           : current ATR value (used by trailing stop)
+        candle_high   : candle high — used for SL/TP check on SELL trades.
+                        Falls back to current_price if not provided.
+        candle_low    : candle low — used for SL/TP check on BUY trades.
+                        Falls back to current_price if not provided.
+
+        Using candle H/L prevents "walking through" SL on a large spike candle
+        where close is beyond SL but within the bar range.
+        """
         trade = self._trades.get(trade_id)
         if not trade or not trade.is_open:
             return {}
 
-        actions = {}
+        # Use candle extremes when available for accurate SL/TP detection
+        low_price  = candle_low  if candle_low  is not None else current_price
+        high_price = candle_high if candle_high is not None else current_price
 
-        # Partial close
+        actions: Dict[str, Any] = {}
+
+        # ── 1. SL / TP check (candle H/L based) ──────────────────────────── #
+        if self._sl_hit_candle(trade, low_price, high_price):
+            self._close_trade(trade, trade.sl, "SL")
+            actions["closed"] = "SL"
+            return actions
+
+        if self._tp_hit_candle(trade, low_price, high_price):
+            self._close_trade(trade, trade.tp, "TP")
+            actions["closed"] = "TP"
+            return actions
+
+        # ── 2. Time-based exit ────────────────────────────────────────────── #
+        if self._time_exit.should_close(trade, current_price, self.pip_size):
+            self._close_trade(trade, current_price, "TIME_EXIT")
+            actions["closed"] = "TIME_EXIT"
+            return actions
+
+        # ── 3. Break-even ─────────────────────────────────────────────────── #
+        be_sl = self._break_even.check_and_move(trade, current_price)
+        if be_sl is not None:
+            actions["break_even_sl"] = be_sl
+
+        # ── 4. Partial close ──────────────────────────────────────────────── #
         closed_lots = self._partial.check_and_close(trade, current_price)
         if closed_lots is not None:
             actions["partial_close"] = closed_lots
 
-        # Trailing stop
+        # ── 5. Trailing stop ──────────────────────────────────────────────── #
         new_sl = self._trailing.update(trade, current_price, atr)
         if new_sl is not None:
             trade.sl = new_sl
             actions["trailing_sl"] = new_sl
-
-        # Check SL hit
-        if self._sl_hit(trade, current_price):
-            self._close_trade(trade, trade.sl, "SL")
-            actions["closed"] = "SL"
-
-        # Check TP hit
-        elif self._tp_hit(trade, current_price):
-            self._close_trade(trade, trade.tp, "TP")
-            actions["closed"] = "TP"
 
         return actions
 
@@ -336,15 +512,39 @@ class TradeManager:
 
     @staticmethod
     def _sl_hit(trade: TradeRecord, price: float) -> bool:
+        """Legacy single-price SL check (used when no candle data available)."""
         if trade.direction.upper() == "BUY":
             return price <= trade.sl
         return price >= trade.sl
 
     @staticmethod
     def _tp_hit(trade: TradeRecord, price: float) -> bool:
+        """Legacy single-price TP check (used when no candle data available)."""
         if trade.direction.upper() == "BUY":
             return price >= trade.tp
         return price <= trade.tp
+
+    @staticmethod
+    def _sl_hit_candle(trade: TradeRecord, candle_low: float, candle_high: float) -> bool:
+        """
+        SL check using candle extremes.
+        BUY  trades: SL hit if candle LOW  touched or crossed below SL.
+        SELL trades: SL hit if candle HIGH touched or crossed above SL.
+        """
+        if trade.direction.upper() == "BUY":
+            return candle_low <= trade.sl
+        return candle_high >= trade.sl
+
+    @staticmethod
+    def _tp_hit_candle(trade: TradeRecord, candle_low: float, candle_high: float) -> bool:
+        """
+        TP check using candle extremes.
+        BUY  trades: TP hit if candle HIGH touched or crossed above TP.
+        SELL trades: TP hit if candle LOW  touched or crossed below TP.
+        """
+        if trade.direction.upper() == "BUY":
+            return candle_high >= trade.tp
+        return candle_low <= trade.tp
 
     def _close_trade(self, trade: TradeRecord, price: float, reason: str) -> None:
         trade.close_price = price

@@ -46,7 +46,7 @@ from engine import (
 )
 from engine.signal_coordinator import TradeSignal as CoordSignal
 from engine.risk_manager import RiskConfig, MartingaleConfig
-from engine.trade_manager import PartialCloseConfig, TrailingConfig, GridConfig
+from engine.trade_manager import PartialCloseConfig, TrailingConfig, GridConfig, BreakEvenConfig, TimeBasedExitConfig
 from engine.session_manager import DSTMode
 from models.schemas import (
     AutoPilotStatusSchema,
@@ -246,6 +246,16 @@ class AppState:
                 volume_multiplier=s.grid.volume_multiplier,
                 max_grid_lot=s.grid.max_grid_lot,
             ),
+            break_even_config=BreakEvenConfig(
+                enabled=s.break_even.enabled,
+                trigger_pips=s.break_even.trigger_pips,
+                offset_pips=s.break_even.offset_pips,
+            ),
+            time_exit_config=TimeBasedExitConfig(
+                enabled=s.time_based_exit.enabled,
+                max_duration_minutes=s.time_based_exit.max_duration_minutes,
+                min_profit_pips=s.time_based_exit.min_profit_pips,
+            ),
             pip_value=s.pip_value_per_lot,
         )
         self.session_manager = SessionManager(
@@ -261,6 +271,9 @@ class AppState:
             retrace_atr_mult=s.retrace_atr_mult,
             min_body_atr=s.min_body_atr,
             retest_level_x=s.retest_level_x,
+            entry_cooldown_secs=s.entry_cooldown_secs,
+            min_atr_ratio=s.min_atr_ratio,
+            allow_subwave_retrace=s.allow_subwave_retrace,
         )
         # RetracementEngine — created inside AutoPilot and aliased here for
         # direct access from endpoints. Both references point to the same object;
@@ -475,12 +488,16 @@ class RobotEngine:
         self.state.equity = self.state.balance + open_pnl
         self.state.risk_manager.update_equity(self.state.balance, self.state.equity)
 
-        # Update open trades (check SL/TP/trailing/partial)
+        # Update open trades (check SL/TP/trailing/partial/BE/time-exit)
         current_price = float(df["close"].iloc[-1])
+        candle_high = float(df["high"].iloc[-1])
+        candle_low  = float(df["low"].iloc[-1])
         closed_this_tick = []
         for trade in list(self.state.trade_manager.get_open_trades()):
             actions = self.state.trade_manager.update_trade(
-                trade.trade_id, current_price, atr
+                trade.trade_id, current_price, atr,
+                candle_high=candle_high,
+                candle_low=candle_low,
             )
             if "closed" in actions:
                 for ct in self.state.trade_manager.get_closed_trades():
