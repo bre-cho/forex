@@ -799,10 +799,19 @@ with tab4:
                     "Auto-tune lot sizes and risk parameters based on account size. "
                     "**AUTO** detects the appropriate bracket from your balance."
                 )
-                cp_options = ["AUTO", "MICRO", "SMALL", "MEDIUM", "LARGE", "CUSTOM"]
+                cp_options = [
+                    "AUTO",
+                    "NANO_500", "NANO_600", "NANO_700", "NANO_800", "NANO_900",
+                    "MICRO", "SMALL", "MEDIUM", "LARGE", "CUSTOM",
+                ]
                 cp_labels  = [
                     "🤖 AUTO (detect from balance)",
-                    "🔬 MICRO (< $1,000)",
+                    "🔬 NANO ~$500 (< $600) — 0.01 lot, 0.5% risk",
+                    "🔬 NANO ~$600 ($600–$699) — 0.02 lot, 0.7% risk",
+                    "🔬 NANO ~$700 ($700–$799) — 0.03 lot, 0.8% risk",
+                    "🔬 NANO ~$800 ($800–$899) — 0.05 lot, 1.0% risk",
+                    "🔬 NANO ~$900 ($900–$999) — 0.07 lot, 1.0% risk",
+                    "🔬 MICRO (< $1,000 general)",
                     "🔹 SMALL ($1,000–$5,000)",
                     "🔷 MEDIUM ($5,000–$25,000)",
                     "💎 LARGE (≥ $25,000)",

@@ -3,12 +3,17 @@ Capital Manager — Auto-tune trading parameters by account size.
 
 Capital profiles (balance brackets)
 -------------------------------------
-  MICRO   : balance <  1 000 $   — very conservative, micro lots
-  SMALL   : balance <  5 000 $   — conservative, mini lots
-  MEDIUM  : balance < 25 000 $   — balanced
-  LARGE   : balance ≥ 25 000 $   — aggressive growth possible
-  CUSTOM  : user-defined, no auto-adjustment
-  AUTO    : auto-detect bracket from live balance
+  NANO_500 : balance <    600 $   — ultra-conservative for ~$500 accounts
+  NANO_600 : balance <    700 $   — ultra-conservative for ~$600 accounts
+  NANO_700 : balance <    800 $   — ultra-conservative for ~$700 accounts
+  NANO_800 : balance <    900 $   — ultra-conservative for ~$800 accounts
+  NANO_900 : balance <  1 000 $   — ultra-conservative for ~$900 accounts
+  MICRO    : balance <  1 000 $   — conservative (selectable alias, AUTO uses NANO)
+  SMALL    : balance <  5 000 $   — conservative, mini lots
+  MEDIUM   : balance < 25 000 $   — balanced
+  LARGE    : balance ≥ 25 000 $   — aggressive growth possible
+  CUSTOM   : user-defined, no auto-adjustment
+  AUTO     : auto-detect bracket from live balance
 
 Each profile returns recommended overrides for:
   lot_mode, lot_value, min_lot, max_lot,
@@ -44,6 +49,75 @@ class CapitalProfileParams:
 # ── Profile definitions ────────────────────────────────────────────────── #
 
 _PROFILES: Dict[str, CapitalProfileParams] = {
+    # ── NANO sub-profiles for $500–$900 accounts ──────────────────────── #
+    # Risk is kept to 0.5–1% per trade; only micro lots (0.01–0.07);
+    # daily DD limit 2–3%; a single open trade at a time.
+    "NANO_500": CapitalProfileParams(
+        profile="NANO_500",
+        lot_mode="DYNAMIC_PERCENT",
+        lot_value=0.5,           # 0.5% risk per trade (~$2.50 on $500)
+        min_lot=0.01,
+        max_lot=0.01,
+        max_daily_dd_pct=2.0,
+        max_overall_dd_pct=8.0,
+        max_trades_at_time=1,
+        daily_profit_target=0.0,
+        daily_loss_limit=0.0,
+        description="Balance ~$500 (< $600) — ultra-strict, 0.01 lot only, 0.5% risk/trade",
+    ),
+    "NANO_600": CapitalProfileParams(
+        profile="NANO_600",
+        lot_mode="DYNAMIC_PERCENT",
+        lot_value=0.7,           # 0.7% risk per trade (~$4.20 on $600)
+        min_lot=0.01,
+        max_lot=0.02,
+        max_daily_dd_pct=2.0,
+        max_overall_dd_pct=8.0,
+        max_trades_at_time=1,
+        daily_profit_target=0.0,
+        daily_loss_limit=0.0,
+        description="Balance ~$600 ($600–$699) — ultra-strict, max 0.02 lot, 0.7% risk/trade",
+    ),
+    "NANO_700": CapitalProfileParams(
+        profile="NANO_700",
+        lot_mode="DYNAMIC_PERCENT",
+        lot_value=0.8,           # 0.8% risk per trade (~$5.60 on $700)
+        min_lot=0.01,
+        max_lot=0.03,
+        max_daily_dd_pct=2.5,
+        max_overall_dd_pct=9.0,
+        max_trades_at_time=1,
+        daily_profit_target=0.0,
+        daily_loss_limit=0.0,
+        description="Balance ~$700 ($700–$799) — strict, max 0.03 lot, 0.8% risk/trade",
+    ),
+    "NANO_800": CapitalProfileParams(
+        profile="NANO_800",
+        lot_mode="DYNAMIC_PERCENT",
+        lot_value=1.0,           # 1.0% risk per trade (~$8 on $800)
+        min_lot=0.01,
+        max_lot=0.05,
+        max_daily_dd_pct=2.5,
+        max_overall_dd_pct=9.0,
+        max_trades_at_time=1,
+        daily_profit_target=0.0,
+        daily_loss_limit=0.0,
+        description="Balance ~$800 ($800–$899) — strict, max 0.05 lot, 1.0% risk/trade",
+    ),
+    "NANO_900": CapitalProfileParams(
+        profile="NANO_900",
+        lot_mode="DYNAMIC_PERCENT",
+        lot_value=1.0,           # 1.0% risk per trade (~$9 on $900)
+        min_lot=0.01,
+        max_lot=0.07,
+        max_daily_dd_pct=3.0,
+        max_overall_dd_pct=10.0,
+        max_trades_at_time=1,
+        daily_profit_target=0.0,
+        daily_loss_limit=0.0,
+        description="Balance ~$900 ($900–$999) — strict, max 0.07 lot, 1.0% risk/trade",
+    ),
+    # ── Standard profiles ─────────────────────────────────────────────── #
     "MICRO": CapitalProfileParams(
         profile="MICRO",
         lot_mode="DYNAMIC_PERCENT",
@@ -55,7 +129,7 @@ _PROFILES: Dict[str, CapitalProfileParams] = {
         max_trades_at_time=1,
         daily_profit_target=0.0,
         daily_loss_limit=0.0,
-        description="Balance < $1 000 — micro lots, strict risk control",
+        description="Balance < $1,000 (general) — micro lots, strict risk control",
     ),
     "SMALL": CapitalProfileParams(
         profile="SMALL",
@@ -68,7 +142,7 @@ _PROFILES: Dict[str, CapitalProfileParams] = {
         max_trades_at_time=2,
         daily_profit_target=0.0,
         daily_loss_limit=0.0,
-        description="Balance $1 000–$5 000 — conservative mini lots",
+        description="Balance $1,000–$5,000 — conservative mini lots",
     ),
     "MEDIUM": CapitalProfileParams(
         profile="MEDIUM",
@@ -81,7 +155,7 @@ _PROFILES: Dict[str, CapitalProfileParams] = {
         max_trades_at_time=3,
         daily_profit_target=0.0,
         daily_loss_limit=0.0,
-        description="Balance $5 000–$25 000 — balanced growth",
+        description="Balance $5,000–$25,000 — balanced growth",
     ),
     "LARGE": CapitalProfileParams(
         profile="LARGE",
@@ -94,7 +168,7 @@ _PROFILES: Dict[str, CapitalProfileParams] = {
         max_trades_at_time=4,
         daily_profit_target=0.0,
         daily_loss_limit=0.0,
-        description="Balance ≥ $25 000 — scale with lower % risk per trade",
+        description="Balance ≥ $25,000 — scale with lower % risk per trade",
     ),
     "CUSTOM": CapitalProfileParams(
         profile="CUSTOM",
@@ -111,6 +185,9 @@ _PROFILES: Dict[str, CapitalProfileParams] = {
     ),
 }
 
+# Ordered list of NANO profile keys (ascending balance)
+_NANO_PROFILES = ["NANO_500", "NANO_600", "NANO_700", "NANO_800", "NANO_900"]
+
 
 class CapitalManager:
     """
@@ -118,7 +195,9 @@ class CapitalManager:
 
     Usage
     -----
-    1. ``detect(balance)``   → returns the appropriate CapitalProfileParams
+    1. ``detect(balance)``   → returns the appropriate CapitalProfileParams.
+       For balance < $1,000 the finer-grained NANO_500/600/700/800/900 sub-profiles
+       are used by AUTO detection; MICRO remains selectable as a named profile.
     2. ``apply(settings, balance)`` → returns an updated settings dict with
        recommended overrides (does not mutate settings in place).
     3. ``suggest_daily_targets(balance, daily_win_rate)`` → suggests profit/loss
@@ -126,9 +205,21 @@ class CapitalManager:
     """
 
     def detect(self, balance: float) -> CapitalProfileParams:
-        """Detect which capital bracket applies for the given balance."""
-        if balance < 1_000:
-            return _PROFILES["MICRO"]
+        """
+        Detect which capital bracket applies for the given balance.
+
+        Sub-$1,000 accounts use fine-grained NANO profiles (100$ increments).
+        """
+        if balance < 600:
+            return _PROFILES["NANO_500"]
+        elif balance < 700:
+            return _PROFILES["NANO_600"]
+        elif balance < 800:
+            return _PROFILES["NANO_700"]
+        elif balance < 900:
+            return _PROFILES["NANO_800"]
+        elif balance < 1_000:
+            return _PROFILES["NANO_900"]
         elif balance < 5_000:
             return _PROFILES["SMALL"]
         elif balance < 25_000:

@@ -116,7 +116,7 @@ class RobotSettings(BaseModel):
     wave_direction_filter: str = "BOTH"  # BOTH | BUY_ONLY | SELL_ONLY
 
     # Capital profile — auto-tune lot/risk by balance bracket
-    capital_profile: str = "AUTO"  # AUTO | MICRO | SMALL | MEDIUM | LARGE | CUSTOM
+    capital_profile: str = "AUTO"  # AUTO | NANO_500 | NANO_600 | NANO_700 | NANO_800 | NANO_900 | MICRO | SMALL | MEDIUM | LARGE | CUSTOM
 
     # Coordinator
     max_queue_size: int = 10
@@ -445,7 +445,7 @@ class DailyLockStatusSchema(BaseModel):
 
 class CapitalProfileSchema(BaseModel):
     """Recommended parameters for a given capital bracket."""
-    profile:       str    # MICRO | SMALL | MEDIUM | LARGE | CUSTOM | AUTO
+    profile:       str    # NANO_500 | NANO_600 | NANO_700 | NANO_800 | NANO_900 | MICRO | SMALL | MEDIUM | LARGE | CUSTOM | AUTO
     balance:       float
     lot_mode:      str
     lot_value:     float
