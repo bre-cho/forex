@@ -802,10 +802,10 @@ with tab4:
                 cp_options = ["AUTO", "MICRO", "SMALL", "MEDIUM", "LARGE", "CUSTOM"]
                 cp_labels  = [
                     "🤖 AUTO (detect from balance)",
-                    "🔬 MICRO (< $1 000)",
-                    "🔹 SMALL ($1 000–$5 000)",
-                    "🔷 MEDIUM ($5 000–$25 000)",
-                    "💎 LARGE (≥ $25 000)",
+                    "🔬 MICRO (< $1,000)",
+                    "🔹 SMALL ($1,000–$5,000)",
+                    "🔷 MEDIUM ($5,000–$25,000)",
+                    "💎 LARGE (≥ $25,000)",
                     "🛠️ CUSTOM (manual settings)",
                 ]
                 cp_current = current.get("capital_profile", "AUTO")
@@ -1234,6 +1234,10 @@ with tab6:
                           label_visibility="collapsed")
         if new_wf != wf:
             if st.button(f"Apply {new_wf}", use_container_width=True):
+                # Note: This sends the full current settings with the wave filter
+                # updated. For production use, a dedicated PATCH endpoint would be
+                # preferable. For now, the full settings round-trip is safe since
+                # current_settings was just fetched from the backend.
                 updated = dict(current_settings)
                 updated["wave_direction_filter"] = new_wf
                 result = api_post("/api/settings", updated)

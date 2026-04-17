@@ -87,8 +87,14 @@ class VectorStore:
 
     @staticmethod
     def _hash_embed(text: str) -> np.ndarray:
-        """Deterministic pseudo-embedding via MD5-seeded random projection."""
-        seed = int(hashlib.md5(text.encode()).hexdigest(), 16) % (2**31)
+        """
+        Deterministic pseudo-embedding via MD5-seeded random projection.
+
+        Note: MD5 is used here solely for deterministic seeding (reproducibility)
+        — **not** for any security purpose. This is a lightweight fallback for
+        when sentence-transformers is unavailable.
+        """
+        seed = int(hashlib.md5(text.encode()).hexdigest(), 16) % (2**31)  # noqa: S324
         rng = np.random.default_rng(seed)
         vec = rng.standard_normal(_EMB_DIM).astype(np.float32)
         norm = float(np.linalg.norm(vec)) or 1.0

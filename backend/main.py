@@ -155,14 +155,21 @@ class AppState:
             tuned = self.capital_manager.apply(
                 s.model_dump(), self.balance, s.capital_profile
             )
-            # Patch settings in-memory (does not persist to DB unless saved)
-            for field in (
-                "lot_mode", "lot_value", "min_lot", "max_lot",
-                "max_daily_dd_pct", "max_overall_dd_pct", "max_trades_at_time",
-                "daily_profit_target", "daily_loss_limit",
-            ):
-                if field in tuned:
-                    object.__setattr__(s, field, tuned[field]) if hasattr(type(s), '__setattr__') else setattr(s, field, tuned[field])
+            # Apply capital-profile overrides using Pydantic's model_copy to
+            # keep type safety and validation while patching in-memory only
+            # (does not persist to DB unless user saves settings explicitly).
+            profile_overrides = {
+                field: tuned[field]
+                for field in (
+                    "lot_mode", "lot_value", "min_lot", "max_lot",
+                    "max_daily_dd_pct", "max_overall_dd_pct", "max_trades_at_time",
+                    "daily_profit_target", "daily_loss_limit",
+                )
+                if field in tuned
+            }
+            if profile_overrides:
+                self.settings = s.model_copy(update=profile_overrides)
+                s = self.settings
 
         # Chỉ tạo lại data_provider nếu symbol/timeframe thay đổi
         cur_sym = getattr(self.data_provider, "symbol", "")

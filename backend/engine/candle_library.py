@@ -20,6 +20,7 @@ Feature vector (per candle, 12 columns)
 from __future__ import annotations
 
 import logging
+import tempfile
 import time
 from collections import deque
 from pathlib import Path
@@ -197,24 +198,45 @@ class CandleLibrary:
     # ── Persistence ───────────────────────────────────────────────────────── #
 
     def save(self, path: Optional[str] = None) -> str:
-        """Save library to Parquet. Returns the file path used."""
+        """
+        Save library to Parquet (preferred) or CSV (fallback).
+        Returns the file path used.
+        """
         if path is None:
-            path = f"/tmp/candle_lib_{self.symbol}_{self.timeframe}.parquet"
+            tmp = tempfile.gettempdir()
+            path = str(Path(tmp) / f"candle_lib_{self.symbol}_{self.timeframe}.parquet")
         df = self.get()
         if not df.empty:
-            df.to_parquet(path, index=False)
+            try:
+                df.to_parquet(path, index=False)
+            except ImportError:
+                # Parquet engine unavailable — fall back to CSV
+                path = path.replace(".parquet", ".csv")
+                df.to_csv(path, index=False)
             logger.info("CandleLibrary: saved %d candles to %s", len(df), path)
         return path
 
     def load(self, path: Optional[str] = None) -> int:
-        """Load candles from Parquet. Returns number of rows loaded."""
+        """
+        Load candles from Parquet or CSV.
+        Returns number of rows loaded.
+        """
         if path is None:
-            path = f"/tmp/candle_lib_{self.symbol}_{self.timeframe}.parquet"
+            tmp = tempfile.gettempdir()
+            path = str(Path(tmp) / f"candle_lib_{self.symbol}_{self.timeframe}.parquet")
         p = Path(path)
+        # Try the canonical path first; if not found, check CSV alternative
         if not p.exists():
-            return 0
+            csv_path = Path(str(p).replace(".parquet", ".csv"))
+            if csv_path.exists():
+                p = csv_path
+            else:
+                return 0
         try:
-            df = pd.read_parquet(path)
+            if str(p).endswith(".csv"):
+                df = pd.read_csv(str(p))
+            else:
+                df = pd.read_parquet(str(p))
             required = {"open", "high", "low", "close", "volume", "timestamp"}
             if not required.issubset(df.columns):
                 return 0
@@ -222,7 +244,7 @@ class CandleLibrary:
                 self._store.append(row.to_dict())
             if len(self._store) > 0:
                 self._last_ts = max(r["timestamp"] for r in self._store)
-            logger.info("CandleLibrary: loaded %d candles from %s", len(df), path)
+            logger.info("CandleLibrary: loaded %d candles from %s", len(df), p)
             return len(df)
         except Exception as exc:  # noqa: BLE001
             logger.warning("CandleLibrary.load failed: %s", exc)
