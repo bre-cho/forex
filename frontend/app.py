@@ -82,6 +82,17 @@ with st.sidebar:
     status = api_get("/api/status", {})
     running = status.get("running", False)
 
+    # ── Daily Lock Status ─────────────────────────────────────────────── #
+    daily_lock = api_get("/api/risk/daily_lock", {})
+    lock_active = daily_lock.get("locked", False)
+    profit_locked = daily_lock.get("profit_locked", False)
+    loss_locked = daily_lock.get("loss_locked", False)
+
+    if profit_locked:
+        st.markdown('<div style="background:#1b5e20;border-radius:8px;padding:8px 12px;margin-bottom:8px">🏆 <b>Daily Profit Target Hit!</b><br><small>Robot auto-stopped. Reset to resume.</small></div>', unsafe_allow_html=True)
+    elif loss_locked:
+        st.markdown('<div style="background:#b71c1c;border-radius:8px;padding:8px 12px;margin-bottom:8px">🛑 <b>Daily Loss Limit Hit!</b><br><small>Robot auto-stopped. Reset to resume.</small></div>', unsafe_allow_html=True)
+
     if running:
         st.markdown('<span class="running-badge">● RUNNING</span>', unsafe_allow_html=True)
     else:
@@ -90,7 +101,7 @@ with st.sidebar:
     st.markdown("")
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("▶ Start", use_container_width=True, type="primary", disabled=running):
+        if st.button("▶ Start", use_container_width=True, type="primary", disabled=running or lock_active):
             result = api_post("/api/robot/start")
             if result:
                 st.success("Started!")
@@ -100,6 +111,14 @@ with st.sidebar:
             result = api_post("/api/robot/stop")
             if result:
                 st.warning("Stopped")
+                st.rerun()
+
+    # Reset daily lock button
+    if lock_active:
+        if st.button("🔓 Reset Daily Lock", use_container_width=True, type="secondary"):
+            result = api_post("/api/robot/reset_daily_lock")
+            if result:
+                st.success("Daily lock reset! You can now restart the robot.")
                 st.rerun()
 
     st.markdown("---")
@@ -117,9 +136,24 @@ with st.sidebar:
     bal = status.get("balance", 10000)
     eq = status.get("equity", 10000)
     pnl = status.get("total_pnl", 0)
+    daily_pnl_sidebar = daily_lock.get("daily_pnl", 0.0)
+    profit_target_sb = daily_lock.get("daily_profit_target", 0.0)
+    loss_limit_sb = daily_lock.get("daily_loss_limit", 0.0)
+
     st.metric("Balance", f"${bal:,.2f}")
     st.metric("Equity", f"${eq:,.2f}", delta=f"{eq - bal:+.2f}")
     st.metric("Total P&L", f"${pnl:,.2f}", delta=f"{pnl:+.2f}")
+
+    # Daily PnL progress bar
+    st.markdown("**Daily P&L**")
+    st.markdown(f"${daily_pnl_sidebar:+.2f}")
+    if profit_target_sb > 0:
+        pct = min(max(daily_pnl_sidebar / profit_target_sb, 0), 1)
+        st.progress(pct, text=f"Profit target: {pct:.0%} of ${profit_target_sb:.0f}")
+    if loss_limit_sb > 0:
+        loss_pct = min(max(-daily_pnl_sidebar / loss_limit_sb, 0), 1)
+        if loss_pct > 0:
+            st.progress(loss_pct, text=f"Loss limit: {loss_pct:.0%} of ${loss_limit_sb:.0f}")
 
     st.markdown("---")
     auto_refresh = st.checkbox("Auto-refresh (5s)", value=True)
@@ -132,12 +166,13 @@ with st.sidebar:
 
 # ── Navigation ─────────────────────────────────────────────────────────── #
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📊 Dashboard",
     "🌊 Wave Analysis",
     "📋 Signal Queue",
     "⚙️ Settings",
     "📜 Trade History",
+    "🤖 AI & Controls",
 ])
 
 
@@ -151,6 +186,23 @@ with tab1:
     status = api_get("/api/status", {})
     risk = api_get("/api/risk/metrics", {})
     candles = api_get("/api/candles?limit=100", [])
+    daily_lock_d = api_get("/api/risk/daily_lock", {})
+
+    # ── Daily Lock / Drawdown Alerts ────────────────────────────────── #
+    if daily_lock_d.get("profit_locked"):
+        st.success(
+            f"🏆 **Daily profit target reached!** "
+            f"Daily PnL: ${daily_lock_d.get('daily_pnl', 0):+.2f} "
+            f"(target: ${daily_lock_d.get('daily_profit_target', 0):.2f}) — "
+            "Robot **auto-stopped**. Use the sidebar to reset and restart."
+        )
+    elif daily_lock_d.get("loss_locked"):
+        st.error(
+            f"🛑 **Daily loss limit reached!** "
+            f"Daily PnL: ${daily_lock_d.get('daily_pnl', 0):+.2f} "
+            f"(limit: -${daily_lock_d.get('daily_loss_limit', 0):.2f}) — "
+            "Robot **auto-stopped**. Use the sidebar to reset and restart."
+        )
 
     # Top metrics row
     c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -179,6 +231,10 @@ with tab1:
     # Drawdown alert
     if risk.get("dd_triggered"):
         st.error("🚨 **Drawdown protection triggered** — All trading halted")
+    elif risk.get("daily_profit_locked"):
+        st.success(f"🏆 **Daily profit lock** — {risk.get('lock_reason', '')}")
+    elif risk.get("daily_loss_locked"):
+        st.error(f"🛑 **Daily loss lock** — {risk.get('lock_reason', '')}")
 
     col_left, col_right = st.columns([2, 1])
 
@@ -680,6 +736,19 @@ with tab4:
                 sw_mult = sw1.number_input("Sideways ATR Mult", value=float(current.get("sideways_atr_mult", 1.5)))
                 sw_candles = sw2.number_input("Sideways Candles", value=int(current.get("sideways_candles", 10)))
 
+                st.markdown("**Wave Direction Filter**")
+                wdf_options = ["BOTH", "BUY_ONLY", "SELL_ONLY"]
+                wdf_labels  = ["🔄 Both (up + down)", "📈 Buy Only (uptrend)", "📉 Sell Only (downtrend)"]
+                wdf_current = current.get("wave_direction_filter", "BOTH")
+                wdf_idx     = wdf_options.index(wdf_current) if wdf_current in wdf_options else 0
+                wave_dir_filter = st.radio(
+                    "Allow signals for:",
+                    options=wdf_options,
+                    format_func=lambda x: wdf_labels[wdf_options.index(x)],
+                    index=wdf_idx,
+                    horizontal=True,
+                )
+
             # ── Advanced Risk ────────────────────────────────────────── #
             with st.expander("🛡️ Advanced Risk Management"):
                 ar1, ar2, ar3 = st.columns(3)
@@ -691,6 +760,71 @@ with tab4:
                 max_q = cq1.number_input("Max Queue Size", value=int(current.get("max_queue_size", 10)))
                 cooldown = cq2.number_input("Cooldown (minutes)", value=float(current.get("cooldown_minutes", 5.0)))
                 expiry = cq3.number_input("Signal Expiry (seconds)", value=float(current.get("signal_expiry_seconds", 300.0)))
+
+            # ── Daily Lock Targets ───────────────────────────────────── #
+            with st.expander("🎯 Daily Profit & Loss Targets", expanded=True):
+                st.markdown(
+                    "Set daily targets. When reached, robot **auto-stops** until you manually reset. "
+                    "Set to **0** to disable."
+                )
+                dl1, dl2 = st.columns(2)
+                daily_profit_target = dl1.number_input(
+                    "📈 Daily Profit Target ($, 0=off)",
+                    value=float(current.get("daily_profit_target", 0.0)),
+                    min_value=0.0,
+                    step=10.0,
+                    format="%.2f",
+                    help="Robot stops automatically when daily P&L ≥ this value",
+                )
+                daily_loss_limit = dl2.number_input(
+                    "📉 Daily Loss Limit ($, 0=off)",
+                    value=float(current.get("daily_loss_limit", 0.0)),
+                    min_value=0.0,
+                    step=10.0,
+                    format="%.2f",
+                    help="Robot stops automatically when daily P&L ≤ -(this value)",
+                )
+                # Show suggested targets from backend
+                suggested = api_get("/api/capital/suggest_targets", {})
+                if suggested:
+                    st.caption(
+                        f"💡 Suggested targets for current balance: "
+                        f"Profit=${suggested.get('daily_profit_target', 0):.2f}, "
+                        f"Loss=${suggested.get('daily_loss_limit', 0):.2f}"
+                    )
+
+            # ── Capital Profile ──────────────────────────────────────── #
+            with st.expander("💼 Capital Profile (Auto Risk Tuning)"):
+                st.markdown(
+                    "Auto-tune lot sizes and risk parameters based on account size. "
+                    "**AUTO** detects the appropriate bracket from your balance."
+                )
+                cp_options = ["AUTO", "MICRO", "SMALL", "MEDIUM", "LARGE", "CUSTOM"]
+                cp_labels  = [
+                    "🤖 AUTO (detect from balance)",
+                    "🔬 MICRO (< $1 000)",
+                    "🔹 SMALL ($1 000–$5 000)",
+                    "🔷 MEDIUM ($5 000–$25 000)",
+                    "💎 LARGE (≥ $25 000)",
+                    "🛠️ CUSTOM (manual settings)",
+                ]
+                cp_current = current.get("capital_profile", "AUTO")
+                cp_idx     = cp_options.index(cp_current) if cp_current in cp_options else 0
+                capital_profile = st.selectbox(
+                    "Capital Profile",
+                    options=cp_options,
+                    format_func=lambda x: cp_labels[cp_options.index(x)],
+                    index=cp_idx,
+                )
+                # Show current profile info
+                profile_info = api_get("/api/capital/profile", {})
+                if profile_info:
+                    pi1, pi2, pi3, pi4 = st.columns(4)
+                    pi1.metric("Profile", profile_info.get("profile", ""))
+                    pi2.metric("Lot Mode", profile_info.get("lot_mode", ""))
+                    pi3.metric("Max Lot", f"{profile_info.get('max_lot', 0):.2f}")
+                    pi4.metric("Max Daily DD", f"{profile_info.get('max_daily_dd', 0):.1f}%")
+                    st.caption(profile_info.get("description", ""))
 
             submitted = st.form_submit_button("💾 Save Settings", use_container_width=True, type="primary")
 
@@ -759,12 +893,16 @@ with tab4:
                 "ltf_ema_slow": int(ltf_es),
                 "sideways_atr_mult": float(sw_mult),
                 "sideways_candles": int(sw_candles),
+                "wave_direction_filter": wave_dir_filter,
                 "max_account_equity": float(max_eq),
                 "max_daily_dd_pct": float(max_daily_dd),
                 "max_overall_dd_pct": float(max_overall_dd),
                 "max_queue_size": int(max_q),
                 "cooldown_minutes": float(cooldown),
                 "signal_expiry_seconds": float(expiry),
+                "daily_profit_target": float(daily_profit_target),
+                "daily_loss_limit": float(daily_loss_limit),
+                "capital_profile": capital_profile,
             }
             result = api_post("/api/settings", new_settings)
             if result:
@@ -930,3 +1068,175 @@ with tab5:
     st.markdown("---")
     st.markdown(f"*Total records: {trades_data.get('total', 0) if trades_data else 0} | "
                 f"Displayed: {len(trades)} | Last updated: {datetime.now().strftime('%H:%M:%S')}*")
+
+
+# ══════════════════════════════════════════════════════════════════════════ #
+#  PAGE 6 — AI & CONTROLS                                                    #
+# ══════════════════════════════════════════════════════════════════════════ #
+
+with tab6:
+    st.markdown("## 🤖 AI & Controls")
+
+    col_ai, col_ctrl = st.columns([3, 2])
+
+    with col_ai:
+        # ── LLM Orchestrator ─────────────────────────────────────── #
+        st.markdown("### 🧠 LLM Orchestrator")
+        llm_status = api_get("/api/llm/status", {})
+        if llm_status:
+            enabled = llm_status.get("enabled", False)
+            backend = llm_status.get("model", "Not configured")
+            rag_size = llm_status.get("vector_store_size", 0)
+            last_action = llm_status.get("last_action", "IDLE")
+
+            la1, la2, la3 = st.columns(3)
+            la1.metric(
+                "LLM Status",
+                "✅ Active" if enabled else "⚠️ Stub Mode",
+            )
+            la2.metric("Model", backend if enabled else "—")
+            la3.metric("RAG Memory", f"{rag_size} docs")
+            if not enabled:
+                st.info(
+                    "💡 To enable LLM, set **OPENAI_API_KEY** or **GEMINI_API_KEY** "
+                    "environment variable. The robot will use rule-based decisions in the meantime."
+                )
+            st.caption(f"Last action: {last_action}")
+        else:
+            st.warning("Could not fetch LLM status.")
+
+        st.markdown("---")
+
+        # ── Ask LLM ──────────────────────────────────────────────── #
+        st.markdown("### 💬 Ask AI Assistant")
+        user_q = st.text_area(
+            "Your question about market / robot state:",
+            placeholder=(
+                "e.g. What is the current market regime and should I trade now? "
+                "Or: Why was the last trade rejected?"
+            ),
+            height=100,
+        )
+        if st.button("🤖 Ask AI", type="primary", disabled=not user_q.strip()):
+            with st.spinner("Thinking..."):
+                resp = api_post("/api/llm/ask", {"prompt": user_q})
+            if resp:
+                st.markdown("**AI Answer:**")
+                st.markdown(f"> {resp.get('answer', 'No answer')}")
+                st.caption(f"Backend: {resp.get('backend', 'NONE')}")
+            else:
+                st.error("LLM not responding. Check OPENAI_API_KEY / GEMINI_API_KEY.")
+
+        # ── LLM call log ─────────────────────────────────────────── #
+        if llm_status:
+            call_log = llm_status.get("function_call_log", [])
+            if call_log:
+                st.markdown("### 📋 Recent AI Decisions")
+                for entry in reversed(call_log[-5:]):
+                    ts = datetime.fromtimestamp(entry.get("ts", 0)).strftime("%H:%M:%S")
+                    st.markdown(
+                        f"**{ts}** [{entry.get('backend','?')}] "
+                        f"`{entry.get('prompt', '')[:80]}` → "
+                        f"_{entry.get('answer', '')[:120]}_"
+                    )
+
+    with col_ctrl:
+        # ── Daily Lock Controls ───────────────────────────────────── #
+        st.markdown("### 🔒 Daily Lock Controls")
+        lock_info = api_get("/api/risk/daily_lock", {})
+        if lock_info:
+            locked   = lock_info.get("locked", False)
+            p_lock   = lock_info.get("profit_locked", False)
+            l_lock   = lock_info.get("loss_locked", False)
+            dpnl     = lock_info.get("daily_pnl", 0.0)
+            dtarget  = lock_info.get("daily_profit_target", 0.0)
+            dlimit   = lock_info.get("daily_loss_limit", 0.0)
+
+            if p_lock:
+                st.success(f"🏆 Profit target reached! Daily PnL: ${dpnl:+.2f}")
+            elif l_lock:
+                st.error(f"🛑 Loss limit reached! Daily PnL: ${dpnl:+.2f}")
+            else:
+                st.info(f"Daily PnL: ${dpnl:+.2f}")
+                if dtarget > 0:
+                    prog = min(max(dpnl / dtarget, 0), 1)
+                    st.progress(prog, text=f"Profit target: {prog:.0%} (${dtarget:.2f})")
+                if dlimit > 0:
+                    loss_prog = min(max(-dpnl / dlimit, 0), 1)
+                    if loss_prog > 0:
+                        st.progress(loss_prog, text=f"Loss used: {loss_prog:.0%} (${dlimit:.2f})")
+
+            if locked:
+                lock_reason = lock_info.get("lock_reason", "")
+                if lock_reason:
+                    st.markdown(f"**Lock reason:** _{lock_reason}_")
+                if st.button("🔓 Reset Daily Lock & Resume", type="primary", use_container_width=True):
+                    result = api_post("/api/robot/reset_daily_lock")
+                    if result:
+                        st.success("✅ Daily lock reset. You can now restart the robot.")
+                        st.rerun()
+
+        st.markdown("---")
+
+        # ── Candle Library Status ─────────────────────────────────── #
+        st.markdown("### 📚 Candle Library")
+        cl_status = api_get("/api/candle_library/status", {})
+        if cl_status:
+            total   = cl_status.get("total_candles", 0)
+            cap     = cl_status.get("capacity", 10000)
+            last_ts = cl_status.get("last_updated", 0)
+            rt      = cl_status.get("realtime_enabled", False)
+
+            clc1, clc2 = st.columns(2)
+            clc1.metric("Candles Stored", f"{total:,}")
+            clc2.metric("Capacity", f"{cap:,}")
+            pct = total / cap if cap > 0 else 0
+            st.progress(pct, text=f"Library fill: {pct:.0%}")
+            if last_ts > 0:
+                st.caption(
+                    f"Last update: {datetime.fromtimestamp(last_ts).strftime('%Y-%m-%d %H:%M:%S')} | "
+                    f"Realtime: {'✅' if rt else '❌'}"
+                )
+            if total < 100:
+                st.info("📡 Building candle library... robot must run to collect data.")
+        else:
+            st.warning("Candle library status unavailable.")
+
+        st.markdown("---")
+
+        # ── Capital Profile ───────────────────────────────────────── #
+        st.markdown("### 💼 Capital Profile")
+        profile_info = api_get("/api/capital/profile", {})
+        if profile_info:
+            st.metric("Active Profile", profile_info.get("profile", "?"))
+            pi1, pi2 = st.columns(2)
+            pi1.metric("Lot Mode", profile_info.get("lot_mode", ""))
+            pi2.metric("Lot Value", f"{profile_info.get('lot_value', 0):.3f}")
+            pi3, pi4 = st.columns(2)
+            pi3.metric("Max Lot", f"{profile_info.get('max_lot', 0):.2f}")
+            pi4.metric("Max Daily DD", f"{profile_info.get('max_daily_dd', 0):.1f}%")
+            st.caption(profile_info.get("description", ""))
+        else:
+            st.warning("Capital profile unavailable.")
+
+        st.markdown("---")
+
+        # ── Wave Direction Filter ─────────────────────────────────── #
+        st.markdown("### 🌊 Wave Filter (Quick Change)")
+        current_settings = api_get("/api/settings", {})
+        wf = current_settings.get("wave_direction_filter", "BOTH")
+        wf_emoji = {"BOTH": "🔄", "BUY_ONLY": "📈", "SELL_ONLY": "📉"}.get(wf, "?")
+        st.metric("Current Filter", f"{wf_emoji} {wf}")
+        wf_options = ["BOTH", "BUY_ONLY", "SELL_ONLY"]
+        new_wf = st.radio("Change to:", wf_options,
+                          index=wf_options.index(wf) if wf in wf_options else 0,
+                          horizontal=True,
+                          label_visibility="collapsed")
+        if new_wf != wf:
+            if st.button(f"Apply {new_wf}", use_container_width=True):
+                updated = dict(current_settings)
+                updated["wave_direction_filter"] = new_wf
+                result = api_post("/api/settings", updated)
+                if result:
+                    st.success(f"✅ Wave filter updated to {new_wf}")
+                    st.rerun()

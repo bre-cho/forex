@@ -31,6 +31,8 @@ class RiskConfig:
     max_daily_dd_pct: float = 5.0    # % of starting day balance
     max_overall_dd_pct: float = 20.0 # % of account peak
     pip_value_per_lot: float = 10.0  # USD per pip per lot (standard lot)
+    daily_profit_target: float = 0.0  # lock when daily PnL ≥ target ($, 0=off)
+    daily_loss_limit: float = 0.0     # lock when daily PnL ≤ -limit ($, 0=off; overrides dd_pct)
 
 
 @dataclass
@@ -82,6 +84,10 @@ class DrawdownProtection:
         self._day_start_balance: float = 0.0
         self._daily_pnl: float = 0.0
         self._triggered: bool = False
+        # Daily profit/loss locks — require manual user reset to clear
+        self._profit_locked: bool = False
+        self._loss_locked: bool = False
+        self._lock_reason: str = ""
 
     def initialise(self, balance: float, equity: float) -> None:
         self._peak_equity = max(self._peak_equity, equity)
@@ -91,14 +97,53 @@ class DrawdownProtection:
     def update(self, balance: float, equity: float, realised_pnl: float = 0.0) -> None:
         self._peak_equity = max(self._peak_equity, equity)
         self._daily_pnl += realised_pnl
+        self._check_daily_locks()
+
+    def _check_daily_locks(self) -> None:
+        """Check and activate daily profit / loss locks."""
+        if not self._profit_locked and self.config.daily_profit_target > 0:
+            if self._daily_pnl >= self.config.daily_profit_target:
+                self._profit_locked = True
+                self._lock_reason = (
+                    f"Daily profit target reached: ${self._daily_pnl:+.2f} ≥ "
+                    f"${self.config.daily_profit_target:.2f}"
+                )
+                logger.warning("DrawdownProtection: PROFIT LOCK — %s", self._lock_reason)
+
+        if not self._loss_locked:
+            if self.config.daily_loss_limit > 0:
+                if self._daily_pnl <= -self.config.daily_loss_limit:
+                    self._loss_locked = True
+                    self._lock_reason = (
+                        f"Daily loss limit reached: ${self._daily_pnl:+.2f} ≤ "
+                        f"-${self.config.daily_loss_limit:.2f}"
+                    )
+                    logger.warning("DrawdownProtection: LOSS LOCK — %s", self._lock_reason)
 
     def reset_daily(self, balance: float) -> None:
         self._day_start_balance = balance
         self._daily_pnl = 0.0
         self._triggered = False
+        # Daily profit/loss locks persist across day resets — user must reset manually
+        # (they are reset via reset_daily_locks())
+
+    def reset_daily_locks(self) -> None:
+        """Manual user action — clears daily profit/loss locks."""
+        self._profit_locked = False
+        self._loss_locked = False
+        self._lock_reason = ""
+        logger.info("DrawdownProtection: daily locks manually reset by user")
 
     def is_safe(self, equity: float) -> bool:
         if self._triggered:
+            return False
+
+        # Daily profit lock — stop new trades after target reached
+        if self._profit_locked:
+            return False
+
+        # Daily loss lock — stop new trades after loss limit reached
+        if self._loss_locked:
             return False
 
         # Overall drawdown check
@@ -113,7 +158,7 @@ class DrawdownProtection:
                 self._triggered = True
                 return False
 
-        # Daily drawdown check
+        # Daily drawdown check (% based — supplements absolute daily_loss_limit)
         if self._day_start_balance > 0:
             daily_dd_pct = (-self._daily_pnl) / self._day_start_balance * 100
             if daily_dd_pct >= self.config.max_daily_dd_pct:
@@ -147,6 +192,22 @@ class DrawdownProtection:
     @property
     def triggered(self) -> bool:
         return self._triggered
+
+    @property
+    def profit_locked(self) -> bool:
+        return self._profit_locked
+
+    @property
+    def loss_locked(self) -> bool:
+        return self._loss_locked
+
+    @property
+    def daily_locked(self) -> bool:
+        return self._profit_locked or self._loss_locked
+
+    @property
+    def lock_reason(self) -> str:
+        return self._lock_reason
 
 
 class RiskManager:
@@ -227,6 +288,10 @@ class RiskManager:
     def reset_daily(self, balance: float) -> None:
         self._dd_protection.reset_daily(balance)
 
+    def reset_daily_locks(self) -> None:
+        """Manual user reset of daily profit/loss locks."""
+        self._dd_protection.reset_daily_locks()
+
     def on_trade_closed(self, profit: float) -> None:
         self._martingale.on_trade_result(profit)
         self._dd_protection.update(0, 0, profit)
@@ -268,3 +333,19 @@ class RiskManager:
     @property
     def dd_triggered(self) -> bool:
         return self._dd_protection.triggered
+
+    @property
+    def profit_locked(self) -> bool:
+        return self._dd_protection.profit_locked
+
+    @property
+    def loss_locked(self) -> bool:
+        return self._dd_protection.loss_locked
+
+    @property
+    def daily_locked(self) -> bool:
+        return self._dd_protection.daily_locked
+
+    @property
+    def lock_reason(self) -> str:
+        return self._dd_protection.lock_reason

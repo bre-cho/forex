@@ -14,6 +14,9 @@ from .performance_tracker import (
 )
 from .adaptive_controller import AdaptiveController, AdaptiveState
 from .decision_engine import DecisionEngine, DecisionContext, DecisionAction, MarketRegime, SimulatedOutcome
+from .capital_manager import CapitalManager, CapitalProfileParams
+from .candle_library import CandleLibrary
+from .llm_orchestrator import LLMOrchestrator
 
 __all__ = [
     "WaveDetector", "WaveState",
@@ -30,4 +33,7 @@ __all__ = [
     "TradeFingerprint", "PatternRecord", "PreTradeConsultation",
     "AdaptiveController", "AdaptiveState",
     "DecisionEngine", "DecisionContext", "DecisionAction", "MarketRegime", "SimulatedOutcome",
+    "CapitalManager", "CapitalProfileParams",
+    "CandleLibrary",
+    "LLMOrchestrator",
 ]

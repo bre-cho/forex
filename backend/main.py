@@ -40,6 +40,9 @@ from engine import (
     AutoPilot,
     RetracementEngine,
     DecisionEngine, DecisionAction,
+    CapitalManager,
+    CandleLibrary,
+    LLMOrchestrator,
 )
 from engine.signal_coordinator import TradeSignal as CoordSignal
 from engine.risk_manager import RiskConfig, MartingaleConfig
@@ -68,6 +71,10 @@ from models.schemas import (
     PreTradeConsultationSchema,
     PatternSummarySchema,
     TradeFingerprintSchema,
+    DailyLockStatusSchema,
+    CapitalProfileSchema,
+    CandleLibraryStatusSchema,
+    LLMStatusSchema,
 )
 
 import os
@@ -126,6 +133,12 @@ class AppState:
         self.auto_pilot: AutoPilot = AutoPilot()
         self.retracement_engine: RetracementEngine = RetracementEngine()
         self.decision_engine: DecisionEngine = DecisionEngine()
+        self.capital_manager: CapitalManager = CapitalManager()
+        self.candle_library: CandleLibrary = CandleLibrary(
+            symbol=self.settings.symbol,
+            timeframe=self.settings.timeframe,
+        )
+        self.llm: LLMOrchestrator = LLMOrchestrator()
 
         # Maps trade_id → {mode, wave_state, retrace_zone, initial_risk}
         # populated at open, consumed at close for DecisionEngine.record_outcome()
@@ -136,11 +149,30 @@ class AppState:
 
     def rebuild_components(self) -> None:
         s = self.settings
+
+        # ── Capital profile: auto-tune risk params by balance ────────────── #
+        if s.capital_profile != "CUSTOM":
+            tuned = self.capital_manager.apply(
+                s.model_dump(), self.balance, s.capital_profile
+            )
+            # Patch settings in-memory (does not persist to DB unless saved)
+            for field in (
+                "lot_mode", "lot_value", "min_lot", "max_lot",
+                "max_daily_dd_pct", "max_overall_dd_pct", "max_trades_at_time",
+                "daily_profit_target", "daily_loss_limit",
+            ):
+                if field in tuned:
+                    object.__setattr__(s, field, tuned[field]) if hasattr(type(s), '__setattr__') else setattr(s, field, tuned[field])
+
         # Chỉ tạo lại data_provider nếu symbol/timeframe thay đổi
         cur_sym = getattr(self.data_provider, "symbol", "")
         cur_tf  = getattr(self.data_provider, "timeframe", "")
         if cur_sym != s.symbol or cur_tf != s.timeframe:
             self.data_provider = _create_data_provider(
+                symbol=s.symbol, timeframe=s.timeframe
+            )
+            # Reset candle library for new symbol/timeframe
+            self.candle_library = CandleLibrary(
                 symbol=s.symbol, timeframe=s.timeframe
             )
         self.wave_detector = WaveDetector(
@@ -167,6 +199,8 @@ class AppState:
                 max_daily_dd_pct=s.max_daily_dd_pct,
                 max_overall_dd_pct=s.max_overall_dd_pct,
                 pip_value_per_lot=s.pip_value_per_lot,
+                daily_profit_target=s.daily_profit_target,
+                daily_loss_limit=s.daily_loss_limit,
             ),
             martingale=MartingaleConfig(
                 enabled=s.martingale.enabled,
@@ -393,12 +427,32 @@ class RobotEngine:
         if len(df) < 60:
             return
 
+        # ── Feed realtime candles to library ──────────────────────────── #
+        self.state.candle_library.update(df)
+
         # Daily reset check
         today = int(time.time() // 86400)
         if today != self._last_day:
             self._last_day = today
             self._daily_trades = 0
             self.state.risk_manager.reset_daily(self.state.balance)
+
+        # ── Daily lock auto-stop ───────────────────────────────────────── #
+        # If a daily profit/loss lock fires, stop the robot automatically.
+        # The user must manually call /api/robot/reset_daily_lock to resume.
+        if self.state.risk_manager.daily_locked and self.state.robot_running:
+            logger.warning(
+                "RobotEngine: daily lock triggered (%s) — auto-stopping robot",
+                self.state.risk_manager.lock_reason,
+            )
+            self.state.robot_running = False
+            self.state.coordinator.stop()
+            await self.state.broadcast({
+                "event":  "daily_lock",
+                "reason": self.state.risk_manager.lock_reason,
+                "timestamp": time.time(),
+            })
+            return
 
         # Wave analysis
         wave_analysis = self.state.wave_detector.analyse(df)
@@ -467,6 +521,16 @@ class RobotEngine:
                         initial_risk=ctx.get("initial_risk", 0.0),
                         atr=ctx.get("atr", 0.0),
                         price=ctx.get("entry_price", 0.0),
+                    )
+
+                    # ── Add to LLM knowledge base ──────────────────── #
+                    self.state.llm.add_knowledge(
+                        text=(
+                            f"Trade closed: {ct.direction} {ct.symbol} "
+                            f"mode={ct.entry_mode} pnl={ct.pnl:.2f} "
+                            f"wave={ctx.get('wave_state', 'UNKNOWN')}"
+                        ),
+                        metadata={"trade_id": ct.trade_id, "pnl": ct.pnl},
                     )
             finally:
                 db.close()
@@ -608,6 +672,20 @@ class RobotEngine:
             return
 
         entry_signal = best.entry_signal
+
+        # ── Wave direction filter ──────────────────────────────────────── #
+        # BUY_ONLY: only allow BUY signals; SELL_ONLY: only allow SELL signals
+        wave_filter = s.wave_direction_filter.upper()
+        if wave_filter == "BUY_ONLY" and entry_signal.direction != "BUY":
+            logger.debug(
+                "Wave filter BUY_ONLY: skipping %s signal", entry_signal.direction
+            )
+            return
+        if wave_filter == "SELL_ONLY" and entry_signal.direction != "SELL":
+            logger.debug(
+                "Wave filter SELL_ONLY: skipping %s signal", entry_signal.direction
+            )
+            return
 
         # ── Tự mô phỏng: Monte Carlo EV check trước khi submit ─────────── #
         sim = self.state.decision_engine.simulate_candidate(
@@ -832,9 +910,111 @@ async def get_risk_metrics():
         martingale_step=app_state.risk_manager.martingale_step,
         consecutive_losses=app_state.risk_manager.consecutive_losses,
         dd_triggered=app_state.risk_manager.dd_triggered,
+        daily_profit_locked=app_state.risk_manager.profit_locked,
+        daily_loss_locked=app_state.risk_manager.loss_locked,
+        lock_reason=app_state.risk_manager.lock_reason,
         open_trades=len(app_state.trade_manager.get_open_trades()),
         spread=spread,
     )
+
+
+@app.get("/api/risk/daily_lock", response_model=DailyLockStatusSchema)
+async def get_daily_lock_status():
+    """Trạng thái daily lock — profit/loss lock và lý do dừng."""
+    rm = app_state.risk_manager
+    s  = app_state.settings
+    locked = rm.daily_locked
+    return DailyLockStatusSchema(
+        profit_locked=rm.profit_locked,
+        loss_locked=rm.loss_locked,
+        locked=locked,
+        lock_reason=rm.lock_reason if locked else "",
+        daily_pnl=rm.daily_pnl,
+        daily_profit_target=s.daily_profit_target,
+        daily_loss_limit=s.daily_loss_limit,
+        unlocked_by_user=not locked,
+    )
+
+
+@app.post("/api/robot/reset_daily_lock")
+async def reset_daily_lock():
+    """
+    User manually resets daily profit/loss locks.
+    After reset, robot can be restarted normally.
+    """
+    app_state.risk_manager.reset_daily_locks()
+    logger.info("Daily locks reset by user")
+    await app_state.broadcast({
+        "event": "daily_lock_reset",
+        "timestamp": time.time(),
+    })
+    return {"status": "ok", "message": "Daily profit/loss locks have been reset."}
+
+
+@app.get("/api/capital/profile", response_model=CapitalProfileSchema)
+async def get_capital_profile():
+    """Current capital profile and recommended parameters."""
+    s       = app_state.settings
+    profile_name = s.capital_profile
+    if profile_name.upper() == "AUTO":
+        profile = app_state.capital_manager.detect(app_state.balance)
+    else:
+        profile = app_state.capital_manager.get_profile(profile_name)
+    return CapitalProfileSchema(
+        profile=profile.profile,
+        balance=app_state.balance,
+        lot_mode=profile.lot_mode,
+        lot_value=profile.lot_value,
+        max_lot=profile.max_lot,
+        max_daily_dd=profile.max_daily_dd_pct,
+        max_overall_dd=profile.max_overall_dd_pct,
+        risk_per_trade=profile.lot_value,
+        max_trades_at_time=profile.max_trades_at_time,
+        description=profile.description,
+    )
+
+
+@app.get("/api/capital/suggest_targets")
+async def suggest_daily_targets():
+    """Suggest daily profit target and loss limit based on current capital and performance."""
+    tm = app_state.trade_manager
+    win_rate = tm.win_rate()
+    closed   = tm.get_closed_trades()
+    avg_pnl  = sum(t.pnl for t in closed) / max(len(closed), 1)
+    targets  = app_state.capital_manager.suggest_daily_targets(
+        balance=app_state.balance,
+        profile_name=app_state.settings.capital_profile,
+        recent_win_rate=win_rate,
+        avg_trade_pnl=avg_pnl,
+    )
+    return targets
+
+
+@app.get("/api/candle_library/status", response_model=CandleLibraryStatusSchema)
+async def get_candle_library_status():
+    """Status of the realtime candle library."""
+    s = app_state.candle_library.status()
+    return CandleLibraryStatusSchema(**s)
+
+
+@app.get("/api/llm/status", response_model=LLMStatusSchema)
+async def get_llm_status():
+    """Status of the LLM Orchestrator."""
+    s = app_state.llm.status()
+    return LLMStatusSchema(**s)
+
+
+@app.post("/api/llm/ask")
+async def llm_ask(body: dict):
+    """
+    Ask the LLM a question about the current market/robot state.
+    Body: {"prompt": "..."}
+    """
+    prompt = body.get("prompt", "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    answer = app_state.llm.think(prompt)
+    return {"answer": answer, "backend": app_state.llm.backend}
 
 
 # ── AutoPilot status ───────────────────────────────────────────────────── #
