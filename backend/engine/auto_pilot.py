@@ -544,8 +544,6 @@ class AutoPilot:
         if wa.main_wave == WaveState.SIDEWAYS:
             # Allow range-based modes in sideways market
             if mode in (EntryMode.RETEST_LEVEL_X, EntryMode.RETEST_OPPOSITE):
-                d = direction.upper()
-                # Still require at least a weak directional bias: just check price
                 return True
             return False
 
