@@ -49,6 +49,10 @@ from engine import (
     CausalStrategyEngine, CausalIntelligenceResult,
     UtilityConfig, UtilityOptimizationEngine, UtilityOptimizationResult,
     EcosystemConfig, GameTheoryEngine, GameTheoryResult,
+    SovereignPolicy, SovereignOversightEngine, SovereignOversightResult,
+    SovereignMode, ObjectiveLevel, NetworkDominanceScore,
+    EnterpriseConfig, AutonomousEnterpriseEngine, EnterpriseCycle,
+    EnterpriseLifecycle,
 )
 from engine.signal_coordinator import TradeSignal as CoordSignal
 from engine.risk_manager import RiskConfig, MartingaleConfig
@@ -183,6 +187,18 @@ class AppState:
         # and market impact. Finds best-response strategy and Nash equilibrium.
         self.ecosystem_engine: GameTheoryEngine = GameTheoryEngine()
         self.ecosystem_result: Optional[GameTheoryResult] = None
+
+        # Sovereign oversight engine — network-level governor of the full
+        # intelligence stack (layer 7).  Sets objectives, allocates attention
+        # budgets, and issues governance directives (SCALE_UP/THROTTLE/KILL).
+        self.sovereign_engine: SovereignOversightEngine = SovereignOversightEngine()
+        self.sovereign_result: Optional[SovereignOversightResult] = None
+
+        # Autonomous enterprise engine — self-evolving autonomous entity (layer 8).
+        # Orchestrates all 7 lower layers, self-allocates resources, self-evolves
+        # its governance policy, and operates as an independent enterprise.
+        self.enterprise_engine: AutonomousEnterpriseEngine = AutonomousEnterpriseEngine()
+        self.enterprise_task:   Optional[asyncio.Task] = None
 
         # Maps trade_id → {mode, wave_state, retrace_zone, initial_risk}
         # populated at open, consumed at close for DecisionEngine.record_outcome()
@@ -2319,6 +2335,588 @@ async def ecosystem_apply():
         "exploitability":       result.exploitability,
         "ecosystem_insights":   result.ecosystem_insights,
     }
+
+
+# ── Sovereign Oversight API ────────────────────────────────────────────── #
+
+@app.post("/api/sovereign/run")
+async def sovereign_run(
+    mode:                      str   = "ADVISORY",
+    objective_level:           str   = "GROWTH",
+    max_lot_override:          float = 2.0,
+    min_lot_override:          float = 0.0,
+    kill_threshold:            float = 0.15,
+    throttle_threshold:        float = 0.35,
+    boost_threshold:           float = 0.70,
+    attention_normalize:       bool  = True,
+    max_attention_per_cluster: float = 0.50,
+):
+    """
+    Chạy một chu kỳ Strategic Sovereign Oversight.
+
+    Đây là tầng tối cao (layer 7) của intelligence stack — governs toàn bộ
+    ecosystem như một hệ điều hành chiến lược:
+
+    Phases
+    ------
+    1. Thu thập telemetry từ toàn bộ engine clusters (evolution/meta/causal/utility/ecosystem).
+    2. Auto-detect objective level từ risk state của hệ thống.
+    3. Phân bổ attention budget theo objective hierarchy và cluster scores.
+    4. Ban hành governance directives: SCALE_UP | THROTTLE | SUSPEND | KILL | MAINTAIN.
+    5. Build governance insights + objective tree snapshot.
+    6. Ghi audit trail.
+
+    Sovereign Modes
+    ---------------
+    ADVISORY  : tính toán directives nhưng KHÔNG apply vào live system.
+                Dùng để tham khảo và xem xét trước khi enforce.
+    SEMI_AUTO : áp dụng MAINTAIN/THROTTLE tự động; KILL/SCALE_UP cần /apply.
+    FULL_AUTO : áp dụng TẤT CẢ directives ngay sau khi run().
+
+    Objective Levels (tự động phát hiện từ risk state, có thể override)
+    ---------------
+    SURVIVAL   : hệ thống ở ngưỡng nguy hiểm — đóng tất cả aggressive clusters.
+    STABILITY  : dampening — giảm lot, throttle volatile clusters.
+    GROWTH     : bình thường — thưởng ROI cao, phạt value thấp.
+    DOMINANCE  : tấn công — boost winners mạnh, kill laggards nhanh.
+
+    Guardrails
+    ----------
+    - Không bao giờ override risk hard-limits của RiskManager.
+    - lot_scale luôn nằm trong [min_lot_override, max_lot_override].
+    - Kill-switch toàn hệ nếu survival triggered.
+
+    Parameters
+    ----------
+    mode                      : ADVISORY | SEMI_AUTO | FULL_AUTO (default ADVISORY)
+    objective_level           : SURVIVAL | STABILITY | GROWTH | DOMINANCE (default GROWTH)
+    max_lot_override          : hard cap on lot_scale (default 2.0)
+    min_lot_override          : floor on lot_scale, 0=no floor (default 0.0)
+    kill_threshold            : sv ≤ này → KILL (default 0.15)
+    throttle_threshold        : sv ≤ này → THROTTLE (default 0.35)
+    boost_threshold           : sv ≥ này → SCALE_UP (default 0.70)
+    attention_normalize       : chuẩn hoá attention sum=1.0 (default True)
+    max_attention_per_cluster : cap attention share per cluster (default 0.50)
+    """
+    try:
+        sovereign_mode = SovereignMode(mode.upper())
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"mode không hợp lệ: '{mode}'. Chọn một trong: ADVISORY, SEMI_AUTO, FULL_AUTO."
+        )
+    try:
+        obj_level = ObjectiveLevel(objective_level.upper())
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"objective_level không hợp lệ: '{objective_level}'. "
+                   "Chọn một trong: SURVIVAL, STABILITY, GROWTH, DOMINANCE."
+        )
+
+    policy = SovereignPolicy(
+        mode                     = sovereign_mode,
+        objective_level          = obj_level,
+        max_lot_override         = max_lot_override,
+        min_lot_override         = min_lot_override,
+        kill_threshold           = kill_threshold,
+        throttle_threshold       = throttle_threshold,
+        boost_threshold          = boost_threshold,
+        attention_normalize      = attention_normalize,
+        max_attention_per_cluster= max_attention_per_cluster,
+    )
+
+    try:
+        engine = SovereignOversightEngine(policy=policy)
+        result = engine.run(app_state)
+        app_state.sovereign_engine = engine
+        app_state.sovereign_result = result
+
+        return {
+            "status":               "ok",
+            "cycle_id":             result.cycle_id,
+            "objective_level":      result.objective_tree.active_level.value,
+            "survival_triggered":   result.objective_tree.survival_triggered,
+            "healthy_clusters":     result.objective_tree.healthy_clusters,
+            "total_clusters":       result.objective_tree.total_clusters,
+            "directives_summary":   {
+                cid: d.directive.value for cid, d in result.directives.items()
+            },
+            "resource_allocation":  {k: round(v, 4) for k, v in result.resource_allocation.items()},
+            "governance_insights":  result.governance_insights,
+            "duration_secs":        result.duration_secs,
+            "applied_to_live":      result.applied_to_live,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/sovereign/status")
+async def sovereign_status():
+    """
+    Trả về kết quả sovereign oversight cycle gần nhất.
+
+    Bao gồm:
+    - cycle_id            : ID của cycle gần nhất
+    - cluster_states      : telemetry + strategic_value của từng cluster
+    - directives          : governance directive per cluster với rationale
+    - resource_allocation : attention budget per cluster
+    - sovereign_policy    : policy đang hiệu lực
+    - objective_tree      : NetworkObjectiveTree snapshot
+    - governance_insights : phân tích chiến lược bằng ngôn ngữ tự nhiên
+    - audit_trail         : lịch sử governance (tối đa 500 entries)
+    """
+    result = app_state.sovereign_result
+    if result is None:
+        return {
+            "status": "not_run",
+            "message": "Sovereign oversight chưa được chạy. Hãy gọi POST /api/sovereign/run.",
+        }
+    return {"status": "ok", **result.to_dict()}
+
+
+@app.get("/api/sovereign/policy")
+async def sovereign_policy_endpoint():
+    """
+    Trả về sovereign policy hiện tại và objective tree snapshot.
+
+    Sử dụng để kiểm tra:
+    - mode đang hoạt động (ADVISORY/SEMI_AUTO/FULL_AUTO)
+    - objective level hiện tại
+    - kill/throttle/boost thresholds
+    - network-level objective tree (survival/stability/growth/dominance scores)
+
+    Không cần chạy /api/sovereign/run trước.
+    """
+    result = app_state.sovereign_result
+    policy = app_state.sovereign_engine.policy
+
+    policy_info: Dict[str, Any] = {
+        "status":           "ok",
+        "sovereign_policy": policy.to_dict(),
+        "objective_hierarchy": {
+            "levels": ["SURVIVAL", "STABILITY", "GROWTH", "DOMINANCE"],
+            "description": {
+                "SURVIVAL":   "Emergency: drawdown critical — kill all aggressive clusters",
+                "STABILITY":  "Conservative: dampen — reduce lots, throttle volatile clusters",
+                "GROWTH":     "Normal: reward high-ROI, penalise low strategic value",
+                "DOMINANCE":  "Offensive: scale winners hard, kill laggards fast",
+            },
+            "active_level": policy.objective_level.value,
+        },
+        "directive_types": {
+            "SCALE_UP":  "Boost lot_scale +20%, increase attention budget",
+            "THROTTLE":  "Halve attention, cap lot_scale at 70% current",
+            "SUSPEND":   "Zero attention — cluster pending first run",
+            "KILL":      "Zero attention + hard lot_scale cap 0.25",
+            "MAINTAIN":  "No change — nominal performance",
+        },
+    }
+
+    if result is not None:
+        policy_info["last_cycle_id"]     = result.cycle_id
+        policy_info["last_completed_at"] = result.completed_at
+        policy_info["objective_tree"]    = result.objective_tree.to_dict()
+        policy_info["cluster_summary"]   = {
+            cid: {
+                "lifecycle":        cs.lifecycle.value,
+                "strategic_value":  round(cs.strategic_value, 4),
+                "attention_budget": round(cs.attention_budget, 4),
+            }
+            for cid, cs in result.cluster_states.items()
+        }
+
+    return policy_info
+
+
+@app.post("/api/sovereign/apply")
+async def sovereign_apply():
+    """
+    Áp dụng governance directives từ sovereign oversight cycle gần nhất vào live system.
+
+    Những gì được áp dụng
+    ---------------------
+    - SCALE_UP  : lot_scale × 1.20 (capped by max_lot_override)
+    - THROTTLE  : lot_scale × 0.70
+    - KILL      : lot_scale capped to 0.25 (minimal viable trading)
+    - MAINTAIN  : no change
+
+    Guardrails luôn được enforce:
+    - lot_scale ∈ [min_lot_override, max_lot_override]
+    - RiskManager drawdown flags không bao giờ bị override
+
+    Chỉ áp dụng được sau khi đã chạy POST /api/sovereign/run.
+    """
+    result = app_state.sovereign_result
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa có kết quả sovereign. Hãy chạy POST /api/sovereign/run trước."
+        )
+    if result.applied_to_live:
+        return {
+            "status":          "already_applied",
+            "message":         "Sovereign directives đã được apply trước đó",
+            "cycle_id":        result.cycle_id,
+            "directives":      {cid: d.directive.value for cid, d in result.directives.items()},
+            "objective_level": result.objective_tree.active_level.value,
+        }
+
+    result.apply_to(app_state)
+
+    # Mark audit entries for this cycle as applied
+    for entry in result.audit_trail:
+        if entry.cycle_id == result.cycle_id:
+            entry.applied = True
+
+    return {
+        "status":              "ok",
+        "message":             "Sovereign governance directives đã được apply vào live system",
+        "cycle_id":            result.cycle_id,
+        "objective_level":     result.objective_tree.active_level.value,
+        "directives_applied":  {cid: d.directive.value for cid, d in result.directives.items()},
+        "governance_insights": result.governance_insights,
+    }
+
+
+@app.get("/api/sovereign/dominance")
+async def sovereign_dominance():
+    """
+    Trả về Network Dominance Score — portfolio-level dominance metrics.
+
+    Mục tiêu cốt lõi: **max total network dominance, not local wins**.
+
+    Chỉ số này đo lường toàn bộ ecosystem như một quỹ đầu tư attention:
+
+    Metrics
+    -------
+    raw_dominance          : Σ(sv_i × α_i) — weighted strategic value toàn portfolio
+    risk_adjusted_dominance: raw × (1 − portfolio_risk) — sau khi trừ rủi ro
+    portfolio_risk         : Σ(risk_i × α_i) — rủi ro tổng hợp của portfolio
+    portfolio_efficiency   : raw / max_possible — 1.0 = toàn bộ attention vào cluster tốt nhất
+    concentration_hhi      : Herfindahl index ∈ [1/N, 1]
+                             • 0.20 = rải đều 5 clusters (đa dạng hoá tối đa)
+                             • 1.00 = tập trung 100% vào 1 cluster
+    n_active_clusters      : số cluster đang đóng góp vào dominance
+    delta_vs_previous      : thay đổi raw_dominance so với cycle trước
+    trajectory             : IMPROVING | STABLE | DECLINING
+
+    Portfolio Optimization Logic
+    ----------------------------
+    Attention được phân bổ theo bài toán LP:
+      maximize: Σ_i (sv_i − λ × risk_i) × α_i
+      subject to: Σ_i α_i = 1,  0 ≤ α_i ≤ max_attention_per_cluster
+
+    Với λ phụ thuộc vào objective level:
+      SURVIVAL  → λ=5.0 (chỉ giữ cluster ít rủi ro nhất)
+      STABILITY → λ=1.5 (giảm mạnh cluster rủi ro cao)
+      GROWTH    → λ=0.5 (cân bằng)
+      DOMINANCE → λ=0.2 (ưu tiên gần như toàn bộ vào sv)
+
+    Yêu cầu POST /api/sovereign/run trước.
+    """
+    result = app_state.sovereign_result
+    if result is None:
+        return {
+            "status": "not_run",
+            "message": "Chưa có kết quả sovereign. Hãy gọi POST /api/sovereign/run.",
+        }
+
+    nd = result.network_dominance
+    allocs = result.resource_allocation
+    cluster_contributions = {
+        cid: {
+            "strategic_value":   round(result.cluster_states[cid].strategic_value, 4),
+            "attention":         round(allocs.get(cid, 0.0), 4),
+            "dominance_contrib": round(
+                result.cluster_states[cid].strategic_value * allocs.get(cid, 0.0), 4
+            ),
+            "directive":         result.directives[cid].directive.value,
+            "lifecycle":         result.cluster_states[cid].lifecycle.value,
+        }
+        for cid in result.cluster_states
+    }
+
+    # Sort clusters by dominance contribution descending
+    ranked = sorted(
+        cluster_contributions.items(),
+        key=lambda x: x[1]["dominance_contrib"],
+        reverse=True,
+    )
+
+    return {
+        "status":                   "ok",
+        "cycle_id":                 result.cycle_id,
+        "network_dominance":        nd.to_dict(),
+        "objective_level":          result.objective_tree.active_level.value,
+        "cluster_contributions":    dict(ranked),
+        "portfolio_summary": {
+            "total_clusters":    result.objective_tree.total_clusters,
+            "active_clusters":   nd.n_active_clusters,
+            "portfolio_risk":    round(nd.portfolio_risk, 4),
+            "efficiency_pct":    round(nd.portfolio_efficiency * 100, 2),
+            "concentration_hhi": round(nd.concentration_hhi, 4),
+            "is_concentrated":   nd.concentration_hhi > 0.70,
+        },
+    }
+
+
+# ── Autonomous Enterprise API ──────────────────────────────────────────── #
+
+async def _enterprise_background_loop() -> None:
+    """
+    Background asyncio task for the Autonomous Enterprise Engine.
+
+    Runs enterprise cycles indefinitely until stop() is requested,
+    sleeping for the adaptive cycle interval between cycles.
+    """
+    engine = app_state.enterprise_engine
+    while not engine.is_stop_requested():
+        try:
+            await asyncio.get_event_loop().run_in_executor(
+                None, engine.run, app_state
+            )
+        except Exception as exc:
+            logger.error("Enterprise background loop error: %s", exc)
+        # Adaptive interval — may change each cycle based on objective
+        interval = engine.current_cycle_interval()
+        logger.info(
+            "Enterprise loop: sleeping %.0f seconds (objective=%s)",
+            interval,
+            engine.last_cycle.objective_level if engine.last_cycle else "GROWTH",
+        )
+        await asyncio.sleep(interval)
+    engine.lifecycle = EnterpriseLifecycle.STOPPED
+    logger.info("Enterprise background loop: stopped.")
+
+
+@app.post("/api/enterprise/start")
+async def enterprise_start(
+    cycle_interval_secs:      float = 900.0,
+    min_cycle_interval_secs:  float = 60.0,
+    max_cycle_interval_secs:  float = 3600.0,
+    evolution_cycle_interval: int   = 3,
+    meta_cycle_interval:      int   = 2,
+    causal_cycle_interval:    int   = 2,
+    utility_cycle_interval:   int   = 1,
+    ecosystem_cycle_interval: int   = 2,
+    auto_evolve:              bool  = True,
+):
+    """
+    Khởi động SELF-EVOLVING AUTONOMOUS ENTERPRISE (Layer 8).
+
+    Đây là bước cuối cùng: hệ thống trở thành một thực thể vận hành độc lập.
+
+    Hệ thống sẽ:
+    - **Tự sinh chiến lược**: orchestrates tất cả 7 layers trong mỗi cycle
+    - **Tự phân bổ tài nguyên**: Sovereign Oversight (FULL_AUTO) tự động phân bổ
+    - **Tự vận hành**: chạy liên tục trong background asyncio task
+    - **Tự tối ưu**: monitor dominance và điều chỉnh từng cycle
+    - **Tự tiến hóa qua thời gian**: PolicyEvolver tự mutate governance policy
+
+    Layer Staleness (cycle_interval giữa các lần chạy mỗi layer)
+    --------------------------------------------------------------
+    - evolution  : mỗi N enterprise cycles (default 3 — expensive)
+    - meta       : mỗi N cycles (default 2)
+    - causal     : mỗi N cycles (default 2)
+    - utility    : mỗi N cycles (default 1 — chạy mọi cycle)
+    - ecosystem  : mỗi N cycles (default 2)
+
+    Adaptive Cycle Interval
+    -----------------------
+    - SURVIVAL mode   → min_cycle_interval_secs (kiểm tra thường xuyên)
+    - DOMINANCE mode  → max_cycle_interval_secs (không cần vội)
+    - Các mode khác   → cycle_interval_secs (mặc định)
+
+    Parameters
+    ----------
+    cycle_interval_secs     : giây giữa các enterprise cycles (default 900 = 15 phút)
+    min_cycle_interval_secs : tối thiểu (dùng khi SURVIVAL) (default 60)
+    max_cycle_interval_secs : tối đa (dùng khi DOMINANCE) (default 3600)
+    evolution_cycle_interval: số enterprise cycles giữa các lần chạy evolution (default 3)
+    meta_cycle_interval     : ... meta (default 2)
+    causal_cycle_interval   : ... causal (default 2)
+    utility_cycle_interval  : ... utility (default 1)
+    ecosystem_cycle_interval: ... ecosystem (default 2)
+    auto_evolve             : bật/tắt self-evolution của policy (default True)
+    """
+    engine = app_state.enterprise_engine
+
+    if engine.lifecycle == EnterpriseLifecycle.RUNNING:
+        return {
+            "status":  "already_running",
+            "message": "Autonomous Enterprise đã đang chạy",
+            "cycle_n": engine.cycle_count,
+        }
+
+    # Reconfigure with requested params
+    cfg = EnterpriseConfig(
+        cycle_interval_secs      = cycle_interval_secs,
+        min_cycle_interval_secs  = min_cycle_interval_secs,
+        max_cycle_interval_secs  = max_cycle_interval_secs,
+        evolution_cycle_interval = evolution_cycle_interval,
+        meta_cycle_interval      = meta_cycle_interval,
+        causal_cycle_interval    = causal_cycle_interval,
+        utility_cycle_interval   = utility_cycle_interval,
+        ecosystem_cycle_interval = ecosystem_cycle_interval,
+        auto_evolve              = auto_evolve,
+    )
+    app_state.enterprise_engine = AutonomousEnterpriseEngine(config=cfg)
+    engine = app_state.enterprise_engine
+    engine.start()
+
+    # Launch background loop
+    task = asyncio.create_task(
+        _enterprise_background_loop()
+    )
+    app_state.enterprise_task = task
+
+    return {
+        "status":  "started",
+        "message": (
+            "🚀 SELF-EVOLVING AUTONOMOUS ENTERPRISE đã khởi động. "
+            "Thực thể sẽ tự vận hành, tự tối ưu, và tự tiến hóa."
+        ),
+        "config":  cfg.to_dict(),
+    }
+
+
+@app.post("/api/enterprise/stop")
+async def enterprise_stop():
+    """
+    Dừng Autonomous Enterprise Engine.
+
+    Gửi tín hiệu dừng — enterprise sẽ hoàn thành cycle hiện tại
+    rồi mới dừng hẳn (không kill giữa chừng).
+
+    Toàn bộ lịch sử cycles và champion policy được giữ lại trong memory.
+    Có thể restart bằng POST /api/enterprise/start.
+    """
+    engine = app_state.enterprise_engine
+
+    if engine.lifecycle != EnterpriseLifecycle.RUNNING:
+        return {
+            "status":  "not_running",
+            "message": f"Enterprise không đang chạy (lifecycle={engine.lifecycle.value})",
+        }
+
+    engine.stop()
+
+    if app_state.enterprise_task is not None:
+        app_state.enterprise_task.cancel()
+        app_state.enterprise_task = None
+
+    return {
+        "status":  "stopped",
+        "message": "Autonomous Enterprise đã dừng. Memory và champion policy được giữ lại.",
+        "cycle_n": engine.cycle_count,
+        "champion": (
+            {
+                "cycle_n":       engine.memory.champion.cycle_n,
+                "raw_dominance": round(engine.memory.champion.raw_dominance, 4),
+            }
+            if engine.memory.champion else None
+        ),
+    }
+
+
+@app.get("/api/enterprise/status")
+async def enterprise_status():
+    """
+    Trả về trạng thái hiện tại của Autonomous Enterprise.
+
+    Bao gồm:
+    - lifecycle       : IDLE | RUNNING | STOPPED
+    - cycle_n         : số enterprise cycles đã hoàn thành
+    - objective_level : sovereign objective level của cycle gần nhất
+    - raw_dominance   : network dominance của cycle gần nhất
+    - trend           : IMPROVING | STABLE | DECLINING
+    - champion        : chu kỳ tốt nhất từ trước đến nay
+    - last_cycle      : chi tiết cycle gần nhất (layer records + insights)
+
+    Không cần start trước — trả về IDLE nếu chưa khởi động.
+    """
+    return {"status": "ok", **app_state.enterprise_engine.status()}
+
+
+@app.post("/api/enterprise/evolve")
+async def enterprise_evolve():
+    """
+    Buộc chạy một enterprise cycle ngay lập tức (đồng bộ).
+
+    Hữu ích để:
+    - Kiểm tra hoạt động trước khi start background loop
+    - Force một cycle cụ thể khi đang ở IDLE hoặc STOPPED
+    - Debug và xem kết quả đầy đủ của một cycle
+
+    Không ảnh hưởng đến background loop (nếu đang chạy, cycle này
+    chạy song song — không nên dùng đồng thời).
+
+    Kết quả trả về
+    --------------
+    - cycle_id            : ID của cycle này
+    - enterprise_cycle_n  : thứ tự cycle
+    - layer_records       : kết quả từng layer (ran/skipped/success/summary)
+    - sovereign_cycle_id  : cycle ID của sovereign oversight
+    - raw_dominance       : network dominance đạt được
+    - objective_level     : sovereign objective
+    - policy_evolved      : True nếu governance policy được tự tiến hóa
+    - policy_mutation     : mô tả chi tiết mutation (nếu có)
+    - insights            : phân tích enterprise bằng ngôn ngữ tự nhiên
+    - duration_secs       : thời gian hoàn thành cycle
+    """
+    try:
+        cycle = await asyncio.get_event_loop().run_in_executor(
+            None, app_state.enterprise_engine.run, app_state
+        )
+        return {"status": "ok", **cycle.to_dict()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/enterprise/manifest")
+async def enterprise_manifest():
+    """
+    Trả về "consciousness snapshot" của Autonomous Enterprise.
+
+    Đây là cái nhìn toàn diện về thực thể — trạng thái tự nhận thức của nó:
+
+    entity         : tên và layer số
+    description    : mô tả bản chất của thực thể
+    lifecycle      : IDLE | RUNNING | STOPPED
+    cycle_n        : tổng số cycles đã hoàn thành
+    current_policy : sovereign policy đang áp dụng (sau các lần self-evolve)
+    memory         : lịch sử dominance, trend, champion
+    layer_schedule : schedule của từng layer (interval, staleness, due)
+    next_cycle_secs: giây đến cycle tiếp theo
+    config         : toàn bộ EnterpriseConfig
+    recent_cycles  : chi tiết 10 cycles gần nhất
+
+    Cấu trúc intelligence stack
+    ---------------------------
+    Layer 1  — WaveDetector         : phát hiện sóng thị trường
+    Layer 2  — SignalCoordinator    : phối hợp tín hiệu
+    Layer 3  — DecisionEngine       : quyết định chiến lược
+    Layer 4  — EvolutionaryEngine   : tiến hóa chiến lược (self-play)
+    Layer 5  — MetaLearningEngine   : học tại sao winner thắng
+    Layer 6  — CausalStrategyEngine : phân tích nhân quả
+               UtilityOptimizationEngine : tối ưu đa chiều utility
+               GameTheoryEngine    : Nash equilibrium + multi-agent
+    Layer 7  — SovereignOversightEngine : quản trị toàn bộ ecosystem
+    Layer 8  — AutonomousEnterpriseEngine: SELF-EVOLVING AUTONOMOUS ENTERPRISE ← đây
+    """
+    manifest = app_state.enterprise_engine.manifest()
+    manifest["intelligence_stack"] = {
+        "layer_1": "WaveDetector — market wave detection",
+        "layer_2": "SignalCoordinator — signal orchestration",
+        "layer_3": "DecisionEngine — strategy decisions",
+        "layer_4": "EvolutionaryEngine — self-play genetic evolution",
+        "layer_5": "MetaLearningEngine — why winners win",
+        "layer_6": "CausalStrategyEngine + UtilityOptimizationEngine + GameTheoryEngine",
+        "layer_7": "SovereignOversightEngine — network-level governance",
+        "layer_8": "AutonomousEnterpriseEngine — SELF-EVOLVING AUTONOMOUS ENTERPRISE",
+    }
+    return {"status": "ok", **manifest}
 
 
 if __name__ == "__main__":
