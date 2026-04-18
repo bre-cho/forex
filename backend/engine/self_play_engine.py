@@ -562,7 +562,9 @@ class MarketSimulator:
 
         gross_profit = sum(p for p in pnls if p > 0)
         gross_loss   = abs(sum(p for p in pnls if p < 0)) + 1e-9
-        # Cap profit_factor to avoid numerical blow-up when gross_loss ≈ 0
+        # Cap profit_factor to prevent numerical instability when gross_loss is
+        # near-zero (all trades profitable — uncommon but possible in idealized
+        # synthetic markets).
         pf           = min(gross_profit / gross_loss, 20.0)
         avg_rr       = float(np.mean(rrs)) if rrs else 0.0
         total_pnl    = float(sum(pnls))

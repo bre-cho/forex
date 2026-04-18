@@ -411,8 +411,7 @@ async def lifespan(app: FastAPI):
     except Exception as _wu_exc:
         logger.warning("WarmUp failed (non-fatal): %s", _wu_exc)
         # Store a failure report so /api/warmup/status shows the error
-        from engine.synthetic_engine import WarmUpReport as _WarmUpReport
-        app_state.warmup_report = _WarmUpReport(errors=[str(_wu_exc)])
+        app_state.warmup_report = WarmUpReport(errors=[str(_wu_exc)])
     # ──────────────────────────────────────────────────────────────────────── #
 
     # ── AUTO-START: Robot tự vận hành ngay khi khởi động ──────────────── #
