@@ -87,8 +87,7 @@ class CandleLibrary:
             return 0
 
         new_rows = new_rows.sort_values("timestamp")
-        for _, row in new_rows.iterrows():
-            self._store.append(row.to_dict())
+        self._store.extend(new_rows.to_dict("records"))
 
         self._last_ts = float(new_rows["timestamp"].iloc[-1])
         self._update_count += 1
@@ -240,8 +239,7 @@ class CandleLibrary:
             required = {"open", "high", "low", "close", "volume", "timestamp"}
             if not required.issubset(df.columns):
                 return 0
-            for _, row in df.iterrows():
-                self._store.append(row.to_dict())
+            self._store.extend(df.to_dict("records"))
             if len(self._store) > 0:
                 self._last_ts = max(r["timestamp"] for r in self._store)
             logger.info("CandleLibrary: loaded %d candles from %s", len(df), p)

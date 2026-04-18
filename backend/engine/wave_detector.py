@@ -11,7 +11,9 @@ Logic:
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
@@ -98,6 +100,13 @@ class LSTMWaveClassifier:
         self._buffer: List[Tuple[np.ndarray, int]] = []  # (seq, label)
         self._records_since_retrain: int = 0
 
+        # Thread-safety: protects _model and _is_ready during background training
+        self._model_lock = threading.Lock()
+        self._training_in_progress = False
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="lstm_train"
+        )
+
         try:
             import torch as _torch  # noqa: F401
             self._torch_available = True
@@ -125,21 +134,31 @@ class LSTMWaveClassifier:
         self._records_since_retrain += 1
 
     def fit_if_ready(self) -> None:
-        """Train LSTM when buffer has enough samples and enough new arrivals."""
+        """Schedule background training when buffer has enough samples and new arrivals."""
         if not self._torch_available:
             return
         if len(self._buffer) < self._MIN_SAMPLES:
             return
         if self._records_since_retrain < self._RETRAIN_EVERY and self._is_ready:
             return
-        self._train()
+        if self._training_in_progress:
+            return  # previous training still running — skip
+
+        # Snapshot buffer for the background worker; reset counter immediately
+        buffer_snapshot = list(self._buffer)
+        self._records_since_retrain = 0
+        self._training_in_progress = True
+        self._executor.submit(self._train_bg, buffer_snapshot)
 
     def predict_proba(self, df: pd.DataFrame) -> Optional[Dict[str, float]]:
         """
         Return ``{'BULL': p, 'BEAR': p, 'SIDEWAYS': p}`` or ``None``.
         The three probabilities sum to 1.0.
         """
-        if not self._is_ready or self._model is None:
+        with self._model_lock:
+            model = self._model
+            is_ready = self._is_ready
+        if not is_ready or model is None:
             return None
         seq = self._extract_sequence(df)
         if seq is None:
@@ -149,9 +168,9 @@ class LSTMWaveClassifier:
             import torch.nn.functional as F  # noqa: PLC0415
 
             x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
-            self._model.eval()  # type: ignore[union-attr]
+            model.eval()  # type: ignore[union-attr]
             with torch.no_grad():
-                logits = self._model(x)  # type: ignore[operator]
+                logits = model(x)  # type: ignore[operator]
                 probs  = F.softmax(logits, dim=-1).squeeze(0).numpy()
             return {
                 "BULL":     round(float(probs[0]), 4),
@@ -174,49 +193,55 @@ class LSTMWaveClassifier:
             return None
         return (closes - mu) / sigma
 
-    def _train(self) -> None:
-        """Train a small single-layer LSTM on the current buffer."""
-        import torch  # noqa: PLC0415
-        import torch.nn as nn  # noqa: PLC0415
+    def _train_bg(self, buffer_snapshot: List[Tuple[np.ndarray, int]]) -> None:
+        """Background training task — runs in thread pool, updates model atomically."""
+        try:
+            import torch  # noqa: PLC0415
+            import torch.nn as nn  # noqa: PLC0415
 
-        class _LSTMNet(nn.Module):
-            def __init__(self, hidden: int = 32) -> None:
-                super().__init__()
-                self.lstm = nn.LSTM(1, hidden, batch_first=True)
-                self.fc   = nn.Linear(hidden, 3)
+            class _LSTMNet(nn.Module):
+                def __init__(self, hidden: int = 32) -> None:
+                    super().__init__()
+                    self.lstm = nn.LSTM(1, hidden, batch_first=True)
+                    self.fc   = nn.Linear(hidden, 3)
 
-            def forward(self, x: "torch.Tensor") -> "torch.Tensor":
-                _, (hn, _) = self.lstm(x)
-                return self.fc(hn.squeeze(0))
+                def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+                    _, (hn, _) = self.lstm(x)
+                    return self.fc(hn.squeeze(0))
 
-        seqs   = torch.tensor(
-            np.array([s for s, _ in self._buffer]), dtype=torch.float32
-        ).unsqueeze(-1)  # (N, SEQ_LEN, 1)
-        labels = torch.tensor(
-            [lb for _, lb in self._buffer], dtype=torch.long
-        )
+            seqs   = torch.tensor(
+                np.array([s for s, _ in buffer_snapshot]), dtype=torch.float32
+            ).unsqueeze(-1)  # (N, SEQ_LEN, 1)
+            labels = torch.tensor(
+                [lb for _, lb in buffer_snapshot], dtype=torch.long
+            )
 
-        model   = _LSTMNet(hidden=self._HIDDEN)
-        opt     = torch.optim.Adam(model.parameters(), lr=1e-3)
-        loss_fn = nn.CrossEntropyLoss()
+            model   = _LSTMNet(hidden=self._HIDDEN)
+            opt     = torch.optim.Adam(model.parameters(), lr=1e-3)
+            loss_fn = nn.CrossEntropyLoss()
 
-        model.train()
-        last_loss = 0.0
-        for _ in range(self._EPOCHS):
-            opt.zero_grad()
-            out      = model(seqs)
-            loss     = loss_fn(out, labels)
-            loss.backward()
-            opt.step()
-            last_loss = float(loss)
+            model.train()
+            last_loss = 0.0
+            for _ in range(self._EPOCHS):
+                opt.zero_grad()
+                out      = model(seqs)
+                loss     = loss_fn(out, labels)
+                loss.backward()
+                opt.step()
+                last_loss = float(loss)
 
-        self._model    = model
-        self._is_ready = True
-        self._records_since_retrain = 0
-        logger.info(
-            "LSTMWaveClassifier: trained on %d samples (loss=%.4f)",
-            len(self._buffer), last_loss,
-        )
+            # Atomically swap in the new model
+            with self._model_lock:
+                self._model    = model
+                self._is_ready = True
+            logger.info(
+                "LSTMWaveClassifier: trained on %d samples (loss=%.4f)",
+                len(buffer_snapshot), last_loss,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("LSTMWaveClassifier._train_bg failed: %s", exc)
+        finally:
+            self._training_in_progress = False
 
 
 class WaveDetector:
@@ -265,7 +290,7 @@ class WaveDetector:
         df must have columns: open, high, low, close, volume
         Returns a WaveAnalysis with current wave state.
         """
-        df = df.copy().reset_index(drop=True)
+        df = df.reset_index(drop=True)
         if len(df) < self.htf_ema_slow + 5:
             return self._flat_analysis(df)
 

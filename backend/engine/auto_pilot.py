@@ -28,7 +28,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple  # noqa: F401 (Tuple used in type hints)
 
 import pandas as pd
 
@@ -182,6 +182,23 @@ class AutoPilot:
         self._last_signal_time: float = 0.0   # epoch seconds of last submitted signal
         self.retracement_engine: RetracementEngine = RetracementEngine()
 
+        # Pre-build one EntryLogic instance per mode — they are stateless and
+        # share the same constructor params as this AutoPilot instance, so
+        # there is no need to re-create them on every tick.
+        self._entry_logic_cache: Dict[EntryMode, EntryLogic] = {
+            mode: EntryLogic(
+                sl_mode=self.sl_mode,
+                sl_value=self.sl_value,
+                tp_mode=self.tp_mode,
+                tp_value=self.tp_value,
+                entry_mode=mode,
+                retrace_atr_mult=self.retrace_atr_mult,
+                min_body_atr=self.min_body_atr,
+                retest_level_x=self.retest_level_x,
+            )
+            for mode in EntryMode
+        }
+
     # ── Public API ─────────────────────────────────────────────────────── #
 
     def select_best_entry(
@@ -284,16 +301,7 @@ class AutoPilot:
 
         # ── PATH B: Normal EntryMode scan ───────────────────────────────── #
         for mode in EntryMode:
-            el = EntryLogic(
-                sl_mode=self.sl_mode,
-                sl_value=self.sl_value,
-                tp_mode=self.tp_mode,
-                tp_value=self.tp_value,
-                entry_mode=mode,
-                retrace_atr_mult=self.retrace_atr_mult,
-                min_body_atr=self.min_body_atr,
-                retest_level_x=self.retest_level_x,
-            )
+            el = self._entry_logic_cache[mode]
 
             direction = el.check_entry(
                 candle, range_high, range_low, atr,

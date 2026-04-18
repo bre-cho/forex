@@ -585,10 +585,9 @@ class RobotEngine:
                 candle_low=candle_low,
             )
             if "closed" in actions:
-                for ct in self.state.trade_manager.get_closed_trades():
-                    if ct.trade_id == trade.trade_id and ct.close_time:
-                        closed_this_tick.append(ct)
-                        break
+                # trade is mutated in-place by _close_trade — reuse the reference
+                # directly instead of searching the entire closed_trades list (O(n²))
+                closed_this_tick.append(trade)
 
         # Persist closed trades, update balance, record outcome for learning
         if closed_this_tick:
@@ -614,7 +613,7 @@ class RobotEngine:
                         "grid_level": ct.grid_level,
                         "comment": ct.comment,
                         "meta": {},
-                    })
+                    }, commit=False)  # defer commit; single flush below
                     self.state.balance += ct.pnl
                     self.state.risk_manager.on_trade_closed(ct.pnl)
                     self.state.coordinator.on_trade_closed(ct.pnl)
@@ -641,6 +640,8 @@ class RobotEngine:
                         ),
                         metadata={"trade_id": ct.trade_id, "pnl": ct.pnl},
                     )
+                # Single commit for all trades closed this tick
+                db.commit()
             finally:
                 db.close()
 
@@ -1416,18 +1417,18 @@ async def get_candles(
     limit: int = Query(100, ge=10, le=500),
 ):
     df = app_state.data_provider.get_candles(limit=limit, timeframe=tf)
-    result = []
-    for _, row in df.iterrows():
-        result.append(CandleSchema(
-            timestamp=row["timestamp"],
-            open=row["open"],
-            high=row["high"],
-            low=row["low"],
-            close=row["close"],
-            volume=row["volume"],
-            datetime=str(row["datetime"]),
-        ))
-    return result
+    return [
+        CandleSchema(
+            timestamp=r["timestamp"],
+            open=r["open"],
+            high=r["high"],
+            low=r["low"],
+            close=r["close"],
+            volume=r["volume"],
+            datetime=str(r["datetime"]),
+        )
+        for r in df.to_dict("records")
+    ]
 
 
 # ── WebSocket ──────────────────────────────────────────────────────────── #
