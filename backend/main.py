@@ -43,6 +43,7 @@ from engine import (
     CapitalManager,
     CandleLibrary,
     LLMOrchestrator,
+    WarmUpPipeline, WarmUpReport,
 )
 from engine.signal_coordinator import TradeSignal as CoordSignal
 from engine.risk_manager import RiskConfig, MartingaleConfig
@@ -139,6 +140,14 @@ class AppState:
             timeframe=self.settings.timeframe,
         )
         self.llm: LLMOrchestrator = LLMOrchestrator()
+
+        # Warm-up pipeline — pre-warms ML models at startup so they don't
+        # need to wait for N real trades before becoming effective.
+        self.warmup_pipeline: WarmUpPipeline = WarmUpPipeline(
+            decision_engine=self.decision_engine,
+            wave_detector=self.wave_detector,
+        )
+        self.warmup_report: Optional[WarmUpReport] = None
 
         # Maps trade_id → {mode, wave_state, retrace_zone, initial_risk}
         # populated at open, consumed at close for DecisionEngine.record_outcome()
@@ -285,6 +294,11 @@ class AppState:
             float(getattr(self, "_base_min_score", 0.25))
         )
         self.coordinator.set_execute_callback(self._on_signal_execute)
+        # Keep warmup_pipeline pointing to the (potentially new) wave_detector
+        self.warmup_pipeline = WarmUpPipeline(
+            decision_engine=self.decision_engine,
+            wave_detector=self.wave_detector,
+        )
 
     async def _on_signal_execute(self, signal: CoordSignal) -> None:
         """Called by coordinator when a signal is approved for execution."""
@@ -372,6 +386,24 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
     app_state.rebuild_components()
+
+    # ── ML Warm-up: pre-train models with synthetic data before live trading ─ #
+    # This eliminates the cold-start period where models have no data to learn
+    # from. Runs synchronously (fast — < 2 seconds) before robot starts.
+    try:
+        app_state.warmup_report = app_state.warmup_pipeline.run()
+        logger.info(
+            "WarmUp: done — lstm=%d, outcomes=%d, ensemble=%d, "
+            "lstm_ready=%s, ensemble_ready=%s",
+            app_state.warmup_report.lstm_samples_injected,
+            app_state.warmup_report.outcome_samples_injected,
+            app_state.warmup_report.ensemble_samples_injected,
+            app_state.warmup_report.lstm_ready,
+            app_state.warmup_report.ensemble_ready,
+        )
+    except Exception as _wu_exc:
+        logger.warning("WarmUp failed (non-fatal): %s", _wu_exc)
+    # ──────────────────────────────────────────────────────────────────────── #
 
     # ── AUTO-START: Robot tự vận hành ngay khi khởi động ──────────────── #
     # Hệ thống tự quyết định và bắt đầu trading ngay khi server khởi động.
@@ -1415,6 +1447,57 @@ async def get_broker_status():
 @app.get("/health")
 async def health():
     return {"status": "ok", "timestamp": time.time()}
+
+
+# ── Warm-up API ────────────────────────────────────────────────────────── #
+
+@app.get("/api/warmup/status")
+async def warmup_status():
+    """
+    Trả về kết quả lần warm-up gần nhất.
+    lstm_ready / ensemble_ready / win_classifier_ready = True nghĩa là model
+    đã sẵn sàng hoạt động (đã qua ngưỡng cold-start).
+    """
+    report = app_state.warmup_report
+    if report is None:
+        return {"status": "not_run", "message": "Warm-up chưa được chạy"}
+    return {"status": "ok", **report.to_dict()}
+
+
+@app.post("/api/warmup/run")
+async def warmup_run(
+    lstm_samples: int = 25,
+    outcome_samples: int = 10,
+    label_noise: float = 0.05,
+):
+    """
+    Chạy lại warm-up pipeline thủ công.
+
+    Hữu ích khi:
+    - Thay đổi symbol/timeframe và cần reset model
+    - Model bị confused sau quá nhiều lệnh thua liên tiếp
+    - Muốn boost lại learning speed
+
+    Parameters
+    ----------
+    lstm_samples    : số lượng candle sequence mỗi wave state (default 25)
+    outcome_samples : số lượng trade outcome mỗi (mode, wave_state) (default 10)
+    label_noise     : xác suất flip label để tránh overfitting (default 0.05)
+    """
+    try:
+        pipeline = WarmUpPipeline(
+            decision_engine=app_state.decision_engine,
+            wave_detector=app_state.wave_detector,
+            lstm_samples=lstm_samples,
+            outcome_samples=outcome_samples,
+            label_noise=label_noise,
+        )
+        report = pipeline.run()
+        app_state.warmup_report  = report
+        app_state.warmup_pipeline = pipeline
+        return {"status": "ok", **report.to_dict()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 if __name__ == "__main__":

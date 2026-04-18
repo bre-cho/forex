@@ -17,6 +17,12 @@ from .decision_engine import DecisionEngine, DecisionContext, DecisionAction, Ma
 from .capital_manager import CapitalManager, CapitalProfileParams
 from .candle_library import CandleLibrary
 from .llm_orchestrator import LLMOrchestrator
+from .synthetic_engine import (
+    SyntheticCandleGenerator,
+    SyntheticOutcomeGenerator,
+    WarmUpPipeline,
+    WarmUpReport,
+)
 
 __all__ = [
     "WaveDetector", "WaveState",
@@ -36,4 +42,6 @@ __all__ = [
     "CapitalManager", "CapitalProfileParams",
     "CandleLibrary",
     "LLMOrchestrator",
+    "SyntheticCandleGenerator", "SyntheticOutcomeGenerator",
+    "WarmUpPipeline", "WarmUpReport",
 ]
