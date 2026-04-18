@@ -128,6 +128,8 @@ class DirectiveType(str, Enum):
     SUSPEND   = "SUSPEND"    # zero allocation, skip in next cycle
     KILL      = "KILL"       # zero allocation + hard lot_scale cap
     MAINTAIN  = "MAINTAIN"   # no change
+    UPGRADE   = "UPGRADE"    # high-confidence but under-utilised — run with more aggressive params
+    MERGE     = "MERGE"      # advisory only: cluster redundant, recommend merging into stronger peer
 
 
 # ── SovereignPolicy ───────────────────────────────────────────────────────── #
@@ -370,6 +372,49 @@ class NetworkObjectiveTree:
         }
 
 
+# ── NetworkDominanceScore ─────────────────────────────────────────────────── #
+
+@dataclass
+class NetworkDominanceScore:
+    """
+    Measures the total network dominance of the engine ecosystem.
+
+    The goal is max total network dominance — not local per-cluster wins.
+    Manages the cluster portfolio like an attention investment fund.
+
+    Fields
+    ------
+    raw_dominance          : Σ(sv_i × α_i) — weighted strategic value
+    risk_adjusted_dominance: raw × (1 − portfolio_risk) — penalty for aggregate risk
+    portfolio_risk         : Σ(risk_penalty_i × α_i) — weighted portfolio risk
+    portfolio_efficiency   : raw_dominance / max_possible (0=waste, 1=optimal)
+    concentration_hhi      : Herfindahl index of attention dist (0=diverse, 1=concentrated)
+    n_active_clusters      : number of ACTIVE clusters contributing
+    delta_vs_previous      : change vs previous cycle (None if first cycle)
+    trajectory             : "IMPROVING" | "STABLE" | "DECLINING"
+    """
+    raw_dominance:           float
+    risk_adjusted_dominance: float
+    portfolio_risk:          float
+    portfolio_efficiency:    float
+    concentration_hhi:       float
+    n_active_clusters:       int
+    delta_vs_previous:       Optional[float]
+    trajectory:              str  # "IMPROVING" | "STABLE" | "DECLINING"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "raw_dominance":            round(self.raw_dominance, 4),
+            "risk_adjusted_dominance":  round(self.risk_adjusted_dominance, 4),
+            "portfolio_risk":           round(self.portfolio_risk, 4),
+            "portfolio_efficiency":     round(self.portfolio_efficiency, 4),
+            "concentration_hhi":        round(self.concentration_hhi, 4),
+            "n_active_clusters":        self.n_active_clusters,
+            "delta_vs_previous":        round(self.delta_vs_previous, 4) if self.delta_vs_previous is not None else None,
+            "trajectory":               self.trajectory,
+        }
+
+
 # ── SovereignOversightResult ─────────────────────────────────────────────── #
 
 @dataclass
@@ -385,6 +430,7 @@ class SovereignOversightResult:
     resource_allocation: Dict[cluster_id → attention_budget]
     sovereign_policy   : SovereignPolicy used
     objective_tree     : NetworkObjectiveTree snapshot
+    network_dominance  : NetworkDominanceScore — portfolio-level dominance metrics
     governance_insights: List[str] human-readable analysis
     audit_trail        : List[AuditEntry] (cumulative across cycles)
     duration_secs      : wall-clock time for this cycle
@@ -397,6 +443,7 @@ class SovereignOversightResult:
     resource_allocation: Dict[str, float]
     sovereign_policy:    SovereignPolicy
     objective_tree:      NetworkObjectiveTree
+    network_dominance:   NetworkDominanceScore
     governance_insights: List[str]
     audit_trail:         List[AuditEntry]
     duration_secs:       float
@@ -411,6 +458,7 @@ class SovereignOversightResult:
             "resource_allocation":  {k: round(v, 4) for k, v in self.resource_allocation.items()},
             "sovereign_policy":     self.sovereign_policy.to_dict(),
             "objective_tree":       self.objective_tree.to_dict(),
+            "network_dominance":    self.network_dominance.to_dict(),
             "governance_insights":  self.governance_insights,
             "audit_trail":          [a.to_dict() for a in self.audit_trail],
             "duration_secs":        round(self.duration_secs, 3),
@@ -752,76 +800,170 @@ def _detect_objective_level(app_state: Any, policy: SovereignPolicy) -> Objectiv
     return policy.objective_level
 
 
-# ── Internal: Resource Allocator ─────────────────────────────────────────── #
+# ── Internal: Attention Portfolio Optimizer ───────────────────────────────── #
+
+# Risk-aversion parameter λ per objective level.
+# Higher λ → heavier penalty on risky clusters in portfolio allocation.
+_LAMBDA_BY_OBJECTIVE: Dict[str, float] = {
+    ObjectiveLevel.SURVIVAL.value:  5.0,
+    ObjectiveLevel.STABILITY.value: 1.5,
+    ObjectiveLevel.GROWTH.value:    0.5,
+    ObjectiveLevel.DOMINANCE.value: 0.2,
+}
+
 
 def _allocate_resources(
     states: Dict[str, ClusterState],
     policy: SovereignPolicy,
 ) -> Dict[str, float]:
     """
-    Compute attention budget for each cluster in [0, 1].
+    Attention Portfolio Optimizer — maximizes network dominance.
 
-    Algorithm:
-    1. Start from strategic_value.
-    2. Apply objective-level modifier:
-       SURVIVAL  → only ACTIVE clusters with sv > 0.5 get allocation
-       STABILITY → weight toward higher-confidence clusters
-       GROWTH    → weight toward higher-ROI clusters
-       DOMINANCE → weight toward top cluster heavily
-    3. Normalise to sum 1.0 if policy.attention_normalize.
-    4. Cap each cluster at max_attention_per_cluster.
+    Objective (attention portfolio problem)
+    ----------------------------------------
+    maximize:   D(α) = Σ_i sv_i × α_i  −  λ × Σ_i risk_i × α_i
+    subject to: Σ_i α_i = 1,  0 ≤ α_i ≤ max_attention_per_cluster
+
+    The unconstrained optimum of this LP is to concentrate all weight on
+    the cluster with the highest (sv_i − λ × risk_i) excess return.
+    With the cap constraint we solve greedily:
+
+    Algorithm
+    ---------
+    1. Compute excess_return_i = max(0, sv_i − λ × risk_i)
+    2. Normalize to obtain raw attention weights
+    3. Apply per-cluster cap (max_attention_per_cluster)
+    4. Redistribute overflow proportionally to under-cap clusters
+    5. Repeat until convergence (max 10 iterations)
+
+    This reduces to the original simple strategy when all excess returns
+    are equal, so it is backward-compatible for trivial cases.
+
+    Objective-level modifiers
+    --------------------------
+    SURVIVAL  : λ=5.0  → only the least-risky cluster survives
+    STABILITY : λ=1.5  → strongly penalises high-risk clusters
+    GROWTH    : λ=0.5  → moderate risk penalty (default)
+    DOMINANCE : λ=0.2  → near-pure sv weighting — reward dominance
     """
-    weights: Dict[str, float] = {}
+    lam = _LAMBDA_BY_OBJECTIVE.get(policy.objective_level.value, 0.5)
+    cap = policy.max_attention_per_cluster
 
+    # Compute excess return for each cluster
+    excess: Dict[str, float] = {}
     for cid, cs in states.items():
         if not cs.has_result:
-            weights[cid] = 0.0
+            excess[cid] = 0.0
             continue
+        er = cs.strategic_value - lam * cs.risk_penalty
+        excess[cid] = max(0.0, er)
 
-        sv = cs.strategic_value
-
-        if policy.objective_level == ObjectiveLevel.SURVIVAL:
-            w = sv if sv > 0.50 else 0.0
-        elif policy.objective_level == ObjectiveLevel.STABILITY:
-            w = sv * cs.confidence
-        elif policy.objective_level == ObjectiveLevel.DOMINANCE:
-            # Non-linear — double reward for top cluster
-            w = sv ** 0.5
-        else:  # GROWTH
-            w = sv * cs.roi_score
-
-        weights[cid] = max(0.0, w)
-
-    total = sum(weights.values())
-    if total < _EPS:
-        # All zero: give equal budget to any cluster with a result
+    total_excess = sum(excess.values())
+    if total_excess < _EPS:
+        # All clusters have zero or negative excess return
+        # Fall back to equal allocation among clusters with results
         n_active = sum(1 for cs in states.values() if cs.has_result)
         if n_active == 0:
             return {cid: 0.0 for cid in states}
-        equal = 1.0 / n_active
-        return {cid: (equal if states[cid].has_result else 0.0) for cid in states}
+        eq = 1.0 / n_active
+        return {cid: (eq if states[cid].has_result else 0.0) for cid in states}
 
-    if policy.attention_normalize:
-        weights = {k: v / total for k, v in weights.items()}
+    weights: Dict[str, float] = {k: v / total_excess for k, v in excess.items()}
 
-    # Cap per-cluster
-    cap = policy.max_attention_per_cluster
-    over_cap = {k: max(0.0, v - cap) for k, v in weights.items()}
-    total_over = sum(over_cap.values())
-    under_cap  = {k: min(v, cap)       for k, v in weights.items()}
-    n_under    = sum(1 for k, v in weights.items() if v < cap)
-
-    if total_over > _EPS and n_under > 0:
-        bonus = total_over / n_under
-        weights = {
-            k: min(cap, under_cap[k] + bonus) if weights[k] < cap else cap
-            for k in weights
+    # Iterative cap redistribution
+    for _ in range(10):
+        overflow   = sum(max(0.0, w - cap) for w in weights.values())
+        if overflow < _EPS:
+            break
+        weights    = {k: min(w, cap) for k, w in weights.items()}
+        under_keys = [k for k, w in weights.items() if w < cap - _EPS]
+        if not under_keys:
+            break
+        per_under  = overflow / len(under_keys)
+        weights    = {
+            k: min(cap, w + per_under) if k in under_keys else w
+            for k, w in weights.items()
         }
+
+    # Normalize to sum 1.0 if requested
+    if policy.attention_normalize:
+        total = sum(weights.values())
+        if total > _EPS:
+            weights = {k: v / total for k, v in weights.items()}
 
     return weights
 
 
-# ── Internal: Governance Director ────────────────────────────────────────── #
+# ── Internal: Network Dominance Score ────────────────────────────────────── #
+
+def _compute_network_dominance(
+    states:    Dict[str, ClusterState],
+    allocs:    Dict[str, float],
+    prev_raw:  Optional[float],
+) -> NetworkDominanceScore:
+    """
+    Compute total network dominance score for this cycle.
+
+    The portfolio is treated as an attention fund:
+      - raw_dominance = Σ(sv_i × α_i) across all clusters
+      - portfolio_risk = Σ(risk_i × α_i) weighted risk exposure
+      - risk_adjusted_dominance = raw × (1 − portfolio_risk)
+      - portfolio_efficiency = raw / max_possible (best-case if all attention
+                               went to the single highest-sv cluster)
+      - concentration_hhi = Herfindahl index Σ(α_i²) ∈ [1/N, 1]
+    """
+    active_states = [(cid, cs, allocs.get(cid, 0.0))
+                     for cid, cs in states.items()
+                     if cs.has_result and allocs.get(cid, 0.0) > _EPS]
+
+    if not active_states:
+        nd = NetworkDominanceScore(
+            raw_dominance=0.0,
+            risk_adjusted_dominance=0.0,
+            portfolio_risk=0.0,
+            portfolio_efficiency=0.0,
+            concentration_hhi=1.0,
+            n_active_clusters=0,
+            delta_vs_previous=None,
+            trajectory="STABLE",
+        )
+        return nd
+
+    raw       = sum(cs.strategic_value * alpha for _, cs, alpha in active_states)
+    port_risk = sum(cs.risk_penalty     * alpha for _, cs, alpha in active_states)
+    rad       = raw * (1.0 - port_risk)
+
+    # Efficiency: how close to the theoretical max (all attention on best cluster)
+    max_sv = max(cs.strategic_value for _, cs, _ in active_states)
+    efficiency = raw / max(max_sv, _EPS)
+
+    # Herfindahl concentration index
+    alpha_vals = [alpha for _, _, alpha in active_states]
+    hhi = sum(a ** 2 for a in alpha_vals)
+
+    # Trajectory vs previous cycle
+    delta: Optional[float] = None
+    trajectory = "STABLE"
+    if prev_raw is not None:
+        delta = round(raw - prev_raw, 6)
+        if delta > 0.01:
+            trajectory = "IMPROVING"
+        elif delta < -0.01:
+            trajectory = "DECLINING"
+
+    return NetworkDominanceScore(
+        raw_dominance=round(raw, 6),
+        risk_adjusted_dominance=round(rad, 6),
+        portfolio_risk=round(port_risk, 6),
+        portfolio_efficiency=round(efficiency, 6),
+        concentration_hhi=round(hhi, 6),
+        n_active_clusters=len(active_states),
+        delta_vs_previous=delta,
+        trajectory=trajectory,
+    )
+
+
+# ── Internal: Objective Level auto-detection ──────────────────────────────── #
 
 def _issue_directives(
     states:    Dict[str, ClusterState],
@@ -830,8 +972,34 @@ def _issue_directives(
 ) -> Dict[str, ClusterDirective]:
     """
     Issue a ClusterDirective for every cluster based on strategic value and policy.
+
+    Decision tree per cluster
+    -------------------------
+    1. No result              → SUSPEND
+    2. sv ≤ kill_threshold    → KILL
+    3. sv ≤ throttle_threshold→ THROTTLE
+    4. sv ≥ boost_threshold   → SCALE_UP
+    5. high confidence / low ROI gap → UPGRADE (under-utilised)
+    6. redundant pair detected → MERGE (advisory on weaker peer)
+    7. otherwise              → MAINTAIN
     """
     directives: Dict[str, ClusterDirective] = {}
+
+    # Pre-compute merge candidates: clusters with very similar sv and roi
+    active_ids = [cid for cid, cs in states.items() if cs.has_result]
+    merge_targets: Dict[str, str] = {}  # weaker_cid → stronger_cid
+    for i, cid_a in enumerate(active_ids):
+        for cid_b in active_ids[i + 1:]:
+            cs_a = states[cid_a]
+            cs_b = states[cid_b]
+            similarity = 1.0 - abs(cs_a.strategic_value - cs_b.strategic_value) \
+                             - abs(cs_a.roi_score       - cs_b.roi_score) / 2.0
+            if similarity > 0.85:
+                # The weaker one (lower sv) is the merge candidate
+                if cs_a.strategic_value <= cs_b.strategic_value:
+                    merge_targets[cid_a] = cid_b
+                else:
+                    merge_targets[cid_b] = cid_a
 
     for cid, cs in states.items():
         sv       = cs.strategic_value
@@ -903,6 +1071,47 @@ def _issue_directives(
                 evidence_metrics=evidence,
                 confidence=min(1.0, (sv - policy.boost_threshold + 0.10)),
             )
+        # MERGE: cluster is redundant with a higher-value peer (advisory)
+        elif cid in merge_targets:
+            stronger = merge_targets[cid]
+            directives[cid] = ClusterDirective(
+                cluster_id=cid,
+                directive=DirectiveType.MERGE,
+                new_attention=att * 0.30,  # reduce attention but don't kill yet
+                lot_scale_cap=cs.lot_scale,  # no lot change
+                rationale=(
+                    f"{cid}: strategic_value={sv:.3f} is highly similar to [{stronger}] "
+                    f"(sv={states[stronger].strategic_value:.3f}). "
+                    "ADVISORY: consider merging this cluster's learned weights into "
+                    f"[{stronger}] and consolidating attention budget."
+                ),
+                evidence_metrics={
+                    **evidence,
+                    "merge_target":          stronger,
+                    "target_sv":             round(states[stronger].strategic_value, 4),
+                    "similarity_gap":        round(abs(sv - states[stronger].strategic_value), 4),
+                },
+                confidence=0.65,
+            )
+        # UPGRADE: high confidence but under-utilised ROI
+        elif cs.confidence > 0.60 and cs.roi_score < 0.40 and sv > policy.kill_threshold:
+            sv_gap = cs.confidence - cs.roi_score
+            directives[cid] = ClusterDirective(
+                cluster_id=cid,
+                directive=DirectiveType.UPGRADE,
+                new_attention=min(policy.max_attention_per_cluster, att * 1.10),
+                lot_scale_cap=min(policy.max_lot_override, cs.lot_scale * 1.15),
+                rationale=(
+                    f"{cid}: confidence={cs.confidence:.3f} >> roi_score={cs.roi_score:.3f} "
+                    f"(gap={sv_gap:.3f}). Cluster is reliable but under-utilised. "
+                    "UPGRADE: run with more aggressive parameters to unlock latent ROI."
+                ),
+                evidence_metrics={
+                    **evidence,
+                    "confidence_roi_gap": round(sv_gap, 4),
+                },
+                confidence=min(1.0, 0.50 + sv_gap),
+            )
         # MAINTAIN: everything nominal
         else:
             directives[cid] = ClusterDirective(
@@ -929,8 +1138,20 @@ def _build_insights(
     allocs:     Dict[str, float],
     obj_tree:   NetworkObjectiveTree,
     policy:     SovereignPolicy,
+    dominance:  "NetworkDominanceScore",
 ) -> List[str]:
     insights: List[str] = []
+
+    # Network dominance headline
+    traj_icon = {"IMPROVING": "📈", "DECLINING": "📉", "STABLE": "➡️"}.get(dominance.trajectory, "➡️")
+    delta_str = (f" Δ{dominance.delta_vs_previous:+.4f}" if dominance.delta_vs_previous is not None else "")
+    insights.append(
+        f"🌐 Network dominance: raw={dominance.raw_dominance:.4f} "
+        f"risk-adj={dominance.risk_adjusted_dominance:.4f} "
+        f"efficiency={dominance.portfolio_efficiency:.4f} "
+        f"HHI={dominance.concentration_hhi:.3f} "
+        f"{traj_icon} {dominance.trajectory}{delta_str}"
+    )
 
     # Objective level
     insights.append(
@@ -953,6 +1174,8 @@ def _build_insights(
     throttles = [cid for cid, d in directives.items() if d.directive == DirectiveType.THROTTLE]
     scales    = [cid for cid, d in directives.items() if d.directive == DirectiveType.SCALE_UP]
     maintains = [cid for cid, d in directives.items() if d.directive == DirectiveType.MAINTAIN]
+    upgrades  = [cid for cid, d in directives.items() if d.directive == DirectiveType.UPGRADE]
+    merges    = [cid for cid, d in directives.items() if d.directive == DirectiveType.MERGE]
 
     if kills:
         insights.append(f"💀 KILL directives: {', '.join(kills)} — below kill threshold {policy.kill_threshold:.2f}")
@@ -960,6 +1183,18 @@ def _build_insights(
         insights.append(f"🔽 THROTTLE directives: {', '.join(throttles)} — allocation halved")
     if scales:
         insights.append(f"🚀 SCALE_UP directives: {', '.join(scales)} — high strategic value")
+    if upgrades:
+        insights.append(
+            f"⬆️  UPGRADE directives: {', '.join(upgrades)} — high confidence but under-utilised ROI; "
+            "run with more aggressive parameters"
+        )
+    if merges:
+        for cid in merges:
+            target = directives[cid].evidence_metrics.get("merge_target", "?")
+            insights.append(
+                f"🔀 MERGE advisory: [{cid}] → [{target}] — clusters are redundant; "
+                "consider consolidating learned weights and attention budget"
+            )
     if maintains:
         insights.append(f"✅ MAINTAIN: {', '.join(maintains)} — nominal performance")
 
@@ -970,6 +1205,13 @@ def _build_insights(
         insights.append(
             f"🏆 Top cluster: [{best_cid}] sv={best_cs.strategic_value:.3f} "
             f"roi={best_cs.roi_score:.3f} attention={allocs.get(best_cid, 0.0):.3f}"
+        )
+
+    # Portfolio concentration warning
+    if dominance.concentration_hhi > 0.70:
+        insights.append(
+            f"⚠️ High attention concentration (HHI={dominance.concentration_hhi:.3f}) — "
+            "portfolio is over-concentrated in one cluster. Consider raising max_attention_per_cluster cap."
         )
 
     # Guardrail notice
@@ -1013,6 +1255,7 @@ class SovereignOversightEngine:
         self._audit_trail: List[AuditEntry] = []
         self._last_result: Optional[SovereignOversightResult] = None
         self._cycle_counter: int = 0
+        self._prev_raw_dominance: Optional[float] = None  # for trajectory tracking
 
     @property
     def last_result(self) -> Optional[SovereignOversightResult]:
@@ -1090,7 +1333,11 @@ class SovereignOversightEngine:
                     states[cid].lifecycle = ClusterLifecycle.ACTIVE
             states[cid].attention_budget = d.new_attention
 
-        # Phase 5 — Build objective tree snapshot
+        # Phase 5 — Compute network dominance score
+        prev_raw = self._prev_raw_dominance
+        network_dominance = _compute_network_dominance(states, allocs, prev_raw)
+
+        # Phase 5b — Build objective tree snapshot
         healthy   = sum(1 for cs in states.values() if cs.lifecycle == ClusterLifecycle.ACTIVE)
         sv_values = [cs.strategic_value for cs in states.values() if cs.has_result]
         stability  = float(sum(cs.confidence for cs in states.values() if cs.has_result)
@@ -1110,7 +1357,7 @@ class SovereignOversightEngine:
             total_clusters     = len(states),
         )
 
-        insights = _build_insights(states, directives, allocs, obj_tree, policy_effective)
+        insights = _build_insights(states, directives, allocs, obj_tree, policy_effective, network_dominance)
 
         # Phase 6 — Audit trail
         ts = time.time()
@@ -1139,11 +1386,13 @@ class SovereignOversightEngine:
             resource_allocation = allocs,
             sovereign_policy    = policy_effective,
             objective_tree      = obj_tree,
+            network_dominance   = network_dominance,
             governance_insights = insights,
             audit_trail         = list(self._audit_trail),
             duration_secs       = time.time() - t0,
         )
         self._last_result = result
+        self._prev_raw_dominance = network_dominance.raw_dominance
 
         # Phase 7 — FULL_AUTO: apply immediately
         if policy_effective.mode == SovereignMode.FULL_AUTO:
@@ -1153,14 +1402,17 @@ class SovereignOversightEngine:
 
         logger.info(
             "SovereignOversightEngine.run: cycle=%s objective=%s healthy=%d/%d "
-            "kills=%d throttles=%d scales=%d dur=%.2fs",
+            "dominance=%.4f(%s) kills=%d throttles=%d scales=%d upgrades=%d dur=%.2fs",
             cycle_id,
             effective_obj.value,
             healthy,
             len(states),
+            network_dominance.raw_dominance,
+            network_dominance.trajectory,
             sum(1 for d in directives.values() if d.directive == DirectiveType.KILL),
             sum(1 for d in directives.values() if d.directive == DirectiveType.THROTTLE),
             sum(1 for d in directives.values() if d.directive == DirectiveType.SCALE_UP),
+            sum(1 for d in directives.values() if d.directive == DirectiveType.UPGRADE),
             result.duration_secs,
         )
         return result

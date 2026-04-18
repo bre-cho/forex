@@ -50,7 +50,7 @@ from engine import (
     UtilityConfig, UtilityOptimizationEngine, UtilityOptimizationResult,
     EcosystemConfig, GameTheoryEngine, GameTheoryResult,
     SovereignPolicy, SovereignOversightEngine, SovereignOversightResult,
-    SovereignMode, ObjectiveLevel,
+    SovereignMode, ObjectiveLevel, NetworkDominanceScore,
 )
 from engine.signal_coordinator import TradeSignal as CoordSignal
 from engine.risk_manager import RiskConfig, MartingaleConfig
@@ -2568,6 +2568,88 @@ async def sovereign_apply():
         "objective_level":     result.objective_tree.active_level.value,
         "directives_applied":  {cid: d.directive.value for cid, d in result.directives.items()},
         "governance_insights": result.governance_insights,
+    }
+
+
+@app.get("/api/sovereign/dominance")
+async def sovereign_dominance():
+    """
+    Trả về Network Dominance Score — portfolio-level dominance metrics.
+
+    Mục tiêu cốt lõi: **max total network dominance, not local wins**.
+
+    Chỉ số này đo lường toàn bộ ecosystem như một quỹ đầu tư attention:
+
+    Metrics
+    -------
+    raw_dominance          : Σ(sv_i × α_i) — weighted strategic value toàn portfolio
+    risk_adjusted_dominance: raw × (1 − portfolio_risk) — sau khi trừ rủi ro
+    portfolio_risk         : Σ(risk_i × α_i) — rủi ro tổng hợp của portfolio
+    portfolio_efficiency   : raw / max_possible — 1.0 = toàn bộ attention vào cluster tốt nhất
+    concentration_hhi      : Herfindahl index ∈ [1/N, 1]
+                             • 0.20 = rải đều 5 clusters (đa dạng hoá tối đa)
+                             • 1.00 = tập trung 100% vào 1 cluster
+    n_active_clusters      : số cluster đang đóng góp vào dominance
+    delta_vs_previous      : thay đổi raw_dominance so với cycle trước
+    trajectory             : IMPROVING | STABLE | DECLINING
+
+    Portfolio Optimization Logic
+    ----------------------------
+    Attention được phân bổ theo bài toán LP:
+      maximize: Σ_i (sv_i − λ × risk_i) × α_i
+      subject to: Σ_i α_i = 1,  0 ≤ α_i ≤ max_attention_per_cluster
+
+    Với λ phụ thuộc vào objective level:
+      SURVIVAL  → λ=5.0 (chỉ giữ cluster ít rủi ro nhất)
+      STABILITY → λ=1.5 (giảm mạnh cluster rủi ro cao)
+      GROWTH    → λ=0.5 (cân bằng)
+      DOMINANCE → λ=0.2 (ưu tiên gần như toàn bộ vào sv)
+
+    Yêu cầu POST /api/sovereign/run trước.
+    """
+    result = app_state.sovereign_result
+    if result is None:
+        return {
+            "status": "not_run",
+            "message": "Chưa có kết quả sovereign. Hãy gọi POST /api/sovereign/run.",
+        }
+
+    nd = result.network_dominance
+    allocs = result.resource_allocation
+    cluster_contributions = {
+        cid: {
+            "strategic_value":   round(result.cluster_states[cid].strategic_value, 4),
+            "attention":         round(allocs.get(cid, 0.0), 4),
+            "dominance_contrib": round(
+                result.cluster_states[cid].strategic_value * allocs.get(cid, 0.0), 4
+            ),
+            "directive":         result.directives[cid].directive.value,
+            "lifecycle":         result.cluster_states[cid].lifecycle.value,
+        }
+        for cid in result.cluster_states
+    }
+
+    # Sort clusters by dominance contribution descending
+    ranked = sorted(
+        cluster_contributions.items(),
+        key=lambda x: x[1]["dominance_contrib"],
+        reverse=True,
+    )
+
+    return {
+        "status":                   "ok",
+        "cycle_id":                 result.cycle_id,
+        "network_dominance":        nd.to_dict(),
+        "objective_level":          result.objective_tree.active_level.value,
+        "cluster_contributions":    dict(ranked),
+        "portfolio_summary": {
+            "total_clusters":    result.objective_tree.total_clusters,
+            "active_clusters":   nd.n_active_clusters,
+            "portfolio_risk":    round(nd.portfolio_risk, 4),
+            "efficiency_pct":    round(nd.portfolio_efficiency * 100, 2),
+            "concentration_hhi": round(nd.concentration_hhi, 4),
+            "is_concentrated":   nd.concentration_hhi > 0.70,
+        },
     }
 
 

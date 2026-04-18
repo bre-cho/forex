@@ -65,6 +65,7 @@ from .sovereign_oversight_engine import (
     ClusterState,
     ClusterDirective,
     NetworkObjectiveTree,
+    NetworkDominanceScore,
     SovereignOversightResult,
     SovereignOversightEngine,
 )
@@ -98,5 +99,6 @@ __all__ = [
     "MarketImpactStats", "GameTheoryResult", "GameTheoryEngine",
     "SovereignMode", "ObjectiveLevel", "ClusterLifecycle", "DirectiveType",
     "SovereignPolicy", "ClusterState", "ClusterDirective",
-    "NetworkObjectiveTree", "SovereignOversightResult", "SovereignOversightEngine",
+    "NetworkObjectiveTree", "NetworkDominanceScore",
+    "SovereignOversightResult", "SovereignOversightEngine",
 ]
