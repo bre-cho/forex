@@ -43,8 +43,10 @@ import logging
 import time
 import uuid
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
+import threading
 
 import numpy as np
 
@@ -222,6 +224,13 @@ class WinClassifier:
         self._records_since_retrain: int = 0
         self._total_fitted: int = 0
 
+        # Thread-safety for background training (item H)
+        self._model_lock = threading.Lock()
+        self._training_in_progress = False
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="winclf_train"
+        )
+
     # ── Public API ──────────────────────────────────────────────────────── #
 
     @property
@@ -233,78 +242,116 @@ class WinClassifier:
         self._records_since_retrain += 1
 
     def needs_retrain(self) -> bool:
-        return self._records_since_retrain >= self._RETRAIN_EVERY
+        return (
+            self._records_since_retrain >= self._RETRAIN_EVERY
+            and not self._training_in_progress
+        )
 
-    def fit(self, outcomes: List["TradeOutcome"]) -> None:
-        """(Re)train on all outcomes that carry a fingerprint."""
+    def fit_bg(self, outcomes: List["TradeOutcome"]) -> None:
+        """
+        Schedule a background retrain (non-blocking).
+        Replaces the former synchronous ``fit()`` call in PerformanceTracker.record().
+        """
         labeled = [o for o in outcomes if o.fingerprint is not None]
         if len(labeled) < self._MIN_SAMPLES:
             return
-
-        X = np.array(
-            [self._encode(o.fingerprint) for o in labeled], dtype=np.float32
-        )
-        y = np.array([1 if o.pnl > 0 else 0 for o in labeled], dtype=np.int32)
-
-        n_pos = int(y.sum())
-        n_neg = len(y) - n_pos
-        scale_pos = (n_neg / n_pos) if n_pos > 0 else 1.0
-
-        # ── XGBoost (primary) ──────────────────────────────────────────── #
-        try:
-            import xgboost as xgb  # noqa: PLC0415
-
-            model = xgb.XGBClassifier(
-                n_estimators=50,
-                max_depth=4,
-                learning_rate=0.1,
-                scale_pos_weight=scale_pos,
-                eval_metric="logloss",
-                verbosity=0,
-            )
-            model.fit(X, y)
-            self._xgb_model = model
-            self._is_ready  = True
-            logger.info(
-                "WinClassifier: XGBoost trained on %d samples (pos=%d neg=%d)",
-                len(labeled), n_pos, n_neg,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("WinClassifier: XGBoost unavailable (%s)", exc)
-            self._xgb_model = None
-
-        # ── LogisticRegression (fallback) ──────────────────────────────── #
-        try:
-            from sklearn.linear_model import LogisticRegression  # noqa: PLC0415
-
-            lr = LogisticRegression(max_iter=300, class_weight="balanced", solver="lbfgs")
-            lr.fit(X, y)
-            self._lr_model = lr
-            if not self._is_ready:
-                self._is_ready = True
-                logger.info(
-                    "WinClassifier: LogisticRegression trained on %d samples", len(labeled)
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("WinClassifier: LogisticRegression unavailable (%s)", exc)
-
-        self._total_fitted          = len(labeled)
+        if self._training_in_progress:
+            return
+        self._training_in_progress = True
         self._records_since_retrain = 0
+        self._executor.submit(self._train_bg, labeled)
+
+    def fit(self, outcomes: List["TradeOutcome"]) -> None:
+        """Synchronous training kept for warm-up usage."""
+        labeled = [o for o in outcomes if o.fingerprint is not None]
+        if len(labeled) < self._MIN_SAMPLES:
+            return
+        self._train_bg(labeled)
+
+    # ── Internal helpers ────────────────────────────────────────────────── #
+
+    def _train_bg(self, labeled: List["TradeOutcome"]) -> None:
+        """Background training task — updates models atomically when done."""
+        try:
+            X = np.array(
+                [self._encode(o.fingerprint) for o in labeled], dtype=np.float32
+            )
+            y = np.array([1 if o.pnl > 0 else 0 for o in labeled], dtype=np.int32)
+
+            n_pos = int(y.sum())
+            n_neg = len(y) - n_pos
+            scale_pos = (n_neg / n_pos) if n_pos > 0 else 1.0
+
+            xgb_model = None
+            lr_model  = None
+
+            # ── XGBoost (primary) ──────────────────────────────────────── #
+            try:
+                import xgboost as xgb  # noqa: PLC0415
+
+                model = xgb.XGBClassifier(
+                    n_estimators=50,
+                    max_depth=4,
+                    learning_rate=0.1,
+                    scale_pos_weight=scale_pos,
+                    eval_metric="logloss",
+                    verbosity=0,
+                )
+                model.fit(X, y)
+                xgb_model = model
+                logger.info(
+                    "WinClassifier: XGBoost trained on %d samples (pos=%d neg=%d)",
+                    len(labeled), n_pos, n_neg,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("WinClassifier: XGBoost unavailable (%s)", exc)
+
+            # ── LogisticRegression (fallback) ──────────────────────────── #
+            try:
+                from sklearn.linear_model import LogisticRegression  # noqa: PLC0415
+
+                lr = LogisticRegression(max_iter=300, class_weight="balanced", solver="lbfgs")
+                lr.fit(X, y)
+                lr_model = lr
+                if xgb_model is None:
+                    logger.info(
+                        "WinClassifier: LogisticRegression trained on %d samples", len(labeled)
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("WinClassifier: LogisticRegression unavailable (%s)", exc)
+
+            # Atomically swap in new models
+            with self._model_lock:
+                if xgb_model is not None:
+                    self._xgb_model = xgb_model
+                if lr_model is not None:
+                    self._lr_model = lr_model
+                if xgb_model is not None or lr_model is not None:
+                    self._is_ready      = True
+                    self._total_fitted  = len(labeled)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("WinClassifier._train_bg failed: %s", exc)
+        finally:
+            self._training_in_progress = False
 
     def predict_proba(self, fp: "TradeFingerprint") -> Optional[float]:
         """Return blended P(win) for *fp*, or ``None`` if model not ready."""
-        if not self._is_ready:
+        with self._model_lock:
+            is_ready = self._is_ready
+            xgb_model = self._xgb_model
+            lr_model  = self._lr_model
+        if not is_ready:
             return None
         vec = np.array([self._encode(fp)], dtype=np.float32)
         probs: List[float] = []
         try:
-            if self._xgb_model is not None:
-                probs.append(float(self._xgb_model.predict_proba(vec)[0, 1]))
+            if xgb_model is not None:
+                probs.append(float(xgb_model.predict_proba(vec)[0, 1]))
         except Exception as exc:  # noqa: BLE001
             logger.debug("WinClassifier.xgb predict failed: %s", exc)
         try:
-            if self._lr_model is not None:
-                probs.append(float(self._lr_model.predict_proba(vec)[0, 1]))
+            if lr_model is not None:
+                probs.append(float(lr_model.predict_proba(vec)[0, 1]))
         except Exception as exc:  # noqa: BLE001
             logger.debug("WinClassifier.lr predict failed: %s", exc)
         if not probs:
@@ -367,10 +414,10 @@ class PerformanceTracker:
                 self._pattern_memory[fp] = PatternRecord()
             self._pattern_memory[fp].record(outcome.pnl)
 
-        # ── ML: incremental retrain trigger ──────────────────────────── #
+        # ── ML: incremental retrain trigger (background, non-blocking) ── #
         self._classifier.on_new_record()
         if self._classifier.needs_retrain():
-            self._classifier.fit(list(self._global))
+            self._classifier.fit_bg(list(self._global))
 
         logger.debug(
             "PerformanceTracker.record: %s/%s pnl=%.2f rr=%.2f (total=%d)",

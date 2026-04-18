@@ -107,7 +107,7 @@ def save_settings(db: Session, settings_dict: Dict[str, Any]) -> None:
 
 # ── Trade helpers ──────────────────────────────────────────────────────── #
 
-def save_trade(db: Session, trade_dict: Dict[str, Any]) -> None:
+def save_trade(db: Session, trade_dict: Dict[str, Any], commit: bool = True) -> None:
     existing = db.query(TradeModel).filter_by(trade_id=trade_dict["trade_id"]).first()
     if existing:
         for k, v in trade_dict.items():
@@ -117,7 +117,8 @@ def save_trade(db: Session, trade_dict: Dict[str, Any]) -> None:
         row = TradeModel(**{k: v for k, v in trade_dict.items() if k != "meta"})
         row.meta_json = json.dumps(trade_dict.get("meta", {}))
         db.add(row)
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def get_all_trades(db: Session, page: int = 1, page_size: int = 50) -> List[Dict[str, Any]]:

@@ -374,6 +374,12 @@ class TradeManager:
         self._trades: Dict[str, TradeRecord] = {}
         self._closed_trades: List[TradeRecord] = []
 
+        # Running aggregates — updated in _close_trade() for O(1) stats queries
+        self._total_pnl_sum: float = 0.0
+        self._wins: int = 0
+        self._gross_win: float = 0.0
+        self._gross_loss: float = 0.0
+
     def open_trade(
         self,
         symbol: str,
@@ -491,20 +497,18 @@ class TradeManager:
         return self._trades.get(trade_id)
 
     def total_pnl(self) -> float:
-        return round(sum(t.pnl for t in self._closed_trades), 2)
+        return self._total_pnl_sum
 
     def win_rate(self) -> float:
-        if not self._closed_trades:
+        total = len(self._closed_trades)
+        if total == 0:
             return 0.0
-        wins = sum(1 for t in self._closed_trades if t.pnl > 0)
-        return round(wins / len(self._closed_trades) * 100, 1)
+        return round(self._wins / total * 100, 1)
 
     def profit_factor(self) -> float:
-        gross_win = sum(t.pnl for t in self._closed_trades if t.pnl > 0)
-        gross_loss = abs(sum(t.pnl for t in self._closed_trades if t.pnl < 0))
-        if gross_loss == 0:
-            return 0.0 if gross_win == 0 else 999.9
-        return round(gross_win / gross_loss, 2)
+        if self._gross_loss == 0:
+            return 0.0 if self._gross_win == 0 else 999.9
+        return round(self._gross_win / self._gross_loss, 2)
 
     # ------------------------------------------------------------------ #
     #  Internals                                                           #
@@ -555,6 +559,15 @@ class TradeManager:
         self._closed_trades.append(trade)
         if trade.trade_id in self._trades:
             del self._trades[trade.trade_id]
+
+        # Update running aggregates
+        self._total_pnl_sum = round(self._total_pnl_sum + trade.pnl, 2)
+        if trade.pnl > 0:
+            self._wins += 1
+            self._gross_win += trade.pnl
+        elif trade.pnl < 0:
+            self._gross_loss += abs(trade.pnl)
+
         logger.info(
             "Trade closed %s @%.5f | PnL=%.2f | Reason=%s",
             trade.trade_id, price, trade.pnl, reason

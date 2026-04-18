@@ -11,8 +11,10 @@ Logic:
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
-from dataclasses import dataclass, field
+import threading
+from dataclasses import dataclass, field, replace as dc_replace
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
@@ -98,6 +100,13 @@ class LSTMWaveClassifier:
         self._buffer: List[Tuple[np.ndarray, int]] = []  # (seq, label)
         self._records_since_retrain: int = 0
 
+        # Thread-safety: protects _model and _is_ready during background training
+        self._model_lock = threading.Lock()
+        self._training_in_progress = False
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="lstm_train"
+        )
+
         try:
             import torch as _torch  # noqa: F401
             self._torch_available = True
@@ -125,21 +134,31 @@ class LSTMWaveClassifier:
         self._records_since_retrain += 1
 
     def fit_if_ready(self) -> None:
-        """Train LSTM when buffer has enough samples and enough new arrivals."""
+        """Schedule background training when buffer has enough samples and new arrivals."""
         if not self._torch_available:
             return
         if len(self._buffer) < self._MIN_SAMPLES:
             return
         if self._records_since_retrain < self._RETRAIN_EVERY and self._is_ready:
             return
-        self._train()
+        if self._training_in_progress:
+            return  # previous training still running — skip
+
+        # Snapshot buffer for the background worker; reset counter immediately
+        buffer_snapshot = list(self._buffer)
+        self._records_since_retrain = 0
+        self._training_in_progress = True
+        self._executor.submit(self._train_bg, buffer_snapshot)
 
     def predict_proba(self, df: pd.DataFrame) -> Optional[Dict[str, float]]:
         """
         Return ``{'BULL': p, 'BEAR': p, 'SIDEWAYS': p}`` or ``None``.
         The three probabilities sum to 1.0.
         """
-        if not self._is_ready or self._model is None:
+        with self._model_lock:
+            model = self._model
+            is_ready = self._is_ready
+        if not is_ready or model is None:
             return None
         seq = self._extract_sequence(df)
         if seq is None:
@@ -149,9 +168,9 @@ class LSTMWaveClassifier:
             import torch.nn.functional as F  # noqa: PLC0415
 
             x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
-            self._model.eval()  # type: ignore[union-attr]
+            model.eval()  # type: ignore[union-attr]
             with torch.no_grad():
-                logits = self._model(x)  # type: ignore[operator]
+                logits = model(x)  # type: ignore[operator]
                 probs  = F.softmax(logits, dim=-1).squeeze(0).numpy()
             return {
                 "BULL":     round(float(probs[0]), 4),
@@ -174,49 +193,55 @@ class LSTMWaveClassifier:
             return None
         return (closes - mu) / sigma
 
-    def _train(self) -> None:
-        """Train a small single-layer LSTM on the current buffer."""
-        import torch  # noqa: PLC0415
-        import torch.nn as nn  # noqa: PLC0415
+    def _train_bg(self, buffer_snapshot: List[Tuple[np.ndarray, int]]) -> None:
+        """Background training task — runs in thread pool, updates model atomically."""
+        try:
+            import torch  # noqa: PLC0415
+            import torch.nn as nn  # noqa: PLC0415
 
-        class _LSTMNet(nn.Module):
-            def __init__(self, hidden: int = 32) -> None:
-                super().__init__()
-                self.lstm = nn.LSTM(1, hidden, batch_first=True)
-                self.fc   = nn.Linear(hidden, 3)
+            class _LSTMNet(nn.Module):
+                def __init__(self, hidden: int = 32) -> None:
+                    super().__init__()
+                    self.lstm = nn.LSTM(1, hidden, batch_first=True)
+                    self.fc   = nn.Linear(hidden, 3)
 
-            def forward(self, x: "torch.Tensor") -> "torch.Tensor":
-                _, (hn, _) = self.lstm(x)
-                return self.fc(hn.squeeze(0))
+                def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+                    _, (hn, _) = self.lstm(x)
+                    return self.fc(hn.squeeze(0))
 
-        seqs   = torch.tensor(
-            np.array([s for s, _ in self._buffer]), dtype=torch.float32
-        ).unsqueeze(-1)  # (N, SEQ_LEN, 1)
-        labels = torch.tensor(
-            [lb for _, lb in self._buffer], dtype=torch.long
-        )
+            seqs   = torch.tensor(
+                np.array([s for s, _ in buffer_snapshot]), dtype=torch.float32
+            ).unsqueeze(-1)  # (N, SEQ_LEN, 1)
+            labels = torch.tensor(
+                [lb for _, lb in buffer_snapshot], dtype=torch.long
+            )
 
-        model   = _LSTMNet(hidden=self._HIDDEN)
-        opt     = torch.optim.Adam(model.parameters(), lr=1e-3)
-        loss_fn = nn.CrossEntropyLoss()
+            model   = _LSTMNet(hidden=self._HIDDEN)
+            opt     = torch.optim.Adam(model.parameters(), lr=1e-3)
+            loss_fn = nn.CrossEntropyLoss()
 
-        model.train()
-        last_loss = 0.0
-        for _ in range(self._EPOCHS):
-            opt.zero_grad()
-            out      = model(seqs)
-            loss     = loss_fn(out, labels)
-            loss.backward()
-            opt.step()
-            last_loss = float(loss)
+            model.train()
+            last_loss = 0.0
+            for _ in range(self._EPOCHS):
+                opt.zero_grad()
+                out      = model(seqs)
+                loss     = loss_fn(out, labels)
+                loss.backward()
+                opt.step()
+                last_loss = float(loss)
 
-        self._model    = model
-        self._is_ready = True
-        self._records_since_retrain = 0
-        logger.info(
-            "LSTMWaveClassifier: trained on %d samples (loss=%.4f)",
-            len(self._buffer), last_loss,
-        )
+            # Atomically swap in the new model
+            with self._model_lock:
+                self._model    = model
+                self._is_ready = True
+            logger.info(
+                "LSTMWaveClassifier: trained on %d samples (loss=%.4f)",
+                len(buffer_snapshot), last_loss,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("LSTMWaveClassifier._train_bg failed: %s", exc)
+        finally:
+            self._training_in_progress = False
 
 
 class WaveDetector:
@@ -256,6 +281,16 @@ class WaveDetector:
         self._last_analysis: Optional[WaveAnalysis] = None
         self._lstm = LSTMWaveClassifier()
 
+        # ── Incremental EMA/ATR cache (item D) ─────────────────────────── #
+        # _ema_last[period] = (last_value, prev_value)
+        self._ema_last: Dict[int, Tuple[float, float]] = {}
+        # ATR: deque of last atr_period TR values for rolling-mean incremental
+        self._atr_tr_buf: List[float] = []
+        self._atr_prev_close: float = float("nan")
+        self._atr_cached: float = 0.0
+        # Track last close to detect new bars
+        self._last_close: float = float("nan")
+
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
     # ------------------------------------------------------------------ #
@@ -265,24 +300,31 @@ class WaveDetector:
         df must have columns: open, high, low, close, volume
         Returns a WaveAnalysis with current wave state.
         """
-        df = df.copy().reset_index(drop=True)
+        df = df.reset_index(drop=True)
         if len(df) < self.htf_ema_slow + 5:
             return self._flat_analysis(df)
 
-        atr = self._calc_atr(df)
+        close_arr = df["close"].values
+        last_close = float(close_arr[-1])
+        is_new_bar = last_close != self._last_close
 
-        # EMA calculations
-        htf_fast = self._ema(df["close"], self.htf_ema_fast)
-        htf_slow = self._ema(df["close"], self.htf_ema_slow)
-        ltf_fast = self._ema(df["close"], self.ltf_ema_fast)
-        ltf_slow = self._ema(df["close"], self.ltf_ema_slow)
+        # ── Item D: incremental EMA (O(1) per tick after first call) ─────── #
+        htf_f1, htf_f2 = self._get_ema_pair(close_arr, self.htf_ema_fast, is_new_bar)
+        htf_s1, htf_s2 = self._get_ema_pair(close_arr, self.htf_ema_slow, is_new_bar)
+        ltf_f1, _      = self._get_ema_pair(close_arr, self.ltf_ema_fast, is_new_bar)
+        ltf_s1, _      = self._get_ema_pair(close_arr, self.ltf_ema_slow, is_new_bar)
+        if is_new_bar:
+            self._last_close = last_close
 
-        # Fractals
+        # ── Item D: incremental ATR ───────────────────────────────────────── #
+        atr = self._get_atr(df, is_new_bar)
+
+        # ── Item E: vectorized fractals ───────────────────────────────────── #
         swing_highs, swing_lows = self._calc_fractals(df)
 
         # ---- MAIN WAVE ----
-        main_wave, htf_conf = self._determine_main_wave(
-            df, htf_fast, htf_slow, swing_highs, swing_lows, atr
+        main_wave, htf_conf = self._determine_main_wave_v2(
+            htf_f1, htf_f2, htf_s1, htf_s2, swing_highs, swing_lows
         )
 
         # ---- SIDEWAYS ----
@@ -293,13 +335,11 @@ class WaveDetector:
         # ---- SUB WAVE ----
         sub_wave = None
         if main_wave in (WaveState.BULL_MAIN, WaveState.BEAR_MAIN):
-            sub_wave = self._detect_sub_wave(
-                df, ltf_fast, ltf_slow, main_wave, swing_highs, swing_lows
-            )
+            sub_wave = self._detect_sub_wave_v2(ltf_f1, ltf_s1, main_wave, swing_highs, swing_lows)
 
         # ---- Confidence ----
-        confidence = self._calc_confidence(
-            df, htf_fast, htf_slow, ltf_fast, ltf_slow, main_wave, sub_wave, sideways
+        confidence = self._calc_confidence_v2(
+            close_arr, htf_f1, htf_s1, ltf_f1, ltf_s1, main_wave, sub_wave, sideways
         )
 
         description = self._build_description(main_wave, sub_wave, sideways, confidence)
@@ -308,10 +348,10 @@ class WaveDetector:
             main_wave=main_wave,
             sub_wave=sub_wave,
             confidence=confidence,
-            htf_ema_fast=float(htf_fast.iloc[-1]),
-            htf_ema_slow=float(htf_slow.iloc[-1]),
-            ltf_ema_fast=float(ltf_fast.iloc[-1]),
-            ltf_ema_slow=float(ltf_slow.iloc[-1]),
+            htf_ema_fast=htf_f1,
+            htf_ema_slow=htf_s1,
+            ltf_ema_fast=ltf_f1,
+            ltf_ema_slow=ltf_s1,
             atr=float(atr),
             swing_highs=swing_highs[-5:],
             swing_lows=swing_lows[-5:],
@@ -332,18 +372,10 @@ class WaveDetector:
             lstm_conf = lstm_probs.get(wave_key, 0.5)
             # Blend: 60% rule-based, 40% LSTM
             blended_confidence = round(0.6 * confidence + 0.4 * lstm_conf, 3)
-            analysis = WaveAnalysis(
-                main_wave=analysis.main_wave,
-                sub_wave=analysis.sub_wave,
+            # ── Item A: use dc_replace instead of second WaveAnalysis() ── #
+            analysis = dc_replace(
+                analysis,
                 confidence=blended_confidence,
-                htf_ema_fast=analysis.htf_ema_fast,
-                htf_ema_slow=analysis.htf_ema_slow,
-                ltf_ema_fast=analysis.ltf_ema_fast,
-                ltf_ema_slow=analysis.ltf_ema_slow,
-                atr=analysis.atr,
-                swing_highs=analysis.swing_highs,
-                swing_lows=analysis.swing_lows,
-                sideways_detected=analysis.sideways_detected,
                 description=self._build_description(
                     main_wave, sub_wave, sideways, blended_confidence
                 ),
@@ -388,6 +420,61 @@ class WaveDetector:
     def _ema(series: pd.Series, period: int) -> pd.Series:
         return series.ewm(span=period, adjust=False).mean()
 
+    def _get_ema_pair(
+        self, close: np.ndarray, period: int, is_new_bar: bool
+    ) -> Tuple[float, float]:
+        """
+        Return (last, prev) EMA values, updating incrementally on new bars.
+
+        First call bootstraps from the full series.  Subsequent calls use the
+        one-step update rule: ema_new = α × close + (1−α) × ema_prev.
+        """
+        alpha = 2.0 / (period + 1)
+        if period not in self._ema_last:
+            # Bootstrap: compute full EMA to get correct initial values
+            s = pd.Series(close).ewm(span=period, adjust=False).mean()
+            last_val = float(s.iloc[-1])
+            prev_val = float(s.iloc[-2])
+            self._ema_last[period] = (last_val, prev_val)
+        elif is_new_bar:
+            prev_val, last_val = self._ema_last[period]  # last → prev, compute new last
+            new_last = alpha * float(close[-1]) + (1.0 - alpha) * last_val
+            self._ema_last[period] = (new_last, last_val)
+        return self._ema_last[period]
+
+    def _get_atr(self, df: pd.DataFrame, is_new_bar: bool) -> float:
+        """
+        Incremental ATR using a rolling simple mean of TR values.
+        Bootstraps from full series on first call; O(1) per tick thereafter.
+        """
+        if not self._atr_tr_buf:
+            # Bootstrap from full DataFrame
+            high   = df["high"].values
+            low    = df["low"].values
+            close  = df["close"].values
+            prev_c = np.roll(close, 1)
+            prev_c[0] = close[0]
+            tr = np.maximum(
+                high - low,
+                np.maximum(np.abs(high - prev_c), np.abs(low - prev_c)),
+            )
+            self._atr_tr_buf = list(tr[-self.atr_period:])
+            self._atr_prev_close = float(close[-1])
+            self._atr_cached = float(np.mean(self._atr_tr_buf))
+        elif is_new_bar:
+            # Incremental: compute TR for the newest bar only
+            h = float(df["high"].iloc[-1])
+            l = float(df["low"].iloc[-1])
+            c = float(df["close"].iloc[-1])
+            pc = self._atr_prev_close
+            tr_new = max(h - l, abs(h - pc), abs(l - pc))
+            if len(self._atr_tr_buf) >= self.atr_period:
+                self._atr_tr_buf.pop(0)
+            self._atr_tr_buf.append(tr_new)
+            self._atr_prev_close = c
+            self._atr_cached = float(np.mean(self._atr_tr_buf))
+        return self._atr_cached
+
     def _calc_atr(self, df: pd.DataFrame) -> float:
         high = df["high"]
         low = df["low"]
@@ -401,18 +488,60 @@ class WaveDetector:
     def _calc_fractals(
         self, df: pd.DataFrame
     ) -> Tuple[List[SwingPoint], List[SwingPoint]]:
+        """
+        Vectorized fractal detection using pandas rolling max/min.
+        A fractal high at index i: high[i] == max(high[i-fp:i+fp+1]).
+        A fractal low  at index i: low[i]  == min(low[i-fp:i+fp+1]).
+        """
         fp = self.fractal_period
-        highs: List[SwingPoint] = []
-        lows: List[SwingPoint] = []
-        n = len(df)
-        for i in range(fp, n - fp):
-            window_h = df["high"].iloc[i - fp : i + fp + 1]
-            if df["high"].iloc[i] == window_h.max():
-                highs.append(SwingPoint(i, float(df["high"].iloc[i]), True))
-            window_l = df["low"].iloc[i - fp : i + fp + 1]
-            if df["low"].iloc[i] == window_l.min():
-                lows.append(SwingPoint(i, float(df["low"].iloc[i]), False))
+        window = 2 * fp + 1
+
+        high_s = df["high"]
+        low_s  = df["low"]
+
+        roll_max = high_s.rolling(window=window, center=True).max()
+        roll_min = low_s.rolling(window=window, center=True).min()
+
+        # Valid range: exclude first/last fp bars (NaN from rolling)
+        valid = np.arange(fp, len(df) - fp)
+        high_arr = high_s.values
+        low_arr  = low_s.values
+
+        high_mask = (high_arr[valid] == roll_max.values[valid])
+        low_mask  = (low_arr[valid]  == roll_min.values[valid])
+
+        highs = [SwingPoint(int(i), float(high_arr[i]), True)  for i in valid[high_mask]]
+        lows  = [SwingPoint(int(i), float(low_arr[i]),  False) for i in valid[low_mask]]
         return highs, lows
+
+    def _determine_main_wave_v2(
+        self,
+        htf_f1: float,
+        htf_f2: float,
+        htf_s1: float,
+        htf_s2: float,
+        swing_highs: List[SwingPoint],
+        swing_lows: List[SwingPoint],
+    ) -> Tuple[WaveState, float]:
+        ema_bull = htf_f1 > htf_s1
+        ema_bear = htf_f1 < htf_s1
+        cross_up = htf_f1 > htf_s1 and htf_f2 <= htf_s2
+        cross_dn = htf_f1 < htf_s1 and htf_f2 >= htf_s2
+
+        struct_bull = self._is_bullish_structure(swing_highs, swing_lows)
+        struct_bear = self._is_bearish_structure(swing_highs, swing_lows)
+
+        if ema_bull and struct_bull:
+            conf = 0.9 if cross_up else 0.75
+            return WaveState.BULL_MAIN, conf
+        if ema_bear and struct_bear:
+            conf = 0.9 if cross_dn else 0.75
+            return WaveState.BEAR_MAIN, conf
+        if ema_bull:
+            return WaveState.BULL_MAIN, 0.55
+        if ema_bear:
+            return WaveState.BEAR_MAIN, 0.55
+        return WaveState.SIDEWAYS, 0.4
 
     def _determine_main_wave(
         self,
@@ -503,6 +632,25 @@ class WaveDetector:
                     return WaveState.SUB_WAVE_UP
         return None
 
+    def _detect_sub_wave_v2(
+        self,
+        ltf_f1: float,
+        ltf_s1: float,
+        main_wave: WaveState,
+        swing_highs: List[SwingPoint],
+        swing_lows: List[SwingPoint],
+    ) -> Optional[WaveState]:
+        """Scalar-based sub-wave detection (works with incremental EMA values)."""
+        if main_wave == WaveState.BULL_MAIN:
+            if ltf_f1 < ltf_s1:
+                if len(swing_highs) >= 2 and swing_highs[-1].price < swing_highs[-2].price:
+                    return WaveState.SUB_WAVE_DOWN
+        elif main_wave == WaveState.BEAR_MAIN:
+            if ltf_f1 > ltf_s1:
+                if len(swing_lows) >= 2 and swing_lows[-1].price > swing_lows[-2].price:
+                    return WaveState.SUB_WAVE_UP
+        return None
+
     def _calc_confidence(
         self,
         df: pd.DataFrame,
@@ -544,6 +692,46 @@ class WaveDetector:
             score += 0.1
 
         # Sub-wave penalty
+        if sub_wave is not None:
+            score *= 0.6
+
+        return round(min(max(score, 0.0), 1.0), 3)
+
+    def _calc_confidence_v2(
+        self,
+        close_arr: np.ndarray,
+        htf_f1: float,
+        htf_s1: float,
+        ltf_f1: float,
+        ltf_s1: float,
+        main_wave: WaveState,
+        sub_wave: Optional[WaveState],
+        sideways: bool,
+    ) -> float:
+        """Scalar-based confidence calculation (works with incremental EMA values)."""
+        if sideways:
+            return 0.3
+        score = 0.0
+        price = float(close_arr[-1])
+        if price > 0:
+            ema_sep = abs(htf_f1 - htf_s1)
+            score += min(ema_sep / price * 1000, 0.4)
+
+        diffs = np.diff(close_arr[-5:])
+        if main_wave == WaveState.BULL_MAIN and np.all(diffs > 0):
+            score += 0.3
+        elif main_wave == WaveState.BEAR_MAIN and np.all(diffs < 0):
+            score += 0.3
+        else:
+            score += 0.15
+
+        if main_wave == WaveState.BULL_MAIN and ltf_f1 > ltf_s1:
+            score += 0.3
+        elif main_wave == WaveState.BEAR_MAIN and ltf_f1 < ltf_s1:
+            score += 0.3
+        else:
+            score += 0.1
+
         if sub_wave is not None:
             score *= 0.6
 
