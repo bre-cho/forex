@@ -128,6 +128,9 @@ _DEFAULT_EPISODES         = 8
 _DEFAULT_BARS_PER_EPISODE = 70
 _SPEED_TARGET_TRADES      = 20   # expected trades per episode (normalisation ref)
 _EPS                      = 1e-9
+# Log returns are tiny (~0.01 per trade) vs arithmetic returns (~1–2 R-units).
+# Scaling by 100 puts them in the same numeric range before blending/tanh.
+_LOG_RETURN_SCALE         = 100
 
 
 # ── UtilityConfig ─────────────────────────────────────────────────────────── #
@@ -426,7 +429,7 @@ class UtilityFunction:
         arith_mean = float(np.mean(pnl_arr))
         log_mean   = float(np.mean(rf.log_returns)) if rf.log_returns else 0.0
         # Blend: (1−r)×arith + r×log, then transform to [0,1] via tanh
-        blended  = (1.0 - cfg.risk_aversion) * arith_mean + cfg.risk_aversion * log_mean * 100
+        blended  = (1.0 - cfg.risk_aversion) * arith_mean + cfg.risk_aversion * log_mean * _LOG_RETURN_SCALE
         growth_u = float(max(0.0, math.tanh(blended)))
 
         # ── Trust utility ──────────────────────────────────────────────── #
@@ -441,7 +444,6 @@ class UtilityFunction:
 
         # ── Speed utility ──────────────────────────────────────────────── #
         # tanh(total_trades / target) → [0, 1)
-        target    = max(1, _SPEED_TARGET_TRADES * rf.base.total_trades / max(rf.base.total_trades, _SPEED_TARGET_TRADES))
         speed_u   = float(math.tanh(rf.base.total_trades / _SPEED_TARGET_TRADES))
         speed_u   = max(0.0, min(1.0, speed_u))
 
