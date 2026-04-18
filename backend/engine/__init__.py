@@ -69,6 +69,15 @@ from .sovereign_oversight_engine import (
     SovereignOversightResult,
     SovereignOversightEngine,
 )
+from .autonomous_enterprise_engine import (
+    EnterpriseLifecycle,
+    EnterpriseObjective,
+    EnterpriseConfig,
+    LayerRunRecord,
+    EnterpriseCycle,
+    EnterpriseMemory,
+    AutonomousEnterpriseEngine,
+)
 
 __all__ = [
     "WaveDetector", "WaveState",
@@ -101,4 +110,7 @@ __all__ = [
     "SovereignPolicy", "ClusterState", "ClusterDirective",
     "NetworkObjectiveTree", "NetworkDominanceScore",
     "SovereignOversightResult", "SovereignOversightEngine",
+    "EnterpriseLifecycle", "EnterpriseObjective", "EnterpriseConfig",
+    "LayerRunRecord", "EnterpriseCycle", "EnterpriseMemory",
+    "AutonomousEnterpriseEngine",
 ]
