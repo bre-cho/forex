@@ -29,6 +29,12 @@ from .self_play_engine import (
     EvolutionResult,
     EvolutionaryEngine,
 )
+from .meta_learning_engine import (
+    GeneImportance,
+    GenePool,
+    MetaLearningResult,
+    MetaLearningEngine,
+)
 
 __all__ = [
     "WaveDetector", "WaveState",
@@ -51,4 +57,5 @@ __all__ = [
     "SyntheticCandleGenerator", "SyntheticOutcomeGenerator",
     "WarmUpPipeline", "WarmUpReport",
     "AgentGenome", "AgentFitness", "EvolutionResult", "EvolutionaryEngine",
+    "GeneImportance", "GenePool", "MetaLearningResult", "MetaLearningEngine",
 ]

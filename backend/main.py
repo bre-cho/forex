@@ -45,6 +45,7 @@ from engine import (
     LLMOrchestrator,
     WarmUpPipeline, WarmUpReport,
     EvolutionaryEngine, EvolutionResult,
+    MetaLearningEngine, MetaLearningResult, GeneImportance,
 )
 from engine.signal_coordinator import TradeSignal as CoordSignal
 from engine.risk_manager import RiskConfig, MartingaleConfig
@@ -155,6 +156,12 @@ class AppState:
         # evolves them, and applies the best genome to the live system.
         self.evolution_engine: EvolutionaryEngine = EvolutionaryEngine()
         self.evolution_result: Optional[EvolutionResult] = None
+
+        # Meta-learning engine — strategy genetics system.
+        # Learns WHY winners win, accumulates gene knowledge, and breeds
+        # smarter strategies across multiple evolution loops.
+        self.meta_engine: MetaLearningEngine = MetaLearningEngine()
+        self.meta_result: Optional[MetaLearningResult] = None
 
         # Maps trade_id → {mode, wave_state, retrace_zone, initial_risk}
         # populated at open, consumed at close for DecisionEngine.record_outcome()
@@ -1605,6 +1612,145 @@ async def evolution_apply():
         "message": "Best genome đã được apply vào live system",
         "applied_genome": result.best_genome.to_dict(),
         "best_fitness": result.best_fitness.to_dict(),
+    }
+
+
+# ── Meta-Learning API ──────────────────────────────────────────────────── #
+
+@app.get("/api/meta/status")
+async def meta_status():
+    """
+    Trả về kết quả meta-learning gần nhất.
+
+    Bao gồm:
+    - best_genome     : chiến lược tốt nhất qua tất cả outer loop
+    - gene_importances: tầm quan trọng của từng gene (importance, mean_winner_value, keep_confidence)
+    - gene_insights   : giải thích bằng ngôn ngữ tự nhiên vì sao winner thắng
+    - outer_loop_bests: fitness tốt nhất mỗi outer loop
+    """
+    result = app_state.meta_result
+    if result is None:
+        return {"status": "not_run", "message": "Meta-learning chưa được chạy"}
+    return {"status": "ok", **result.to_dict()}
+
+
+@app.get("/api/meta/gene_insights")
+async def meta_gene_insights():
+    """
+    Trả về phân tích ngôn ngữ tự nhiên về gene chiến lược:
+    - Gene nào DOMINANT (tương quan cao với win)
+    - Gene nào CONSERVED (hội tụ nhất quán ở winners)
+    - Gene nào NEUTRAL (có thể tự do đột biến)
+
+    Chỉ có dữ liệu sau khi đã chạy POST /api/meta/run.
+    """
+    result = app_state.meta_result
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Chưa có kết quả meta-learning. Hãy chạy POST /api/meta/run trước."
+        )
+    return {
+        "status":         "ok",
+        "gene_insights":  result.gene_insights,
+        "gene_importances": {
+            k: v.to_dict() for k, v in result.gene_importances.items()
+        },
+    }
+
+
+@app.post("/api/meta/run")
+async def meta_run(
+    outer_loops:      int  = 3,
+    pop_size:         int  = 20,
+    generations:      int  = 5,
+    episodes:         int  = 10,
+    bars_per_episode: int  = 80,
+    top_k_winners:    int  = 5,
+    apply_to_live:    bool = False,
+):
+    """
+    Chạy Meta-Learning + Strategy Genome Engine.
+
+    Đây là cấp độ cao nhất: không chỉ tiến hóa chiến lược mà còn
+    học ra VÌ SAO winner thắng và dùng kiến thức đó để breed chiến lược
+    thông minh hơn cho vòng tiến hóa tiếp theo.
+
+    Quá trình (mỗi outer_loop):
+      1. Evolve: chạy EvolutionaryEngine × generations
+      2. Analyse: WinnerAnalyzer học gene importance từ top-K winners
+      3. Accumulate: GenePool lưu gene values × fitness của winners
+      4. Breed: StrategyGenetics dùng GenePool để breed next generation
+         (importance-weighted crossover + guided mutation)
+
+    Parameters
+    ----------
+    outer_loops      : số vòng lặp Evolve→Analyse→Breed (default 3)
+    pop_size         : agents per evolution run (default 20)
+    generations      : generations per evolution run (default 5)
+    episodes         : market episodes per agent (default 10)
+    bars_per_episode : candle bars per episode (default 80)
+    top_k_winners    : số winner dùng để học gene importance (default 5)
+    apply_to_live    : nếu True, tự động apply best genome vào live system
+
+    Kết quả
+    -------
+    - best_genome với chiến lược tốt nhất qua toàn bộ meta-learning
+    - gene_importances cho từng gene
+    - gene_insights giải thích vì sao winner thắng
+    """
+    try:
+        engine = MetaLearningEngine(
+            outer_loops      = outer_loops,
+            pop_size         = pop_size,
+            generations      = generations,
+            episodes         = episodes,
+            bars_per_episode = bars_per_episode,
+            top_k_winners    = top_k_winners,
+        )
+        result = engine.run()
+        app_state.meta_engine = engine
+        app_state.meta_result = result
+
+        if apply_to_live:
+            result.apply_to(app_state.decision_engine)
+
+        return {"status": "ok", **result.to_dict()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/meta/apply")
+async def meta_apply():
+    """
+    Apply kết quả meta-learning gần nhất vào live DecisionEngine.
+
+    Cập nhật:
+    - mode_weight_adjs của AdaptiveController (dựa trên gene tốt nhất)
+    - base_min_score
+    - lot_scale
+
+    Chỉ có tác dụng nếu đã chạy /api/meta/run trước đó.
+    """
+    result = app_state.meta_result
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa có kết quả meta-learning. Hãy chạy POST /api/meta/run trước."
+        )
+    if result.applied_to_live:
+        return {
+            "status":         "already_applied",
+            "message":        "Meta-learned genome đã được apply trước đó",
+            "applied_genome": result.best_genome.to_dict(),
+        }
+    result.apply_to(app_state.decision_engine)
+    return {
+        "status":         "ok",
+        "message":        "Meta-learned genome đã được apply vào live system",
+        "applied_genome": result.best_genome.to_dict(),
+        "best_fitness":   result.best_fitness.to_dict(),
+        "gene_insights":  result.gene_insights,
     }
 
 
