@@ -93,6 +93,15 @@ logger = logging.getLogger(__name__)
 
 _EPS = 1e-9
 
+# Staleness sentinel: any value ≥ this guarantees a layer runs on the first cycle.
+_LAYER_STALE_INITIAL = 999
+
+# Dominance delta thresholds for trend direction classification.
+# Deltas larger than _TREND_THRESHOLD_UP are IMPROVING;
+# more negative than _TREND_THRESHOLD_DOWN are DECLINING.
+_TREND_THRESHOLD_UP:   float = 0.005
+_TREND_THRESHOLD_DOWN: float = -0.005
+
 
 # ── Enums ──────────────────────────────────────────────────────────────────── #
 
@@ -371,8 +380,8 @@ class EnterpriseMemory:
         # Update trend direction
         if len(self._dominance_hist) >= 2:
             delta = self._dominance_hist[-1] - self._dominance_hist[-2]
-            direction = ("IMPROVING" if delta > 0.005
-                         else "DECLINING" if delta < -0.005
+            direction = ("IMPROVING" if delta > _TREND_THRESHOLD_UP
+                         else "DECLINING" if delta < _TREND_THRESHOLD_DOWN
                          else "STABLE")
             if direction == self._trend_direction:
                 self._consecutive += 1
@@ -594,11 +603,11 @@ class AutonomousEnterpriseEngine:
 
         # Layer staleness counters: how many enterprise cycles since last run
         self._layer_since: Dict[str, int] = {
-            "evolution":  999,  # start stale → run on first cycle
-            "meta":       999,
-            "causal":     999,
-            "utility":    999,
-            "ecosystem":  999,
+            "evolution":  _LAYER_STALE_INITIAL,  # start stale → run on first cycle
+            "meta":       _LAYER_STALE_INITIAL,
+            "causal":     _LAYER_STALE_INITIAL,
+            "utility":    _LAYER_STALE_INITIAL,
+            "ecosystem":  _LAYER_STALE_INITIAL,
         }
 
         # Background stop flag (set by stop())

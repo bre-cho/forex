@@ -2663,7 +2663,7 @@ async def sovereign_dominance():
 
 # ── Autonomous Enterprise API ──────────────────────────────────────────── #
 
-async def _enterprise_background_loop(interval_secs: float) -> None:
+async def _enterprise_background_loop() -> None:
     """
     Background asyncio task for the Autonomous Enterprise Engine.
 
@@ -2767,7 +2767,7 @@ async def enterprise_start(
 
     # Launch background loop
     task = asyncio.create_task(
-        _enterprise_background_loop(cycle_interval_secs)
+        _enterprise_background_loop()
     )
     app_state.enterprise_task = task
 
