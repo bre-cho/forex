@@ -22,6 +22,7 @@ class EntryMode(str, Enum):
     RETEST_SAME = "RETEST_SAME"
     RETEST_OPPOSITE = "RETEST_OPPOSITE"
     RETEST_LEVEL_X = "RETEST_LEVEL_X"
+    TREND_PULLBACK = "TREND_PULLBACK"    # vào lệnh khi giá kéo về EMA trong xu hướng
 
 
 class SLMode(str, Enum):
@@ -115,6 +116,17 @@ class RangeManager:
 class EntryLogic:
     """
     Calculates SL/TP and checks entry conditions for all supported modes.
+
+    Parameters
+    ----------
+    min_atr_entry : float
+        Minimum ATR (in price units) required to even consider an entry.
+        Set to 0.0 to disable (default).  Prevents entering in ultra-low
+        volatility environments where spread consumes too much of the move.
+    ema_confirm : bool
+        When True, ``check_entry`` also verifies that the fast EMA is on the
+        correct side of the slow EMA (requires ema_fast / ema_slow kwargs).
+        Defaults to False for backward compatibility.
     """
 
     def __init__(
@@ -127,6 +139,8 @@ class EntryLogic:
         retrace_atr_mult: float = 0.5,
         min_body_atr: float = 0.3,
         retest_level_x: float = 0.5,     # 0.5 = 50% of range
+        min_atr_entry: float = 0.0,      # skip entry if ATR below this value
+        ema_confirm: bool = False,        # require EMA alignment on entry
     ) -> None:
         self.sl_mode = sl_mode
         self.sl_value = sl_value
@@ -136,6 +150,8 @@ class EntryLogic:
         self.retrace_atr_mult = retrace_atr_mult
         self.min_body_atr = min_body_atr
         self.retest_level_x = retest_level_x
+        self.min_atr_entry = min_atr_entry
+        self.ema_confirm = ema_confirm
 
     # ------------------------------------------------------------------ #
     #  SL / TP Calculation                                                 #
@@ -223,52 +239,80 @@ class EntryLogic:
         range_low: float,
         atr: float,
         prev_close: float = 0.0,
+        ema_fast: Optional[float] = None,
+        ema_slow: Optional[float] = None,
     ) -> Optional[str]:
         """
         Returns 'BUY', 'SELL', or None depending on entry mode.
-        candle: Series with fields open, high, low, close
+        candle : Series with fields open, high, low, close
+
+        Parameters
+        ----------
+        ema_fast / ema_slow : optional EMA values used when ema_confirm=True
+            or for the TREND_PULLBACK mode.
         """
+        # ATR guard — skip entry in ultra-low volatility
+        if self.min_atr_entry > 0 and atr < self.min_atr_entry:
+            return None
+
         close = float(candle["close"])
         open_ = float(candle["open"])
         high = float(candle["high"])
         low = float(candle["low"])
         body = abs(close - open_)
 
+        direction: Optional[str] = None
+
         if self.entry_mode == EntryMode.BREAKOUT:
-            return self._check_breakout(close, range_high, range_low, body, atr)
+            direction = self._check_breakout(close, range_high, range_low, body, atr)
 
         elif self.entry_mode == EntryMode.INSTANT_BREAKOUT:
             # Trigger as soon as price touches the range boundary (no close needed)
             if high > range_high:
-                return "BUY"
-            if low < range_low:
-                return "SELL"
+                direction = "BUY"
+            elif low < range_low:
+                direction = "SELL"
 
         elif self.entry_mode == EntryMode.RETRACE:
-            return self._check_retrace(close, open_, range_high, range_low, atr)
+            direction = self._check_retrace(close, open_, range_high, range_low, atr)
 
         elif self.entry_mode == EntryMode.INSTANT_RETRACE:
             # Retrace to EMA / mid-range, no close confirmation
             mid = (range_high + range_low) / 2
             if prev_close > range_high and low <= mid + atr * self.retrace_atr_mult:
-                return "BUY"
-            if prev_close < range_low and high >= mid - atr * self.retrace_atr_mult:
-                return "SELL"
+                direction = "BUY"
+            elif prev_close < range_low and high >= mid - atr * self.retrace_atr_mult:
+                direction = "SELL"
 
         elif self.entry_mode == EntryMode.RETEST_SAME:
-            return self._check_retest_same(close, high, low, range_high, range_low)
+            direction = self._check_retest_same(close, high, low, range_high, range_low)
 
         elif self.entry_mode == EntryMode.RETEST_OPPOSITE:
-            return self._check_retest_opposite(close, high, low, range_high, range_low)
+            direction = self._check_retest_opposite(close, high, low, range_high, range_low)
 
         elif self.entry_mode == EntryMode.RETEST_LEVEL_X:
             level = range_low + (range_high - range_low) * self.retest_level_x
             if low <= level and close > level:
-                return "BUY"
-            if high >= level and close < level:
-                return "SELL"
+                direction = "BUY"
+            elif high >= level and close < level:
+                direction = "SELL"
 
-        return None
+        elif self.entry_mode == EntryMode.TREND_PULLBACK:
+            direction = self._check_trend_pullback(
+                close, low, high, atr, ema_fast, ema_slow
+            )
+
+        if direction is None:
+            return None
+
+        # Optional EMA confirmation: fast EMA must align with trade direction
+        if self.ema_confirm and ema_fast is not None and ema_slow is not None:
+            if direction == "BUY" and ema_fast <= ema_slow:
+                return None
+            if direction == "SELL" and ema_fast >= ema_slow:
+                return None
+
+        return direction
 
     def _check_breakout(
         self,
@@ -332,6 +376,53 @@ class EntryLogic:
             return "BUY"
         if close < mid and high >= (range_high + range_low) / 2:
             return "SELL"
+        return None
+
+    def _check_trend_pullback(
+        self,
+        close: float,
+        low: float,
+        high: float,
+        atr: float,
+        ema_fast: Optional[float],
+        ema_slow: Optional[float],
+    ) -> Optional[str]:
+        """
+        TREND_PULLBACK — vào lệnh khi giá kéo về EMA trong xu hướng.
+
+        Điều kiện BUY:
+          1. EMA fast > EMA slow (uptrend)
+          2. Candle LOW chạm hoặc xuống dưới EMA fast (pullback)
+          3. Candle CLOSE quay lên trên EMA fast (bounce xác nhận)
+          4. EMA fast không quá xa EMA slow (trend còn hiệu lực)
+
+        Điều kiện SELL (đối xứng):
+          1. EMA fast < EMA slow (downtrend)
+          2. Candle HIGH chạm hoặc vượt EMA fast (pullback lên)
+          3. Candle CLOSE quay xuống dưới EMA fast (bounce xác nhận)
+
+        Yêu cầu EMA values được cung cấp (không phải None).
+        Nếu không có EMA, trả về None.
+        """
+        if ema_fast is None or ema_slow is None:
+            return None
+
+        ema_separation = abs(ema_fast - ema_slow)
+        # Trend còn hiệu lực khi EMA spread > 0.1 × ATR
+        trend_valid = ema_separation >= 0.1 * atr
+
+        if not trend_valid:
+            return None
+
+        touch_zone = atr * self.retrace_atr_mult   # how close to EMA counts as "touch"
+
+        if ema_fast > ema_slow:   # uptrend
+            if low <= ema_fast + touch_zone and close > ema_fast:
+                return "BUY"
+        else:                      # downtrend
+            if high >= ema_fast - touch_zone and close < ema_fast:
+                return "SELL"
+
         return None
 
     def build_entry_signal(

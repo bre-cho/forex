@@ -39,6 +39,20 @@ class GridSettings(BaseModel):
     max_grid_lot: float = Field(1.0, ge=0.01, le=100.0)
 
 
+class BreakEvenSettings(BaseModel):
+    """Dời SL về break-even sau khi lợi nhuận đạt trigger_pips."""
+    enabled: bool = False
+    trigger_pips: float = Field(20.0, ge=1.0)   # pips lợi nhuận để kích hoạt
+    offset_pips: float = Field(2.0, ge=0.0)      # SL = entry ± offset_pips
+
+
+class TimeBasedExitSettings(BaseModel):
+    """Đóng lệnh bị kẹt quá lâu mà không đạt ngưỡng lợi nhuận tối thiểu."""
+    enabled: bool = False
+    max_duration_minutes: float = Field(240.0, ge=1.0)   # thời gian tối đa (phút)
+    min_profit_pips: float = Field(0.0, ge=0.0)           # chỉ đóng nếu profit < ngưỡng này
+
+
 # ── Main settings ──────────────────────────────────────────────────────── #
 
 class RobotSettings(BaseModel):
@@ -102,11 +116,28 @@ class RobotSettings(BaseModel):
     partial_close: PartialCloseSettings = Field(default_factory=PartialCloseSettings)
     trailing: TrailingSettings = Field(default_factory=TrailingSettings)
     grid: GridSettings = Field(default_factory=GridSettings)
+    break_even: BreakEvenSettings = Field(default_factory=BreakEvenSettings)
+    time_based_exit: TimeBasedExitSettings = Field(default_factory=TimeBasedExitSettings)
 
     # Risk management
     max_account_equity: float = 0.0
     max_daily_dd_pct: float = 5.0
     max_overall_dd_pct: float = 20.0
+
+    # Daily lock targets (0 = disabled)
+    daily_profit_target: float = 0.0    # lock when daily PnL ≥ target ($)
+    daily_loss_limit: float = 0.0       # lock when daily PnL ≤ -limit ($, overrides dd_pct when > 0)
+
+    # Wave direction filter
+    wave_direction_filter: str = "BOTH"  # BOTH | BUY_ONLY | SELL_ONLY
+
+    # AutoPilot entry controls
+    entry_cooldown_secs: float = Field(30.0, ge=0.0)    # min seconds between signals
+    min_atr_ratio: float = Field(0.0, ge=0.0)            # min ATR/price ratio; 0=off
+    allow_subwave_retrace: bool = True                    # allow retrace entry in sub_wave
+
+    # Capital profile — auto-tune lot/risk by balance bracket
+    capital_profile: str = "AUTO"  # AUTO | NANO_500 | NANO_600 | NANO_700 | NANO_800 | NANO_900 | MICRO | SMALL | MEDIUM | LARGE | CUSTOM
 
     # Coordinator
     max_queue_size: int = 10
@@ -193,6 +224,9 @@ class RiskMetricsSchema(BaseModel):
     martingale_step: int
     consecutive_losses: int
     dd_triggered: bool
+    daily_profit_locked: bool = False
+    daily_loss_locked: bool = False
+    lock_reason: str = ""
     open_trades: int
     spread: float = 0.0
 
@@ -412,3 +446,57 @@ class PerformanceDashboardSchema(BaseModel):
     top_win_patterns:     List[PatternSummarySchema] = []
     top_loss_patterns:    List[PatternSummarySchema] = []
     last_consultation:    Optional[Dict[str, Any]] = None
+
+
+# ── Daily Lock Status ──────────────────────────────────────────────────── #
+
+class DailyLockStatusSchema(BaseModel):
+    """Current daily profit/loss lock state."""
+    profit_locked:       bool    # reached daily profit target → auto-paused
+    loss_locked:         bool    # reached daily loss limit → auto-paused
+    locked:              bool    # True when either profit_locked or loss_locked
+    lock_reason:         str     # human-readable reason
+    daily_pnl:           float   # today's PnL
+    daily_profit_target: float   # configured target (0 = off)
+    daily_loss_limit:    float   # configured loss limit (0 = off)
+    unlocked_by_user:    bool    # True after user manually reset
+
+
+# ── Capital Profile ────────────────────────────────────────────────────── #
+
+class CapitalProfileSchema(BaseModel):
+    """Recommended parameters for a given capital bracket."""
+    profile:       str    # NANO_500 | NANO_600 | NANO_700 | NANO_800 | NANO_900 | MICRO | SMALL | MEDIUM | LARGE | CUSTOM | AUTO
+    balance:       float
+    lot_mode:      str
+    lot_value:     float
+    max_lot:       float
+    max_daily_dd:  float  # %
+    max_overall_dd: float  # %
+    risk_per_trade: float  # % of balance per trade
+    max_trades_at_time: int
+    description:   str
+
+
+# ── Candle Library Status ──────────────────────────────────────────────── #
+
+class CandleLibraryStatusSchema(BaseModel):
+    """Status of the realtime candle library."""
+    total_candles:     int
+    capacity:          int
+    symbols:           List[str]
+    last_updated:      float
+    realtime_enabled:  bool
+
+
+# ── LLM Orchestrator Status ────────────────────────────────────────────── #
+
+class LLMStatusSchema(BaseModel):
+    """Status of the LLM Orchestrator."""
+    enabled:            bool
+    model:              str
+    rag_enabled:        bool
+    vector_store_size:  int       # number of embeddings stored
+    last_action:        str
+    last_action_ts:     float
+    function_call_log:  List[Dict[str, Any]] = []

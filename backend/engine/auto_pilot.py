@@ -85,6 +85,11 @@ _MODE_WAVE_WEIGHT: Dict[str, Dict[str, float]] = {
         WaveState.BEAR_MAIN.value: 0.75,
         WaveState.SIDEWAYS.value:  0.65,
     },
+    EntryMode.TREND_PULLBACK.value: {
+        WaveState.BULL_MAIN.value: 0.95,   # best in trending markets
+        WaveState.BEAR_MAIN.value: 0.95,
+        WaveState.SIDEWAYS.value:  0.2,    # not suitable for ranging markets
+    },
 }
 
 # Khoảng tick interval (giây) theo ATR volatility
@@ -136,6 +141,13 @@ class AutoPilot:
     sl_mode, sl_value, tp_mode, tp_value  : từ RobotSettings
     retrace_atr_mult, min_body_atr, retest_level_x : từ RobotSettings
     min_score   : ngưỡng điểm tối thiểu để vào lệnh
+    entry_cooldown_secs : thời gian chờ tối thiểu (giây) giữa hai lần submit
+                          signal để tránh bắn lệnh liên tiếp.  Default 30 giây.
+    min_atr_ratio : nếu ATR/price < giá trị này thì bỏ qua tick (thị trường quá
+                    flat).  Đặt 0.0 để tắt.  Typical value: 0.0002 (2 pips/pip).
+    allow_subwave_retrace : nếu True, cho phép retracement entry ngay cả khi
+                            WaveDetector phát hiện sub_wave.  Default True vì
+                            sub_wave thường chính là cơ hội retracement tốt nhất.
     """
 
     def __init__(
@@ -148,6 +160,9 @@ class AutoPilot:
         min_body_atr: float = 0.3,
         retest_level_x: float = 0.5,
         min_score: float = _MIN_SCORE,
+        entry_cooldown_secs: float = 30.0,
+        min_atr_ratio: float = 0.0,
+        allow_subwave_retrace: bool = True,
     ) -> None:
         self.sl_mode = sl_mode
         self.sl_value = sl_value
@@ -157,10 +172,14 @@ class AutoPilot:
         self.min_body_atr = min_body_atr
         self.retest_level_x = retest_level_x
         self.min_score = min_score
+        self.entry_cooldown_secs = entry_cooldown_secs
+        self.min_atr_ratio = min_atr_ratio
+        self.allow_subwave_retrace = allow_subwave_retrace
 
         self._history: List[AutoPilotDecision] = []
         self._current_tick_interval: float = 5.0
         self._last_decision: Optional[AutoPilotDecision] = None
+        self._last_signal_time: float = 0.0   # epoch seconds of last submitted signal
         self.retracement_engine: RetracementEngine = RetracementEngine()
 
     # ── Public API ─────────────────────────────────────────────────────── #
@@ -205,6 +224,23 @@ class AutoPilot:
             dec = self._make_decision(0, 0, None, None, 0.0, "NO_SETUP")
             return None, dec
 
+        # ── Min ATR filter: bỏ qua khi thị trường quá flat ──────────────── #
+        if self.min_atr_ratio > 0 and current_price > 0:
+            if atr / current_price < self.min_atr_ratio:
+                dec = self._make_decision(0, 0, None, None, 0.0, "NO_SETUP",
+                                          meta={"skip_reason": "atr_too_low"})
+                return None, dec
+
+        # ── Entry cooldown: tránh bắn lệnh liên tiếp ─────────────────────── #
+        if self.entry_cooldown_secs > 0:
+            elapsed_since_last = time.time() - self._last_signal_time
+            if elapsed_since_last < self.entry_cooldown_secs:
+                dec = self._make_decision(0, 0, None, None, 0.0, "COOLDOWN",
+                                          meta={"cooldown_remaining": round(
+                                              self.entry_cooldown_secs - elapsed_since_last, 1
+                                          )})
+                return None, dec
+
         effective_min_score = (
             override_min_score if override_min_score is not None else self.min_score
         )
@@ -214,6 +250,10 @@ class AutoPilot:
         prev_candle = df.iloc[-2]
         main_wave   = wave_analysis.main_wave.value
         wave_conf   = wave_analysis.confidence
+
+        # EMA values for TREND_PULLBACK mode and ema_confirm
+        ema_fast = float(wave_analysis.ltf_ema_fast)
+        ema_slow = float(wave_analysis.ltf_ema_slow)
 
         # ── Retracement Engine: đo lường + giới hạn + tìm entry an toàn ─ #
         retrace_measure: RetracementMeasure = self.retracement_engine.measure(
@@ -258,12 +298,14 @@ class AutoPilot:
             direction = el.check_entry(
                 candle, range_high, range_low, atr,
                 float(prev_candle["close"]),
+                ema_fast=ema_fast,
+                ema_slow=ema_slow,
             )
             if direction is None:
                 continue
 
             # Wave alignment filter (chỉ trade cùng hướng sóng chính)
-            if not self._wave_allows(direction, wave_analysis):
+            if not self._wave_allows(direction, wave_analysis, mode):
                 continue
 
             sig = el.build_entry_signal(
@@ -292,7 +334,8 @@ class AutoPilot:
                 retrace_measure.in_retracement
                 and direction == retrace_measure.main_direction
                 and mode in (EntryMode.RETRACE, EntryMode.INSTANT_RETRACE,
-                             EntryMode.RETEST_SAME, EntryMode.RETEST_LEVEL_X)
+                             EntryMode.RETEST_SAME, EntryMode.RETEST_LEVEL_X,
+                             EntryMode.TREND_PULLBACK)
             ):
                 retrace_boost = retrace_measure.quality * 0.15
                 score = round(min(score + retrace_boost, 1.0), 4)
@@ -324,6 +367,9 @@ class AutoPilot:
         # Sắp xếp theo score giảm dần → chọn tốt nhất
         candidates.sort(key=lambda c: c.score, reverse=True)
         best = candidates[0]
+
+        # Record the time this signal was generated for cooldown tracking
+        self._last_signal_time = time.time()
 
         dec = self._make_decision(
             total_evaluated, total_passed,
@@ -469,13 +515,46 @@ class AutoPilot:
 
     # ── Internal helpers ───────────────────────────────────────────────── #
 
-    @staticmethod
-    def _wave_allows(direction: str, wa: WaveAnalysis) -> bool:
-        """Kiểm tra hướng có khớp sóng chính không."""
+    def _wave_allows(
+        self,
+        direction: str,
+        wa: WaveAnalysis,
+        mode: Optional[EntryMode] = None,
+    ) -> bool:
+        """
+        Kiểm tra hướng có được phép vào lệnh không.
+
+        Rules:
+        - SIDEWAYS: không vào lệnh (trừ RETEST_LEVEL_X và TREND_PULLBACK)
+        - Sub_wave hiện diện:
+            * Nếu mode là retracement/pullback → CHO PHÉP khi allow_subwave_retrace=True,
+              vì sub_wave thường chính là cơ hội entry theo hướng sóng chính.
+            * Các mode khác → CHẶN như trước
+        - Hướng phải khớp sóng chính.
+        """
+        # Retracement-type modes that trade WITH the sub_wave direction
+        _RETRACE_MODES = {
+            EntryMode.RETRACE,
+            EntryMode.INSTANT_RETRACE,
+            EntryMode.RETEST_SAME,
+            EntryMode.RETEST_LEVEL_X,
+            EntryMode.TREND_PULLBACK,
+        }
+
         if wa.main_wave == WaveState.SIDEWAYS:
+            # Allow range-based modes in sideways market
+            if mode in (EntryMode.RETEST_LEVEL_X, EntryMode.RETEST_OPPOSITE):
+                return True
             return False
+
         if wa.sub_wave is not None:
-            return False
+            if self.allow_subwave_retrace and mode in _RETRACE_MODES:
+                # Sub_wave = pullback → this IS the retrace entry opportunity.
+                # Only allow if direction follows the main wave (not the sub_wave).
+                pass  # fall through to direction check below
+            else:
+                return False   # block non-retracement modes during sub_wave
+
         d = direction.upper()
         if d in ("BUY", "LONG"):
             return wa.main_wave == WaveState.BULL_MAIN

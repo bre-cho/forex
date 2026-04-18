@@ -14,6 +14,48 @@ from .performance_tracker import (
 )
 from .adaptive_controller import AdaptiveController, AdaptiveState
 from .decision_engine import DecisionEngine, DecisionContext, DecisionAction, MarketRegime, SimulatedOutcome
+from .capital_manager import CapitalManager, CapitalProfileParams
+from .candle_library import CandleLibrary
+from .llm_orchestrator import LLMOrchestrator
+from .synthetic_engine import (
+    SyntheticCandleGenerator,
+    SyntheticOutcomeGenerator,
+    WarmUpPipeline,
+    WarmUpReport,
+)
+from .self_play_engine import (
+    AgentGenome,
+    AgentFitness,
+    EvolutionResult,
+    EvolutionaryEngine,
+)
+from .meta_learning_engine import (
+    GeneImportance,
+    GenePool,
+    MetaLearningResult,
+    MetaLearningEngine,
+)
+from .causal_strategy_engine import (
+    CausalScoreCard,
+    WorldModel,
+    CausalIntelligenceResult,
+    CausalStrategyEngine,
+)
+from .utility_optimization_engine import (
+    UtilityConfig,
+    UtilityVector,
+    RichFitness,
+    UtilityOptimizationResult,
+    UtilityOptimizationEngine,
+)
+from .game_theory_engine import (
+    OpponentType,
+    EcosystemConfig,
+    NashEquilibrium,
+    MarketImpactStats,
+    GameTheoryResult,
+    GameTheoryEngine,
+)
 
 __all__ = [
     "WaveDetector", "WaveState",
@@ -30,4 +72,16 @@ __all__ = [
     "TradeFingerprint", "PatternRecord", "PreTradeConsultation",
     "AdaptiveController", "AdaptiveState",
     "DecisionEngine", "DecisionContext", "DecisionAction", "MarketRegime", "SimulatedOutcome",
+    "CapitalManager", "CapitalProfileParams",
+    "CandleLibrary",
+    "LLMOrchestrator",
+    "SyntheticCandleGenerator", "SyntheticOutcomeGenerator",
+    "WarmUpPipeline", "WarmUpReport",
+    "AgentGenome", "AgentFitness", "EvolutionResult", "EvolutionaryEngine",
+    "GeneImportance", "GenePool", "MetaLearningResult", "MetaLearningEngine",
+    "CausalScoreCard", "WorldModel", "CausalIntelligenceResult", "CausalStrategyEngine",
+    "UtilityConfig", "UtilityVector", "RichFitness",
+    "UtilityOptimizationResult", "UtilityOptimizationEngine",
+    "OpponentType", "EcosystemConfig", "NashEquilibrium",
+    "MarketImpactStats", "GameTheoryResult", "GameTheoryEngine",
 ]

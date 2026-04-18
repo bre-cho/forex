@@ -40,10 +40,19 @@ from engine import (
     AutoPilot,
     RetracementEngine,
     DecisionEngine, DecisionAction,
+    CapitalManager,
+    CandleLibrary,
+    LLMOrchestrator,
+    WarmUpPipeline, WarmUpReport,
+    EvolutionaryEngine, EvolutionResult,
+    MetaLearningEngine, MetaLearningResult, GeneImportance,
+    CausalStrategyEngine, CausalIntelligenceResult,
+    UtilityConfig, UtilityOptimizationEngine, UtilityOptimizationResult,
+    EcosystemConfig, GameTheoryEngine, GameTheoryResult,
 )
 from engine.signal_coordinator import TradeSignal as CoordSignal
 from engine.risk_manager import RiskConfig, MartingaleConfig
-from engine.trade_manager import PartialCloseConfig, TrailingConfig, GridConfig
+from engine.trade_manager import PartialCloseConfig, TrailingConfig, GridConfig, BreakEvenConfig, TimeBasedExitConfig
 from engine.session_manager import DSTMode
 from models.schemas import (
     AutoPilotStatusSchema,
@@ -68,6 +77,10 @@ from models.schemas import (
     PreTradeConsultationSchema,
     PatternSummarySchema,
     TradeFingerprintSchema,
+    DailyLockStatusSchema,
+    CapitalProfileSchema,
+    CandleLibraryStatusSchema,
+    LLMStatusSchema,
 )
 
 import os
@@ -126,6 +139,50 @@ class AppState:
         self.auto_pilot: AutoPilot = AutoPilot()
         self.retracement_engine: RetracementEngine = RetracementEngine()
         self.decision_engine: DecisionEngine = DecisionEngine()
+        self.capital_manager: CapitalManager = CapitalManager()
+        self.candle_library: CandleLibrary = CandleLibrary(
+            symbol=self.settings.symbol,
+            timeframe=self.settings.timeframe,
+        )
+        self.llm: LLMOrchestrator = LLMOrchestrator()
+
+        # Warm-up pipeline — pre-warms ML models at startup so they don't
+        # need to wait for N real trades before becoming effective.
+        self.warmup_pipeline: WarmUpPipeline = WarmUpPipeline(
+            decision_engine=self.decision_engine,
+            wave_detector=self.wave_detector,
+        )
+        self.warmup_report: Optional[WarmUpReport] = None
+
+        # Evolutionary engine — self-play strategy optimizer.
+        # Runs a population of trading agents through synthetic markets,
+        # evolves them, and applies the best genome to the live system.
+        self.evolution_engine: EvolutionaryEngine = EvolutionaryEngine()
+        self.evolution_result: Optional[EvolutionResult] = None
+
+        # Meta-learning engine — strategy genetics system.
+        # Learns WHY winners win, accumulates gene knowledge, and breeds
+        # smarter strategies across multiple evolution loops.
+        self.meta_engine: MetaLearningEngine = MetaLearningEngine()
+        self.meta_result: Optional[MetaLearningResult] = None
+
+        # Causal strategy engine — world model + causal strategic intelligence.
+        # Learns which genes CAUSE wins (not just correlate), detects spurious
+        # correlations, tests regime robustness, and infers counterfactual strategies.
+        self.causal_engine: CausalStrategyEngine = CausalStrategyEngine()
+        self.causal_result: Optional[CausalIntelligenceResult] = None
+
+        # Utility optimization engine — decision theory + rational strategic agent.
+        # Optimises multi-dimensional utility (growth, trust, stability, speed,
+        # dominance) and applies Kelly criterion for rational lot sizing.
+        self.utility_engine: UtilityOptimizationEngine = UtilityOptimizationEngine()
+        self.utility_result: Optional[UtilityOptimizationResult] = None
+
+        # Game theory engine — multi-agent ecosystem + Nash equilibrium.
+        # Optimises in environment with opponents, market maker algorithms,
+        # and market impact. Finds best-response strategy and Nash equilibrium.
+        self.ecosystem_engine: GameTheoryEngine = GameTheoryEngine()
+        self.ecosystem_result: Optional[GameTheoryResult] = None
 
         # Maps trade_id → {mode, wave_state, retrace_zone, initial_risk}
         # populated at open, consumed at close for DecisionEngine.record_outcome()
@@ -136,11 +193,37 @@ class AppState:
 
     def rebuild_components(self) -> None:
         s = self.settings
+
+        # ── Capital profile: auto-tune risk params by balance ────────────── #
+        if s.capital_profile != "CUSTOM":
+            tuned = self.capital_manager.apply(
+                s.model_dump(), self.balance, s.capital_profile
+            )
+            # Apply capital-profile overrides using Pydantic's model_copy to
+            # keep type safety and validation while patching in-memory only
+            # (does not persist to DB unless user saves settings explicitly).
+            profile_overrides = {
+                field: tuned[field]
+                for field in (
+                    "lot_mode", "lot_value", "min_lot", "max_lot",
+                    "max_daily_dd_pct", "max_overall_dd_pct", "max_trades_at_time",
+                    "daily_profit_target", "daily_loss_limit",
+                )
+                if field in tuned
+            }
+            if profile_overrides:
+                self.settings = s.model_copy(update=profile_overrides)
+                s = self.settings
+
         # Chỉ tạo lại data_provider nếu symbol/timeframe thay đổi
         cur_sym = getattr(self.data_provider, "symbol", "")
         cur_tf  = getattr(self.data_provider, "timeframe", "")
         if cur_sym != s.symbol or cur_tf != s.timeframe:
             self.data_provider = _create_data_provider(
+                symbol=s.symbol, timeframe=s.timeframe
+            )
+            # Reset candle library for new symbol/timeframe
+            self.candle_library = CandleLibrary(
                 symbol=s.symbol, timeframe=s.timeframe
             )
         self.wave_detector = WaveDetector(
@@ -167,6 +250,8 @@ class AppState:
                 max_daily_dd_pct=s.max_daily_dd_pct,
                 max_overall_dd_pct=s.max_overall_dd_pct,
                 pip_value_per_lot=s.pip_value_per_lot,
+                daily_profit_target=s.daily_profit_target,
+                daily_loss_limit=s.daily_loss_limit,
             ),
             martingale=MartingaleConfig(
                 enabled=s.martingale.enabled,
@@ -205,6 +290,16 @@ class AppState:
                 volume_multiplier=s.grid.volume_multiplier,
                 max_grid_lot=s.grid.max_grid_lot,
             ),
+            break_even_config=BreakEvenConfig(
+                enabled=s.break_even.enabled,
+                trigger_pips=s.break_even.trigger_pips,
+                offset_pips=s.break_even.offset_pips,
+            ),
+            time_exit_config=TimeBasedExitConfig(
+                enabled=s.time_based_exit.enabled,
+                max_duration_minutes=s.time_based_exit.max_duration_minutes,
+                min_profit_pips=s.time_based_exit.min_profit_pips,
+            ),
             pip_value=s.pip_value_per_lot,
         )
         self.session_manager = SessionManager(
@@ -220,6 +315,9 @@ class AppState:
             retrace_atr_mult=s.retrace_atr_mult,
             min_body_atr=s.min_body_atr,
             retest_level_x=s.retest_level_x,
+            entry_cooldown_secs=s.entry_cooldown_secs,
+            min_atr_ratio=s.min_atr_ratio,
+            allow_subwave_retrace=s.allow_subwave_retrace,
         )
         # RetracementEngine — created inside AutoPilot and aliased here for
         # direct access from endpoints. Both references point to the same object;
@@ -231,6 +329,11 @@ class AppState:
             float(getattr(self, "_base_min_score", 0.25))
         )
         self.coordinator.set_execute_callback(self._on_signal_execute)
+        # Keep warmup_pipeline pointing to the (potentially new) wave_detector
+        self.warmup_pipeline = WarmUpPipeline(
+            decision_engine=self.decision_engine,
+            wave_detector=self.wave_detector,
+        )
 
     async def _on_signal_execute(self, signal: CoordSignal) -> None:
         """Called by coordinator when a signal is approved for execution."""
@@ -319,6 +422,26 @@ async def lifespan(app: FastAPI):
         db.close()
     app_state.rebuild_components()
 
+    # ── ML Warm-up: pre-train models with synthetic data before live trading ─ #
+    # This eliminates the cold-start period where models have no data to learn
+    # from. Runs synchronously (fast — < 2 seconds) before robot starts.
+    try:
+        app_state.warmup_report = app_state.warmup_pipeline.run()
+        logger.info(
+            "WarmUp: done — lstm=%d, outcomes=%d, ensemble=%d, "
+            "lstm_ready=%s, ensemble_ready=%s",
+            app_state.warmup_report.lstm_samples_injected,
+            app_state.warmup_report.outcome_samples_injected,
+            app_state.warmup_report.ensemble_samples_injected,
+            app_state.warmup_report.lstm_ready,
+            app_state.warmup_report.ensemble_ready,
+        )
+    except Exception as _wu_exc:
+        logger.warning("WarmUp failed (non-fatal): %s", _wu_exc)
+        # Store a failure report so /api/warmup/status shows the error
+        app_state.warmup_report = WarmUpReport(errors=[str(_wu_exc)])
+    # ──────────────────────────────────────────────────────────────────────── #
+
     # ── AUTO-START: Robot tự vận hành ngay khi khởi động ──────────────── #
     # Hệ thống tự quyết định và bắt đầu trading ngay khi server khởi động.
     # Không cần gọi /api/robot/start thủ công.
@@ -393,12 +516,32 @@ class RobotEngine:
         if len(df) < 60:
             return
 
+        # ── Feed realtime candles to library ──────────────────────────── #
+        self.state.candle_library.update(df)
+
         # Daily reset check
         today = int(time.time() // 86400)
         if today != self._last_day:
             self._last_day = today
             self._daily_trades = 0
             self.state.risk_manager.reset_daily(self.state.balance)
+
+        # ── Daily lock auto-stop ───────────────────────────────────────── #
+        # If a daily profit/loss lock fires, stop the robot automatically.
+        # The user must manually call /api/robot/reset_daily_lock to resume.
+        if self.state.risk_manager.daily_locked and self.state.robot_running:
+            logger.warning(
+                "RobotEngine: daily lock triggered (%s) — auto-stopping robot",
+                self.state.risk_manager.lock_reason,
+            )
+            self.state.robot_running = False
+            self.state.coordinator.stop()
+            await self.state.broadcast({
+                "event":  "daily_lock",
+                "reason": self.state.risk_manager.lock_reason,
+                "timestamp": time.time(),
+            })
+            return
 
         # Wave analysis
         wave_analysis = self.state.wave_detector.analyse(df)
@@ -414,12 +557,16 @@ class RobotEngine:
         self.state.equity = self.state.balance + open_pnl
         self.state.risk_manager.update_equity(self.state.balance, self.state.equity)
 
-        # Update open trades (check SL/TP/trailing/partial)
+        # Update open trades (check SL/TP/trailing/partial/BE/time-exit)
         current_price = float(df["close"].iloc[-1])
+        candle_high = float(df["high"].iloc[-1])
+        candle_low  = float(df["low"].iloc[-1])
         closed_this_tick = []
         for trade in list(self.state.trade_manager.get_open_trades()):
             actions = self.state.trade_manager.update_trade(
-                trade.trade_id, current_price, atr
+                trade.trade_id, current_price, atr,
+                candle_high=candle_high,
+                candle_low=candle_low,
             )
             if "closed" in actions:
                 for ct in self.state.trade_manager.get_closed_trades():
@@ -467,6 +614,16 @@ class RobotEngine:
                         initial_risk=ctx.get("initial_risk", 0.0),
                         atr=ctx.get("atr", 0.0),
                         price=ctx.get("entry_price", 0.0),
+                    )
+
+                    # ── Add to LLM knowledge base ──────────────────── #
+                    self.state.llm.add_knowledge(
+                        text=(
+                            f"Trade closed: {ct.direction} {ct.symbol} "
+                            f"mode={ct.entry_mode} pnl={ct.pnl:.2f} "
+                            f"wave={ctx.get('wave_state', 'UNKNOWN')}"
+                        ),
+                        metadata={"trade_id": ct.trade_id, "pnl": ct.pnl},
                     )
             finally:
                 db.close()
@@ -608,6 +765,20 @@ class RobotEngine:
             return
 
         entry_signal = best.entry_signal
+
+        # ── Wave direction filter ──────────────────────────────────────── #
+        # BUY_ONLY: only allow BUY signals; SELL_ONLY: only allow SELL signals
+        wave_filter = s.wave_direction_filter.upper()
+        if wave_filter == "BUY_ONLY" and entry_signal.direction != "BUY":
+            logger.debug(
+                "Wave filter BUY_ONLY: skipping %s signal", entry_signal.direction
+            )
+            return
+        if wave_filter == "SELL_ONLY" and entry_signal.direction != "SELL":
+            logger.debug(
+                "Wave filter SELL_ONLY: skipping %s signal", entry_signal.direction
+            )
+            return
 
         # ── Tự mô phỏng: Monte Carlo EV check trước khi submit ─────────── #
         sim = self.state.decision_engine.simulate_candidate(
@@ -832,9 +1003,111 @@ async def get_risk_metrics():
         martingale_step=app_state.risk_manager.martingale_step,
         consecutive_losses=app_state.risk_manager.consecutive_losses,
         dd_triggered=app_state.risk_manager.dd_triggered,
+        daily_profit_locked=app_state.risk_manager.profit_locked,
+        daily_loss_locked=app_state.risk_manager.loss_locked,
+        lock_reason=app_state.risk_manager.lock_reason,
         open_trades=len(app_state.trade_manager.get_open_trades()),
         spread=spread,
     )
+
+
+@app.get("/api/risk/daily_lock", response_model=DailyLockStatusSchema)
+async def get_daily_lock_status():
+    """Trạng thái daily lock — profit/loss lock và lý do dừng."""
+    rm = app_state.risk_manager
+    s  = app_state.settings
+    locked = rm.daily_locked
+    return DailyLockStatusSchema(
+        profit_locked=rm.profit_locked,
+        loss_locked=rm.loss_locked,
+        locked=locked,
+        lock_reason=rm.lock_reason if locked else "",
+        daily_pnl=rm.daily_pnl,
+        daily_profit_target=s.daily_profit_target,
+        daily_loss_limit=s.daily_loss_limit,
+        unlocked_by_user=not locked,
+    )
+
+
+@app.post("/api/robot/reset_daily_lock")
+async def reset_daily_lock():
+    """
+    User manually resets daily profit/loss locks.
+    After reset, robot can be restarted normally.
+    """
+    app_state.risk_manager.reset_daily_locks()
+    logger.info("Daily locks reset by user")
+    await app_state.broadcast({
+        "event": "daily_lock_reset",
+        "timestamp": time.time(),
+    })
+    return {"status": "ok", "message": "Daily profit/loss locks have been reset."}
+
+
+@app.get("/api/capital/profile", response_model=CapitalProfileSchema)
+async def get_capital_profile():
+    """Current capital profile and recommended parameters."""
+    s       = app_state.settings
+    profile_name = s.capital_profile
+    if profile_name.upper() == "AUTO":
+        profile = app_state.capital_manager.detect(app_state.balance)
+    else:
+        profile = app_state.capital_manager.get_profile(profile_name)
+    return CapitalProfileSchema(
+        profile=profile.profile,
+        balance=app_state.balance,
+        lot_mode=profile.lot_mode,
+        lot_value=profile.lot_value,
+        max_lot=profile.max_lot,
+        max_daily_dd=profile.max_daily_dd_pct,
+        max_overall_dd=profile.max_overall_dd_pct,
+        risk_per_trade=profile.lot_value,
+        max_trades_at_time=profile.max_trades_at_time,
+        description=profile.description,
+    )
+
+
+@app.get("/api/capital/suggest_targets")
+async def suggest_daily_targets():
+    """Suggest daily profit target and loss limit based on current capital and performance."""
+    tm = app_state.trade_manager
+    win_rate = tm.win_rate()
+    closed   = tm.get_closed_trades()
+    avg_pnl  = sum(t.pnl for t in closed) / max(len(closed), 1)
+    targets  = app_state.capital_manager.suggest_daily_targets(
+        balance=app_state.balance,
+        profile_name=app_state.settings.capital_profile,
+        recent_win_rate=win_rate,
+        avg_trade_pnl=avg_pnl,
+    )
+    return targets
+
+
+@app.get("/api/candle_library/status", response_model=CandleLibraryStatusSchema)
+async def get_candle_library_status():
+    """Status of the realtime candle library."""
+    s = app_state.candle_library.status()
+    return CandleLibraryStatusSchema(**s)
+
+
+@app.get("/api/llm/status", response_model=LLMStatusSchema)
+async def get_llm_status():
+    """Status of the LLM Orchestrator."""
+    s = app_state.llm.status()
+    return LLMStatusSchema(**s)
+
+
+@app.post("/api/llm/ask")
+async def llm_ask(body: dict):
+    """
+    Ask the LLM a question about the current market/robot state.
+    Body: {"prompt": "..."}
+    """
+    prompt = body.get("prompt", "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    answer = app_state.llm.think(prompt)
+    return {"answer": answer, "backend": app_state.llm.backend}
 
 
 # ── AutoPilot status ───────────────────────────────────────────────────── #
@@ -1211,6 +1484,841 @@ async def get_broker_status():
 @app.get("/health")
 async def health():
     return {"status": "ok", "timestamp": time.time()}
+
+
+# ── Warm-up API ────────────────────────────────────────────────────────── #
+
+@app.get("/api/warmup/status")
+async def warmup_status():
+    """
+    Trả về kết quả lần warm-up gần nhất.
+    lstm_ready / ensemble_ready / win_classifier_ready = True nghĩa là model
+    đã sẵn sàng hoạt động (đã qua ngưỡng cold-start).
+    """
+    report = app_state.warmup_report
+    if report is None:
+        return {"status": "not_run", "message": "Warm-up chưa được chạy"}
+    return {"status": "ok", **report.to_dict()}
+
+
+@app.post("/api/warmup/run")
+async def warmup_run(
+    lstm_samples: int = 25,
+    outcome_samples: int = 10,
+    label_noise: float = 0.05,
+):
+    """
+    Chạy lại warm-up pipeline thủ công.
+
+    Hữu ích khi:
+    - Thay đổi symbol/timeframe và cần reset model
+    - Model bị confused sau quá nhiều lệnh thua liên tiếp
+    - Muốn boost lại learning speed
+
+    Parameters
+    ----------
+    lstm_samples    : số lượng candle sequence mỗi wave state (default 25)
+    outcome_samples : số lượng trade outcome mỗi (mode, wave_state) (default 10)
+    label_noise     : xác suất flip label để tránh overfitting (default 0.05)
+    """
+    try:
+        pipeline = WarmUpPipeline(
+            decision_engine=app_state.decision_engine,
+            wave_detector=app_state.wave_detector,
+            lstm_samples=lstm_samples,
+            outcome_samples=outcome_samples,
+            label_noise=label_noise,
+        )
+        report = pipeline.run()
+        app_state.warmup_report  = report
+        app_state.warmup_pipeline = pipeline
+        return {"status": "ok", **report.to_dict()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ── Evolution API ──────────────────────────────────────────────────────── #
+
+@app.get("/api/evolution/status")
+async def evolution_status():
+    """
+    Trả về kết quả lần evolution gần nhất.
+
+    Bao gồm:
+    - best_genome: chiến lược tốt nhất tìm được
+    - best_fitness: profit_factor, win_rate, max_drawdown của chiến lược đó
+    - generation_bests: fitness tốt nhất mỗi generation
+    - applied_to_live: True nếu đã apply vào live system
+    """
+    result = app_state.evolution_result
+    if result is None:
+        return {"status": "not_run", "message": "Evolution chưa được chạy"}
+    return {"status": "ok", **result.to_dict()}
+
+
+@app.post("/api/evolution/run")
+async def evolution_run(
+    pop_size:         int   = 20,
+    generations:      int   = 5,
+    episodes:         int   = 10,
+    bars_per_episode: int   = 80,
+    apply_to_live:    bool  = False,
+):
+    """
+    Chạy evolutionary self-play: tạo môi trường giả lập, để các chiến lược
+    cạnh tranh, và chọn ra chiến lược tiến hóa tốt nhất.
+
+    Parameters
+    ----------
+    pop_size         : số lượng agent trong population (default 20)
+    generations      : số vòng tiến hóa (default 5)
+    episodes         : số lượng market episode mỗi agent (default 10)
+    bars_per_episode : số candle bar mỗi episode (default 80)
+    apply_to_live    : nếu True, tự động apply best genome vào live system
+
+    Kết quả
+    -------
+    Trả về EvolutionResult bao gồm best_genome và toàn bộ population stats.
+    Nếu apply_to_live=True, DecisionEngine sẽ cập nhật:
+      - mode_weight_adjs  (ưu tiên mode tốt nhất)
+      - base_min_score    (ngưỡng entry)
+      - lot_scale         (kích thước lệnh)
+    """
+    try:
+        engine = EvolutionaryEngine(
+            pop_size         = pop_size,
+            generations      = generations,
+            episodes         = episodes,
+            bars_per_episode = bars_per_episode,
+        )
+        result = engine.run()
+        app_state.evolution_engine = engine
+        app_state.evolution_result = result
+
+        if apply_to_live:
+            result.apply_to(app_state.decision_engine)
+
+        return {"status": "ok", **result.to_dict()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/evolution/apply")
+async def evolution_apply():
+    """
+    Apply kết quả evolution gần nhất vào live DecisionEngine.
+
+    Cập nhật:
+    - mode_weight_adjs của AdaptiveController
+    - base_min_score (ngưỡng entry quality)
+    - lot_scale (kích thước lệnh)
+
+    Chỉ có tác dụng nếu đã chạy /api/evolution/run trước đó.
+    """
+    result = app_state.evolution_result
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa có kết quả evolution. Hãy chạy POST /api/evolution/run trước."
+        )
+    if result.applied_to_live:
+        return {
+            "status": "already_applied",
+            "message": "Best genome đã được apply trước đó",
+            "applied_genome": result.best_genome.to_dict(),
+        }
+    result.apply_to(app_state.decision_engine)
+    return {
+        "status": "ok",
+        "message": "Best genome đã được apply vào live system",
+        "applied_genome": result.best_genome.to_dict(),
+        "best_fitness": result.best_fitness.to_dict(),
+    }
+
+
+# ── Meta-Learning API ──────────────────────────────────────────────────── #
+
+@app.get("/api/meta/status")
+async def meta_status():
+    """
+    Trả về kết quả meta-learning gần nhất.
+
+    Bao gồm:
+    - best_genome     : chiến lược tốt nhất qua tất cả outer loop
+    - gene_importances: tầm quan trọng của từng gene (importance, mean_winner_value, keep_confidence)
+    - gene_insights   : giải thích bằng ngôn ngữ tự nhiên vì sao winner thắng
+    - outer_loop_bests: fitness tốt nhất mỗi outer loop
+    """
+    result = app_state.meta_result
+    if result is None:
+        return {"status": "not_run", "message": "Meta-learning chưa được chạy"}
+    return {"status": "ok", **result.to_dict()}
+
+
+@app.get("/api/meta/gene_insights")
+async def meta_gene_insights():
+    """
+    Trả về phân tích ngôn ngữ tự nhiên về gene chiến lược:
+    - Gene nào DOMINANT (tương quan cao với win)
+    - Gene nào CONSERVED (hội tụ nhất quán ở winners)
+    - Gene nào NEUTRAL (có thể tự do đột biến)
+
+    Chỉ có dữ liệu sau khi đã chạy POST /api/meta/run.
+    """
+    result = app_state.meta_result
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Chưa có kết quả meta-learning. Hãy chạy POST /api/meta/run trước."
+        )
+    return {
+        "status":         "ok",
+        "gene_insights":  result.gene_insights,
+        "gene_importances": {
+            k: v.to_dict() for k, v in result.gene_importances.items()
+        },
+    }
+
+
+@app.post("/api/meta/run")
+async def meta_run(
+    outer_loops:      int  = 3,
+    pop_size:         int  = 20,
+    generations:      int  = 5,
+    episodes:         int  = 10,
+    bars_per_episode: int  = 80,
+    top_k_winners:    int  = 5,
+    apply_to_live:    bool = False,
+):
+    """
+    Chạy Meta-Learning + Strategy Genome Engine.
+
+    Đây là cấp độ cao nhất: không chỉ tiến hóa chiến lược mà còn
+    học ra VÌ SAO winner thắng và dùng kiến thức đó để breed chiến lược
+    thông minh hơn cho vòng tiến hóa tiếp theo.
+
+    Quá trình (mỗi outer_loop):
+      1. Evolve: chạy EvolutionaryEngine × generations
+      2. Analyse: WinnerAnalyzer học gene importance từ top-K winners
+      3. Accumulate: GenePool lưu gene values × fitness của winners
+      4. Breed: StrategyGenetics dùng GenePool để breed next generation
+         (importance-weighted crossover + guided mutation)
+
+    Parameters
+    ----------
+    outer_loops      : số vòng lặp Evolve→Analyse→Breed (default 3)
+    pop_size         : agents per evolution run (default 20)
+    generations      : generations per evolution run (default 5)
+    episodes         : market episodes per agent (default 10)
+    bars_per_episode : candle bars per episode (default 80)
+    top_k_winners    : số winner dùng để học gene importance (default 5)
+    apply_to_live    : nếu True, tự động apply best genome vào live system
+
+    Kết quả
+    -------
+    - best_genome với chiến lược tốt nhất qua toàn bộ meta-learning
+    - gene_importances cho từng gene
+    - gene_insights giải thích vì sao winner thắng
+    """
+    try:
+        engine = MetaLearningEngine(
+            outer_loops      = outer_loops,
+            pop_size         = pop_size,
+            generations      = generations,
+            episodes         = episodes,
+            bars_per_episode = bars_per_episode,
+            top_k_winners    = top_k_winners,
+        )
+        result = engine.run()
+        app_state.meta_engine = engine
+        app_state.meta_result = result
+
+        if apply_to_live:
+            result.apply_to(app_state.decision_engine)
+
+        return {"status": "ok", **result.to_dict()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/meta/apply")
+async def meta_apply():
+    """
+    Apply kết quả meta-learning gần nhất vào live DecisionEngine.
+
+    Cập nhật:
+    - mode_weight_adjs của AdaptiveController (dựa trên gene tốt nhất)
+    - base_min_score
+    - lot_scale
+
+    Chỉ có tác dụng nếu đã chạy /api/meta/run trước đó.
+    """
+    result = app_state.meta_result
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa có kết quả meta-learning. Hãy chạy POST /api/meta/run trước."
+        )
+    if result.applied_to_live:
+        return {
+            "status":         "already_applied",
+            "message":        "Meta-learned genome đã được apply trước đó",
+            "applied_genome": result.best_genome.to_dict(),
+        }
+    result.apply_to(app_state.decision_engine)
+    return {
+        "status":         "ok",
+        "message":        "Meta-learned genome đã được apply vào live system",
+        "applied_genome": result.best_genome.to_dict(),
+        "best_fitness":   result.best_fitness.to_dict(),
+        "gene_insights":  result.gene_insights,
+    }
+
+
+# ── Causal Strategy Intelligence API ──────────────────────────────────── #
+
+@app.get("/api/causal/status")
+async def causal_status():
+    """
+    Trả về kết quả causal analysis gần nhất.
+
+    Bao gồm:
+    - causal_scorecards     : mỗi gene có causal_score, spurious_score, regime_robustness
+    - counterfactual_genome : chiến lược tối ưu từ world model (không phải từ evolution)
+    - world_model_r2        : chất lượng của world model per regime
+    - causal_insights       : giải thích nhân quả bằng ngôn ngữ tự nhiên
+    """
+    result = app_state.causal_result
+    if result is None:
+        return {"status": "not_run", "message": "Causal analysis chưa được chạy"}
+    return {"status": "ok", **result.to_dict()}
+
+
+@app.get("/api/causal/insights")
+async def causal_insights():
+    """
+    Trả về phân tích nhân quả bằng ngôn ngữ tự nhiên:
+
+    - Gene nào THẬT SỰ GÂY RA thắng lợi (causal, not just correlated)
+    - Gene nào chỉ là tương quan giả (spurious)
+    - Gene nào sống sót qua tất cả market regime
+    - World model đề xuất giá trị tối ưu cho từng gene là bao nhiêu
+
+    Chỉ có dữ liệu sau khi đã chạy POST /api/causal/run.
+    """
+    result = app_state.causal_result
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Chưa có kết quả causal. Hãy chạy POST /api/causal/run trước."
+        )
+    return {
+        "status":          "ok",
+        "causal_insights": result.causal_insights,
+        "causal_scorecards": {
+            k: v.to_dict() for k, v in result.causal_scorecards.items()
+        },
+        "world_model_r2": result.world_model_r2,
+    }
+
+
+@app.post("/api/causal/run")
+async def causal_run(
+    n_samples:        int  = 30,
+    episodes:         int  = 8,
+    bars_per_episode: int  = 70,
+    intervention_m:   int  = 8,
+    apply_to_live:    bool = False,
+):
+    """
+    Chạy World Model + Causal Strategy Engine.
+
+    Đây là tầng cao nhất của intelligence stack — vượt qua correlation
+    để học thật sự nhân quả chiến lược:
+
+    1. Data Collection: sample N genomes × 3 regimes (BULL/BEAR/SIDEWAYS)
+       → ma trận (genome_vector, regime, fitness)
+
+    2. World Model: fit linear P(fitness | genome, regime) bằng OLS
+       → biết được trong thế giới tổng hợp, gene nào ảnh hưởng thế nào
+
+    3. Causal Analysis (3 phương pháp song song):
+       a) Intervention effect: perturb gene ±Δ, đo ΔFitness (ablation study)
+       b) Cross-regime consistency: |r| per regime → spurious nếu chỉ đúng 1 regime
+       c) Partial correlation: kiểm soát tất cả gene khác → r thuần tuý
+
+    4. Counterfactual Genome: world model argmax — suy ra chiến lược tối ưu
+       ngay cả khi không có dữ liệu trực tiếp
+
+    Parameters
+    ----------
+    n_samples        : số genome sample cho data collection (default 30)
+    episodes         : market episodes per evaluation (default 8)
+    bars_per_episode : candle bars per episode (default 70)
+    intervention_m   : số base genome dùng cho ablation study (default 8)
+    apply_to_live    : nếu True, tự động apply counterfactual genome vào live
+
+    Kết quả
+    -------
+    - causal_scorecards: Dict[gene → {causal_score, spurious_score, regime_robustness, ...}]
+    - counterfactual_genome: chiến lược suy diễn từ world model
+    - causal_insights: giải thích nhân quả bằng ngôn ngữ tự nhiên
+    """
+    try:
+        engine = CausalStrategyEngine(
+            n_samples        = n_samples,
+            episodes         = episodes,
+            bars_per_episode = bars_per_episode,
+            intervention_m   = intervention_m,
+        )
+        result = engine.run()
+        app_state.causal_engine = engine
+        app_state.causal_result = result
+
+        if apply_to_live:
+            result.apply_to(app_state.decision_engine)
+
+        return {"status": "ok", **result.to_dict()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/causal/apply")
+async def causal_apply():
+    """
+    Apply kết quả causal analysis vào live DecisionEngine.
+
+    Áp dụng counterfactual genome — chiến lược được suy diễn từ world model
+    (causally optimal strategy), không phải từ simple evolution.
+
+    Chỉ có tác dụng nếu đã chạy /api/causal/run trước đó.
+    """
+    result = app_state.causal_result
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa có kết quả causal. Hãy chạy POST /api/causal/run trước."
+        )
+    if result.applied_to_live:
+        return {
+            "status":         "already_applied",
+            "message":        "Counterfactual genome đã được apply trước đó",
+            "applied_genome": result.counterfactual_genome.to_dict(),
+        }
+    result.apply_to(app_state.decision_engine)
+    return {
+        "status":              "ok",
+        "message":             "Causal counterfactual genome đã được apply vào live system",
+        "applied_genome":      result.counterfactual_genome.to_dict(),
+        "causal_insights":     result.causal_insights,
+        "world_model_r2":      result.world_model_r2,
+    }
+
+
+# ── Utility Optimization API ───────────────────────────────────────────── #
+
+@app.post("/api/utility/run")
+async def utility_run(
+    n_genomes:           int   = 25,
+    episodes:            int   = 8,
+    bars_per_episode:    int   = 70,
+    growth_weight:       float = 0.35,
+    trust_weight:        float = 0.30,
+    stability_weight:    float = 0.20,
+    speed_weight:        float = 0.10,
+    dominance_weight:    float = 0.05,
+    risk_aversion:       float = 0.40,
+    time_preference:     float = 0.60,
+    kelly_safety_factor: float = 0.25,
+    apply_to_live:       bool  = False,
+):
+    """
+    Chạy Decision Theory + Utility Optimization Engine.
+
+    Đây là tầng cao nhất của intelligence stack — rational strategic agent.
+    Hệ không chỉ tối ưu win/loss hay causal_score, mà tối ưu theo utility
+    đa chiều dài hạn:
+
+    1. Growth utility  : E[log(wealth)] — Kelly-optimal geometric growth
+    2. Trust utility   : (1 − max_drawdown) × profit_factor — không blow up
+    3. Stability utility: Sharpe-like equity smoothness
+    4. Speed utility   : trade frequency — more opportunities vs noise
+    5. Dominance utility: long-term vs short-term performance split
+
+    Trade-offs được kiểm soát bởi UtilityConfig:
+    - growth_weight vs trust_weight    → growth vs capital preservation
+    - speed_weight vs stability_weight → frequency vs smoothness
+    - time_preference                  → myopic vs far-sighted dominance
+    - risk_aversion                    → arithmetic vs log-return optimisation
+    - kelly_safety_factor              → fraction of Kelly for lot sizing
+
+    Params
+    ------
+    n_genomes           : số genomes cần evaluate (default 25)
+    episodes            : số episodes mỗi genome (default 8)
+    bars_per_episode    : số bars mỗi episode (default 70)
+    growth_weight       : trọng số utility growth (default 0.35)
+    trust_weight        : trọng số utility trust/drawdown (default 0.30)
+    stability_weight    : trọng số utility equity smoothness (default 0.20)
+    speed_weight        : trọng số utility trade frequency (default 0.10)
+    dominance_weight    : trọng số utility long-term dominance (default 0.05)
+    risk_aversion       : 0=risk-neutral, 1=fully risk-averse (default 0.40)
+    time_preference     : 0=myopic, 1=far-sighted (default 0.60)
+    kelly_safety_factor : fraction of Kelly criterion (default 0.25)
+    apply_to_live       : tự động apply optimal genome sau khi chạy
+    """
+    cfg = UtilityConfig(
+        growth_weight       = growth_weight,
+        trust_weight        = trust_weight,
+        stability_weight    = stability_weight,
+        speed_weight        = speed_weight,
+        dominance_weight    = dominance_weight,
+        risk_aversion       = risk_aversion,
+        time_preference     = time_preference,
+        kelly_safety_factor = kelly_safety_factor,
+    )
+    engine = UtilityOptimizationEngine(
+        n_genomes        = n_genomes,
+        episodes         = episodes,
+        bars_per_episode = bars_per_episode,
+        utility_config   = cfg,
+    )
+    app_state.utility_engine = engine
+    result = engine.run()
+    app_state.utility_result = result
+
+    if apply_to_live:
+        result.apply_to(app_state.decision_engine)
+
+    return {
+        "status":         "ok",
+        "n_genomes":      result.n_genomes,
+        "pareto_count":   len(result.pareto_indices),
+        "duration_secs":  result.duration_secs,
+        "kelly_lot_scale": result.kelly_lot_scale,
+        "optimal_utility": result.optimal_utility.to_dict(),
+        "optimal_genome":  result.optimal_genome.to_dict(),
+        "utility_insights": result.utility_insights,
+        "applied_to_live":  result.applied_to_live,
+    }
+
+
+@app.get("/api/utility/status")
+async def utility_status():
+    """
+    Trả về kết quả utility optimization gần nhất.
+
+    Bao gồm:
+    - optimal_genome     : genome tối ưu theo expected utility
+    - optimal_utility    : breakdown 5 chiều utility
+    - kelly_lot_scale    : lot size tối ưu theo Kelly criterion
+    - pareto_indices     : chỉ số các genome Pareto-efficient
+    - all_utilities      : composite utility của tất cả genome
+    - utility_config     : cấu hình UtilityConfig đã dùng
+    - utility_insights   : phân tích trade-off bằng ngôn ngữ tự nhiên
+    """
+    result = app_state.utility_result
+    if result is None:
+        return {"status": "not_run", "message": "Utility optimization chưa được chạy"}
+    return {"status": "ok", **result.to_dict()}
+
+
+@app.get("/api/utility/pareto")
+async def utility_pareto():
+    """
+    Trả về dữ liệu Pareto frontier để visualisation.
+
+    Mỗi genome bao gồm:
+    - genome_idx  : chỉ số trong population
+    - is_pareto   : True nếu genome này là Pareto-efficient
+    - utility     : UtilityVector (5 chiều + composite)
+    - genome      : thông số genome chính (min_score, tp_rr, lot_scale...)
+
+    Pareto-efficient strategy = không có strategy nào tốt hơn trên TẤT CẢ 5 chiều.
+    Đây là tập hợp "chiến lược không bị dominated" — mỗi điểm đại diện cho
+    một trade-off khác nhau giữa growth/trust/stability/speed/dominance.
+    """
+    result = app_state.utility_result
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Chưa có kết quả utility. Hãy chạy POST /api/utility/run trước."
+        )
+    return {
+        "status":          "ok",
+        "pareto_data":     result.pareto_data(),
+        "pareto_count":    len(result.pareto_indices),
+        "n_genomes":       result.n_genomes,
+        "optimal_idx":     int(
+            max(result.pareto_indices or range(result.n_genomes),
+                key=lambda i: result.utility_vectors[i].composite)
+        ),
+    }
+
+
+@app.post("/api/utility/configure")
+async def utility_configure(
+    growth_weight:       float = 0.35,
+    trust_weight:        float = 0.30,
+    stability_weight:    float = 0.20,
+    speed_weight:        float = 0.10,
+    dominance_weight:    float = 0.05,
+    risk_aversion:       float = 0.40,
+    time_preference:     float = 0.60,
+    kelly_safety_factor: float = 0.25,
+):
+    """
+    Cập nhật UtilityConfig mà KHÔNG cần chạy lại simulation.
+
+    Sử dụng khi bạn muốn thay đổi trade-off preferences mà không tốn thời gian
+    re-run toàn bộ evaluation. Engine sẽ recompute utility vectors và chọn lại
+    optimal genome với config mới.
+
+    Ví dụ:
+    - risk_aversion=0.8 → bảo thủ hơn, ưu tiên capital preservation
+    - growth_weight=0.5 → aggressive growth, chấp nhận rủi ro cao hơn
+    - time_preference=0.9 → ưu tiên strategies tốt trong RECENT trades
+    - kelly_safety_factor=0.1 → dùng chỉ 10% Kelly fraction
+    """
+    result = app_state.utility_result
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa có kết quả utility. Hãy chạy POST /api/utility/run trước."
+        )
+    new_cfg = UtilityConfig(
+        growth_weight       = growth_weight,
+        trust_weight        = trust_weight,
+        stability_weight    = stability_weight,
+        speed_weight        = speed_weight,
+        dominance_weight    = dominance_weight,
+        risk_aversion       = risk_aversion,
+        time_preference     = time_preference,
+        kelly_safety_factor = kelly_safety_factor,
+    )
+    app_state.utility_engine.reconfigure(new_cfg)
+    # reconfigure() updates last_result in place
+    result = app_state.utility_result
+    return {
+        "status":            "reconfigured",
+        "new_config":        new_cfg.to_dict(),
+        "new_optimal_utility": result.optimal_utility.to_dict() if result else None,
+        "new_kelly_lot_scale": result.kelly_lot_scale if result else None,
+        "utility_insights":    result.utility_insights if result else [],
+    }
+
+
+@app.post("/api/utility/apply")
+async def utility_apply():
+    """
+    Apply kết quả utility optimization vào live DecisionEngine.
+
+    Áp dụng:
+    - optimal_genome   : mode_weights, min_score (từ utility-maximising strategy)
+    - kelly_lot_scale  : lot size tối ưu theo Kelly criterion (risk-aversion adjusted)
+
+    Đây là bước cuối cùng của intelligence stack:
+    Evolution → Meta-Learning → Causal Intelligence → Rational Agent (Utility)
+
+    Rational agent chọn chiến lược theo expected utility đa chiều, không chỉ
+    maximise một metric. Kelly criterion đảm bảo lot size tối ưu về geometric
+    growth rate.
+    """
+    result = app_state.utility_result
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa có kết quả utility. Hãy chạy POST /api/utility/run trước."
+        )
+    if result.applied_to_live:
+        return {
+            "status":            "already_applied",
+            "message":           "Rational agent policy đã được apply trước đó",
+            "optimal_genome":    result.optimal_genome.to_dict(),
+            "kelly_lot_scale":   result.kelly_lot_scale,
+            "optimal_utility":   result.optimal_utility.to_dict(),
+        }
+    result.apply_to(app_state.decision_engine)
+    return {
+        "status":            "ok",
+        "message":           "Rational agent policy (utility-optimal + Kelly lot) đã được apply",
+        "optimal_genome":    result.optimal_genome.to_dict(),
+        "kelly_lot_scale":   result.kelly_lot_scale,
+        "optimal_utility":   result.optimal_utility.to_dict(),
+        "utility_insights":  result.utility_insights,
+    }
+
+
+# ── Game Theory + Ecosystem API ────────────────────────────────────────── #
+
+@app.post("/api/ecosystem/run")
+async def ecosystem_run(
+    n_opponents:         int   = 5,
+    n_candidate_genomes: int   = 15,
+    episodes:            int   = 6,
+    bars_per_episode:    int   = 70,
+    nash_iterations:     int   = 8,
+    exploitation_rate:   float = 0.5,
+    impact_coefficient:  float = 0.15,
+    impact_decay:        float = 0.80,
+    apply_to_live:       bool  = False,
+):
+    """
+    Chạy Multi-Agent Game Theory + Market Ecosystem Engine.
+
+    Đây là tầng cao nhất của intelligence stack — strategic ecosystem intelligence.
+    Hệ không chỉ tối ưu utility của bản thân trong chân không, mà tối ưu trong
+    môi trường có đối thủ, thuật toán nền tảng, và market impact:
+
+    Opponent Types (5 loại):
+    - MOMENTUM_FOLLOWER : chase trends → crowds our entries, fades extremes
+    - MEAN_REVERTER     : fade extremes → counter-trades breakouts
+    - NOISE_TRADER      : random entries → random slippage injection
+    - MARKET_MAKER      : provide liquidity → adverse-selection risk
+    - TREND_FADER       : exploit late-trend crowding → challenges our momentum plays
+
+    Phases:
+    1. Spawn opponent agents với diverse behavioral profiles
+    2. Evaluate N candidate genomes trong multi-agent ecosystem với market impact
+    3. Iterative Best Response (IBR) → Nash equilibrium approximation
+    4. Exploitability scoring per opponent type (0=unexploitable, 1=fully exploitable)
+    5. Build ecosystem insights + strategic recommendations
+
+    Params
+    ------
+    n_opponents         : số lượng opponents (default 5)
+    n_candidate_genomes : số genomes để evaluate (default 15)
+    episodes            : số market episodes (default 6)
+    bars_per_episode    : số bars mỗi episode (default 70)
+    nash_iterations     : max IBR iterations for Nash (default 8)
+    exploitation_rate   : how aggressively opponents adapt (0=static, 1=adaptive)
+    impact_coefficient  : price impact per unit net crowd (default 0.15)
+    impact_decay        : market impact decay per bar (default 0.80)
+    apply_to_live       : tự động apply best response genome sau khi chạy
+    """
+    cfg = EcosystemConfig(
+        n_opponents         = n_opponents,
+        n_candidate_genomes = n_candidate_genomes,
+        episodes            = episodes,
+        bars_per_episode    = bars_per_episode,
+        nash_iterations     = nash_iterations,
+        exploitation_rate   = exploitation_rate,
+        impact_coefficient  = impact_coefficient,
+        impact_decay        = impact_decay,
+    )
+    engine = GameTheoryEngine(config=cfg)
+    app_state.ecosystem_engine = engine
+    result = engine.run()
+    app_state.ecosystem_result = result
+
+    if apply_to_live:
+        result.apply_to(app_state.decision_engine)
+
+    return {
+        "status":                "ok",
+        "nash_value":            result.nash_equilibrium.nash_value,
+        "ecosystem_pf":          result.ecosystem_pf,
+        "isolation_pf":          result.isolation_pf,
+        "pf_delta":              round(result.ecosystem_pf - result.isolation_pf, 3),
+        "n_opponents":           result.n_opponents,
+        "exploitability":        result.exploitability,
+        "duration_secs":         result.duration_secs,
+        "best_response_genome":  result.best_response_genome.to_dict(),
+        "ecosystem_insights":    result.ecosystem_insights,
+        "applied_to_live":       result.applied_to_live,
+    }
+
+
+@app.get("/api/ecosystem/status")
+async def ecosystem_status():
+    """
+    Trả về kết quả game theory / ecosystem simulation gần nhất.
+
+    Bao gồm:
+    - best_response_genome : genome tối ưu trong multi-agent ecosystem
+    - nash_equilibrium     : Nash equilibrium details + opponent profile
+    - exploitability       : Dict[opponent_type → score ∈ [0,1]]
+    - ecosystem_pf         : profit_factor trong ecosystem (có market impact)
+    - isolation_pf         : profit_factor benchmark (không có opponents)
+    - impact_stats         : crowding %, avg slippage, max impact
+    - ecosystem_insights   : phân tích chiến lược bằng ngôn ngữ tự nhiên
+    """
+    result = app_state.ecosystem_result
+    if result is None:
+        return {"status": "not_run", "message": "Ecosystem simulation chưa được chạy"}
+    return {"status": "ok", **result.to_dict()}
+
+
+@app.get("/api/ecosystem/nash")
+async def ecosystem_nash():
+    """
+    Trả về chi tiết Nash equilibrium từ lần chạy gần nhất.
+
+    Nash equilibrium = trạng thái mà không agent nào có thể cải thiện
+    kết quả của mình bằng cách đơn phương thay đổi chiến lược.
+
+    Bao gồm:
+    - our_strategy      : chiến lược tốt nhất của chúng ta tại equilibrium
+    - opponent_profile  : aggression của mỗi loại opponent tại equilibrium
+    - is_approximate    : luôn True (exact Nash requires LP for continuous games)
+    - iterations_used   : số IBR iterations để converge
+    - convergence_gap   : |strategy[t] - strategy[t-1]| tại vòng cuối
+    - nash_value        : profit_factor của chúng ta tại equilibrium
+    """
+    result = app_state.ecosystem_result
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Chưa có kết quả ecosystem. Hãy chạy POST /api/ecosystem/run trước."
+        )
+    return {
+        "status":          "ok",
+        "nash_equilibrium": result.nash_equilibrium.to_dict(),
+        "exploitability":  result.exploitability,
+        "impact_stats":    result.impact_stats.to_dict(),
+        "ecosystem_config": result.ecosystem_config.to_dict(),
+    }
+
+
+@app.post("/api/ecosystem/apply")
+async def ecosystem_apply():
+    """
+    Apply best-response genome từ Nash equilibrium vào live DecisionEngine.
+
+    Áp dụng chiến lược tối ưu trong multi-agent ecosystem:
+    - mode_weights  : đã tối ưu để chống lại các opponent types
+    - min_score     : điều chỉnh theo exploitability và market impact
+    - lot_scale     : được cân nhắc theo mức độ crowding
+
+    Đây là bước cuối của intelligence stack:
+    Evolution → Meta-Learning → Causal Intelligence → Rational Agent
+    → Strategic Ecosystem Intelligence (Game Theory + Nash Equilibrium)
+
+    Chiến lược được chọn không chỉ tối ưu utility đa chiều mà còn
+    là best response trong môi trường có đối thủ thực tế.
+    """
+    result = app_state.ecosystem_result
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa có kết quả ecosystem. Hãy chạy POST /api/ecosystem/run trước."
+        )
+    if result.applied_to_live:
+        return {
+            "status":               "already_applied",
+            "message":              "Ecosystem best-response policy đã được apply trước đó",
+            "best_response_genome": result.best_response_genome.to_dict(),
+            "nash_value":           result.nash_equilibrium.nash_value,
+        }
+    result.apply_to(app_state.decision_engine)
+    return {
+        "status":               "ok",
+        "message":              "Ecosystem best-response (Nash equilibrium) đã được apply",
+        "best_response_genome": result.best_response_genome.to_dict(),
+        "nash_value":           result.nash_equilibrium.nash_value,
+        "exploitability":       result.exploitability,
+        "ecosystem_insights":   result.ecosystem_insights,
+    }
 
 
 if __name__ == "__main__":
