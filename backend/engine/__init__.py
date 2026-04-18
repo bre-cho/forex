@@ -35,6 +35,12 @@ from .meta_learning_engine import (
     MetaLearningResult,
     MetaLearningEngine,
 )
+from .causal_strategy_engine import (
+    CausalScoreCard,
+    WorldModel,
+    CausalIntelligenceResult,
+    CausalStrategyEngine,
+)
 
 __all__ = [
     "WaveDetector", "WaveState",
@@ -58,4 +64,5 @@ __all__ = [
     "WarmUpPipeline", "WarmUpReport",
     "AgentGenome", "AgentFitness", "EvolutionResult", "EvolutionaryEngine",
     "GeneImportance", "GenePool", "MetaLearningResult", "MetaLearningEngine",
+    "CausalScoreCard", "WorldModel", "CausalIntelligenceResult", "CausalStrategyEngine",
 ]

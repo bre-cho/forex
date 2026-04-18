@@ -46,6 +46,7 @@ from engine import (
     WarmUpPipeline, WarmUpReport,
     EvolutionaryEngine, EvolutionResult,
     MetaLearningEngine, MetaLearningResult, GeneImportance,
+    CausalStrategyEngine, CausalIntelligenceResult,
 )
 from engine.signal_coordinator import TradeSignal as CoordSignal
 from engine.risk_manager import RiskConfig, MartingaleConfig
@@ -162,6 +163,12 @@ class AppState:
         # smarter strategies across multiple evolution loops.
         self.meta_engine: MetaLearningEngine = MetaLearningEngine()
         self.meta_result: Optional[MetaLearningResult] = None
+
+        # Causal strategy engine — world model + causal strategic intelligence.
+        # Learns which genes CAUSE wins (not just correlate), detects spurious
+        # correlations, tests regime robustness, and infers counterfactual strategies.
+        self.causal_engine: CausalStrategyEngine = CausalStrategyEngine()
+        self.causal_result: Optional[CausalIntelligenceResult] = None
 
         # Maps trade_id → {mode, wave_state, retrace_zone, initial_risk}
         # populated at open, consumed at close for DecisionEngine.record_outcome()
@@ -1751,6 +1758,146 @@ async def meta_apply():
         "applied_genome": result.best_genome.to_dict(),
         "best_fitness":   result.best_fitness.to_dict(),
         "gene_insights":  result.gene_insights,
+    }
+
+
+# ── Causal Strategy Intelligence API ──────────────────────────────────── #
+
+@app.get("/api/causal/status")
+async def causal_status():
+    """
+    Trả về kết quả causal analysis gần nhất.
+
+    Bao gồm:
+    - causal_scorecards     : mỗi gene có causal_score, spurious_score, regime_robustness
+    - counterfactual_genome : chiến lược tối ưu từ world model (không phải từ evolution)
+    - world_model_r2        : chất lượng của world model per regime
+    - causal_insights       : giải thích nhân quả bằng ngôn ngữ tự nhiên
+    """
+    result = app_state.causal_result
+    if result is None:
+        return {"status": "not_run", "message": "Causal analysis chưa được chạy"}
+    return {"status": "ok", **result.to_dict()}
+
+
+@app.get("/api/causal/insights")
+async def causal_insights():
+    """
+    Trả về phân tích nhân quả bằng ngôn ngữ tự nhiên:
+
+    - Gene nào THẬT SỰ GÂY RA thắng lợi (causal, not just correlated)
+    - Gene nào chỉ là tương quan giả (spurious)
+    - Gene nào sống sót qua tất cả market regime
+    - World model đề xuất giá trị tối ưu cho từng gene là bao nhiêu
+
+    Chỉ có dữ liệu sau khi đã chạy POST /api/causal/run.
+    """
+    result = app_state.causal_result
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Chưa có kết quả causal. Hãy chạy POST /api/causal/run trước."
+        )
+    return {
+        "status":          "ok",
+        "causal_insights": result.causal_insights,
+        "causal_scorecards": {
+            k: v.to_dict() for k, v in result.causal_scorecards.items()
+        },
+        "world_model_r2": result.world_model_r2,
+    }
+
+
+@app.post("/api/causal/run")
+async def causal_run(
+    n_samples:        int  = 30,
+    episodes:         int  = 8,
+    bars_per_episode: int  = 70,
+    intervention_m:   int  = 8,
+    apply_to_live:    bool = False,
+):
+    """
+    Chạy World Model + Causal Strategy Engine.
+
+    Đây là tầng cao nhất của intelligence stack — vượt qua correlation
+    để học thật sự nhân quả chiến lược:
+
+    1. Data Collection: sample N genomes × 3 regimes (BULL/BEAR/SIDEWAYS)
+       → ma trận (genome_vector, regime, fitness)
+
+    2. World Model: fit linear P(fitness | genome, regime) bằng OLS
+       → biết được trong thế giới tổng hợp, gene nào ảnh hưởng thế nào
+
+    3. Causal Analysis (3 phương pháp song song):
+       a) Intervention effect: perturb gene ±Δ, đo ΔFitness (ablation study)
+       b) Cross-regime consistency: |r| per regime → spurious nếu chỉ đúng 1 regime
+       c) Partial correlation: kiểm soát tất cả gene khác → r thuần tuý
+
+    4. Counterfactual Genome: world model argmax — suy ra chiến lược tối ưu
+       ngay cả khi không có dữ liệu trực tiếp
+
+    Parameters
+    ----------
+    n_samples        : số genome sample cho data collection (default 30)
+    episodes         : market episodes per evaluation (default 8)
+    bars_per_episode : candle bars per episode (default 70)
+    intervention_m   : số base genome dùng cho ablation study (default 8)
+    apply_to_live    : nếu True, tự động apply counterfactual genome vào live
+
+    Kết quả
+    -------
+    - causal_scorecards: Dict[gene → {causal_score, spurious_score, regime_robustness, ...}]
+    - counterfactual_genome: chiến lược suy diễn từ world model
+    - causal_insights: giải thích nhân quả bằng ngôn ngữ tự nhiên
+    """
+    try:
+        engine = CausalStrategyEngine(
+            n_samples        = n_samples,
+            episodes         = episodes,
+            bars_per_episode = bars_per_episode,
+            intervention_m   = intervention_m,
+        )
+        result = engine.run()
+        app_state.causal_engine = engine
+        app_state.causal_result = result
+
+        if apply_to_live:
+            result.apply_to(app_state.decision_engine)
+
+        return {"status": "ok", **result.to_dict()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/causal/apply")
+async def causal_apply():
+    """
+    Apply kết quả causal analysis vào live DecisionEngine.
+
+    Áp dụng counterfactual genome — chiến lược được suy diễn từ world model
+    (causally optimal strategy), không phải từ simple evolution.
+
+    Chỉ có tác dụng nếu đã chạy /api/causal/run trước đó.
+    """
+    result = app_state.causal_result
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa có kết quả causal. Hãy chạy POST /api/causal/run trước."
+        )
+    if result.applied_to_live:
+        return {
+            "status":         "already_applied",
+            "message":        "Counterfactual genome đã được apply trước đó",
+            "applied_genome": result.counterfactual_genome.to_dict(),
+        }
+    result.apply_to(app_state.decision_engine)
+    return {
+        "status":              "ok",
+        "message":             "Causal counterfactual genome đã được apply vào live system",
+        "applied_genome":      result.counterfactual_genome.to_dict(),
+        "causal_insights":     result.causal_insights,
+        "world_model_r2":      result.world_model_r2,
     }
 
 
