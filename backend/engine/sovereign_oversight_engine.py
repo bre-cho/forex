@@ -99,6 +99,14 @@ logger = logging.getLogger(__name__)
 
 _EPS = 1e-9
 
+# ── UPGRADE directive thresholds ──────────────────────────────────────────── #
+
+# A cluster is marked UPGRADE when it has demonstrated reliability (confidence
+# above this value) but its actual ROI is lower than expected — meaning it is
+# under-utilised and should be run with more aggressive parameters.
+_UPGRADE_MIN_CONFIDENCE  = 0.60  # cluster must be at least this confident
+_UPGRADE_MAX_ROI         = 0.40  # …but ROI is still below this value
+
 
 # ── Enums ─────────────────────────────────────────────────────────────────── #
 
@@ -992,8 +1000,8 @@ def _issue_directives(
         for cid_b in active_ids[i + 1:]:
             cs_a = states[cid_a]
             cs_b = states[cid_b]
-            similarity = 1.0 - abs(cs_a.strategic_value - cs_b.strategic_value) \
-                             - abs(cs_a.roi_score       - cs_b.roi_score) / 2.0
+            similarity = 1.0 - (abs(cs_a.strategic_value - cs_b.strategic_value)
+                                + abs(cs_a.roi_score       - cs_b.roi_score)) / 2.0
             if similarity > 0.85:
                 # The weaker one (lower sv) is the merge candidate
                 if cs_a.strategic_value <= cs_b.strategic_value:
@@ -1094,7 +1102,7 @@ def _issue_directives(
                 confidence=0.65,
             )
         # UPGRADE: high confidence but under-utilised ROI
-        elif cs.confidence > 0.60 and cs.roi_score < 0.40 and sv > policy.kill_threshold:
+        elif cs.confidence > _UPGRADE_MIN_CONFIDENCE and cs.roi_score < _UPGRADE_MAX_ROI and sv > policy.kill_threshold:
             sv_gap = cs.confidence - cs.roi_score
             directives[cid] = ClusterDirective(
                 cluster_id=cid,
