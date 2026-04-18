@@ -15,6 +15,12 @@ Feature vector (per candle, 12 columns)
   ema8_diff, ema21_diff, ema50_diff,
   atr14_norm, volume_norm,
   hour_sin, hour_cos
+
+Implementation note (item G)
+-----------------------------
+Internally uses a pre-allocated numpy structured array (ring buffer) instead
+of a deque of dicts.  ``get()`` creates a DataFrame from a numpy slice, which
+avoids the ``pd.DataFrame(list(deque))`` overhead on every tick.
 """
 
 from __future__ import annotations
@@ -22,7 +28,6 @@ from __future__ import annotations
 import logging
 import tempfile
 import time
-from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -34,10 +39,22 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CAPACITY = 10_000
 _MIN_CANDLES      =    30   # minimum bars before features can be extracted
 
+# Structured dtype for the ring buffer — 6 fields, compact float storage
+_RING_DTYPE = np.dtype([
+    ("timestamp", "f8"),
+    ("open",      "f4"),
+    ("high",      "f4"),
+    ("low",       "f4"),
+    ("close",     "f4"),
+    ("volume",    "f4"),
+])
+
+_COLS = list(_RING_DTYPE.names)
+
 
 class CandleLibrary:
     """
-    Sliding-window candle library.
+    Sliding-window candle library backed by a numpy ring buffer.
 
     Parameters
     ----------
@@ -59,8 +76,13 @@ class CandleLibrary:
         self.symbol    = symbol
         self.timeframe = timeframe
 
-        # Internal deque of row-dicts (open, high, low, close, volume, timestamp)
-        self._store: deque = deque(maxlen=capacity)
+        # Ring buffer: pre-allocated fixed-size structured numpy array.
+        # _size  — number of valid entries (0..capacity)
+        # _write — next write position (0..capacity-1, wraps)
+        self._buf:   np.ndarray = np.zeros(capacity, dtype=_RING_DTYPE)
+        self._size:  int = 0
+        self._write: int = 0
+
         self._last_ts: float = 0.0
         self._update_count: int = 0
 
@@ -82,30 +104,61 @@ class CandleLibrary:
             logger.warning("CandleLibrary.update: missing columns %s", missing)
             return 0
 
-        new_rows = df[df["timestamp"] > self._last_ts].copy()
+        new_rows = df[df["timestamp"] > self._last_ts].sort_values("timestamp")
         if new_rows.empty:
             return 0
 
-        new_rows = new_rows.sort_values("timestamp")
-        self._store.extend(new_rows.to_dict("records"))
-
-        self._last_ts = float(new_rows["timestamp"].iloc[-1])
-        self._update_count += 1
         added = len(new_rows)
+        ts_arr  = new_rows["timestamp"].to_numpy(dtype="f8")
+        op_arr  = new_rows["open"].to_numpy(dtype="f4")
+        hi_arr  = new_rows["high"].to_numpy(dtype="f4")
+        lo_arr  = new_rows["low"].to_numpy(dtype="f4")
+        cl_arr  = new_rows["close"].to_numpy(dtype="f4")
+        vo_arr  = new_rows["volume"].to_numpy(dtype="f4")
+
+        for i in range(added):
+            self._buf[self._write] = (ts_arr[i], op_arr[i], hi_arr[i], lo_arr[i], cl_arr[i], vo_arr[i])
+            self._write = (self._write + 1) % self.capacity
+            self._size  = min(self._size + 1, self.capacity)
+
+        self._last_ts = float(ts_arr[-1])
+        self._update_count += 1
         logger.debug(
             "CandleLibrary[%s %s]: +%d candles (total=%d)",
-            self.symbol, self.timeframe, added, len(self._store),
+            self.symbol, self.timeframe, added, self._size,
         )
         return added
 
     def get(self, n: Optional[int] = None) -> pd.DataFrame:
         """Return last *n* candles as a DataFrame (all if n is None)."""
-        if not self._store:
-            return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "timestamp"])
-        rows = list(self._store)
-        if n is not None:
-            rows = rows[-n:]
-        return pd.DataFrame(rows).reset_index(drop=True)
+        if self._size == 0:
+            return pd.DataFrame(columns=_COLS)
+
+        count = min(n if n is not None else self._size, self._size)
+        arr = self._get_slice(count)
+
+        return pd.DataFrame({
+            "timestamp": arr["timestamp"],
+            "open":      arr["open"].astype("f8"),
+            "high":      arr["high"].astype("f8"),
+            "low":       arr["low"].astype("f8"),
+            "close":     arr["close"].astype("f8"),
+            "volume":    arr["volume"].astype("f8"),
+        }).reset_index(drop=True)
+
+    def _get_slice(self, count: int) -> np.ndarray:
+        """Return the last *count* entries in chronological order."""
+        if self._size < self.capacity:
+            # Buffer not yet full — data sits at indices 0..(_size-1)
+            start = self._size - count
+            return self._buf[start : self._size]
+
+        # Buffer full (ring).  _write points to the *oldest* slot.
+        start = (self._write - count) % self.capacity
+        if start < self._write:
+            return self._buf[start : self._write]
+        # Wraps around
+        return np.concatenate([self._buf[start:], self._buf[: self._write]])
 
     # ── Feature extraction ────────────────────────────────────────────────── #
 
@@ -239,11 +292,9 @@ class CandleLibrary:
             required = {"open", "high", "low", "close", "volume", "timestamp"}
             if not required.issubset(df.columns):
                 return 0
-            self._store.extend(df.to_dict("records"))
-            if len(self._store) > 0:
-                self._last_ts = max(r["timestamp"] for r in self._store)
-            logger.info("CandleLibrary: loaded %d candles from %s", len(df), p)
-            return len(df)
+            count = self.update(df)
+            logger.info("CandleLibrary: loaded %d candles from %s", count, p)
+            return count
         except Exception as exc:  # noqa: BLE001
             logger.warning("CandleLibrary.load failed: %s", exc)
             return 0
@@ -252,11 +303,11 @@ class CandleLibrary:
 
     @property
     def size(self) -> int:
-        return len(self._store)
+        return self._size
 
     @property
     def is_ready(self) -> bool:
-        return len(self._store) >= _MIN_CANDLES
+        return self._size >= _MIN_CANDLES
 
     @property
     def last_timestamp(self) -> float:
