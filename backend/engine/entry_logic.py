@@ -239,8 +239,8 @@ class EntryLogic:
         range_low: float,
         atr: float,
         prev_close: float = 0.0,
-        ema_fast: float = 0.0,
-        ema_slow: float = 0.0,
+        ema_fast: Optional[float] = None,
+        ema_slow: Optional[float] = None,
     ) -> Optional[str]:
         """
         Returns 'BUY', 'SELL', or None depending on entry mode.
@@ -306,7 +306,7 @@ class EntryLogic:
             return None
 
         # Optional EMA confirmation: fast EMA must align with trade direction
-        if self.ema_confirm and ema_fast > 0 and ema_slow > 0:
+        if self.ema_confirm and ema_fast is not None and ema_slow is not None:
             if direction == "BUY" and ema_fast <= ema_slow:
                 return None
             if direction == "SELL" and ema_fast >= ema_slow:
@@ -384,8 +384,8 @@ class EntryLogic:
         low: float,
         high: float,
         atr: float,
-        ema_fast: float,
-        ema_slow: float,
+        ema_fast: Optional[float],
+        ema_slow: Optional[float],
     ) -> Optional[str]:
         """
         TREND_PULLBACK — vào lệnh khi giá kéo về EMA trong xu hướng.
@@ -401,10 +401,10 @@ class EntryLogic:
           2. Candle HIGH chạm hoặc vượt EMA fast (pullback lên)
           3. Candle CLOSE quay xuống dưới EMA fast (bounce xác nhận)
 
-        Yêu cầu EMA values được cung cấp (ema_fast > 0 và ema_slow > 0).
+        Yêu cầu EMA values được cung cấp (không phải None).
         Nếu không có EMA, trả về None.
         """
-        if ema_fast <= 0 or ema_slow <= 0:
+        if ema_fast is None or ema_slow is None:
             return None
 
         ema_separation = abs(ema_fast - ema_slow)
