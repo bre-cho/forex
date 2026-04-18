@@ -44,6 +44,7 @@ from engine import (
     CandleLibrary,
     LLMOrchestrator,
     WarmUpPipeline, WarmUpReport,
+    EvolutionaryEngine, EvolutionResult,
 )
 from engine.signal_coordinator import TradeSignal as CoordSignal
 from engine.risk_manager import RiskConfig, MartingaleConfig
@@ -148,6 +149,12 @@ class AppState:
             wave_detector=self.wave_detector,
         )
         self.warmup_report: Optional[WarmUpReport] = None
+
+        # Evolutionary engine — self-play strategy optimizer.
+        # Runs a population of trading agents through synthetic markets,
+        # evolves them, and applies the best genome to the live system.
+        self.evolution_engine: EvolutionaryEngine = EvolutionaryEngine()
+        self.evolution_result: Optional[EvolutionResult] = None
 
         # Maps trade_id → {mode, wave_state, retrace_zone, initial_risk}
         # populated at open, consumed at close for DecisionEngine.record_outcome()
@@ -1501,6 +1508,105 @@ async def warmup_run(
         return {"status": "ok", **report.to_dict()}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ── Evolution API ──────────────────────────────────────────────────────── #
+
+@app.get("/api/evolution/status")
+async def evolution_status():
+    """
+    Trả về kết quả lần evolution gần nhất.
+
+    Bao gồm:
+    - best_genome: chiến lược tốt nhất tìm được
+    - best_fitness: profit_factor, win_rate, max_drawdown của chiến lược đó
+    - generation_bests: fitness tốt nhất mỗi generation
+    - applied_to_live: True nếu đã apply vào live system
+    """
+    result = app_state.evolution_result
+    if result is None:
+        return {"status": "not_run", "message": "Evolution chưa được chạy"}
+    return {"status": "ok", **result.to_dict()}
+
+
+@app.post("/api/evolution/run")
+async def evolution_run(
+    pop_size:         int   = 20,
+    generations:      int   = 5,
+    episodes:         int   = 10,
+    bars_per_episode: int   = 80,
+    apply_to_live:    bool  = False,
+):
+    """
+    Chạy evolutionary self-play: tạo môi trường giả lập, để các chiến lược
+    cạnh tranh, và chọn ra chiến lược tiến hóa tốt nhất.
+
+    Parameters
+    ----------
+    pop_size         : số lượng agent trong population (default 20)
+    generations      : số vòng tiến hóa (default 5)
+    episodes         : số lượng market episode mỗi agent (default 10)
+    bars_per_episode : số candle bar mỗi episode (default 80)
+    apply_to_live    : nếu True, tự động apply best genome vào live system
+
+    Kết quả
+    -------
+    Trả về EvolutionResult bao gồm best_genome và toàn bộ population stats.
+    Nếu apply_to_live=True, DecisionEngine sẽ cập nhật:
+      - mode_weight_adjs  (ưu tiên mode tốt nhất)
+      - base_min_score    (ngưỡng entry)
+      - lot_scale         (kích thước lệnh)
+    """
+    try:
+        engine = EvolutionaryEngine(
+            pop_size         = pop_size,
+            generations      = generations,
+            episodes         = episodes,
+            bars_per_episode = bars_per_episode,
+        )
+        result = engine.run()
+        app_state.evolution_engine = engine
+        app_state.evolution_result = result
+
+        if apply_to_live:
+            result.apply_to(app_state.decision_engine)
+
+        return {"status": "ok", **result.to_dict()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/evolution/apply")
+async def evolution_apply():
+    """
+    Apply kết quả evolution gần nhất vào live DecisionEngine.
+
+    Cập nhật:
+    - mode_weight_adjs của AdaptiveController
+    - base_min_score (ngưỡng entry quality)
+    - lot_scale (kích thước lệnh)
+
+    Chỉ có tác dụng nếu đã chạy /api/evolution/run trước đó.
+    """
+    result = app_state.evolution_result
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa có kết quả evolution. Hãy chạy POST /api/evolution/run trước."
+        )
+    if result.applied_to_live:
+        return {
+            "status": "already_applied",
+            "message": "Best genome đã được apply trước đó",
+            "applied_genome": result.best_genome.to_dict(),
+        }
+    result.apply_to(app_state.decision_engine)
+    return {
+        "status": "ok",
+        "message": "Best genome đã được apply vào live system",
+        "applied_genome": result.best_genome.to_dict(),
+        "best_fitness": result.best_fitness.to_dict(),
+    }
 
 
 if __name__ == "__main__":

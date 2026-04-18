@@ -23,6 +23,12 @@ from .synthetic_engine import (
     WarmUpPipeline,
     WarmUpReport,
 )
+from .self_play_engine import (
+    AgentGenome,
+    AgentFitness,
+    EvolutionResult,
+    EvolutionaryEngine,
+)
 
 __all__ = [
     "WaveDetector", "WaveState",
@@ -44,4 +50,5 @@ __all__ = [
     "LLMOrchestrator",
     "SyntheticCandleGenerator", "SyntheticOutcomeGenerator",
     "WarmUpPipeline", "WarmUpReport",
+    "AgentGenome", "AgentFitness", "EvolutionResult", "EvolutionaryEngine",
 ]
