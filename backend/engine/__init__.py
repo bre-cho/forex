@@ -56,6 +56,18 @@ from .game_theory_engine import (
     GameTheoryResult,
     GameTheoryEngine,
 )
+from .sovereign_oversight_engine import (
+    SovereignMode,
+    ObjectiveLevel,
+    ClusterLifecycle,
+    DirectiveType,
+    SovereignPolicy,
+    ClusterState,
+    ClusterDirective,
+    NetworkObjectiveTree,
+    SovereignOversightResult,
+    SovereignOversightEngine,
+)
 
 __all__ = [
     "WaveDetector", "WaveState",
@@ -84,4 +96,7 @@ __all__ = [
     "UtilityOptimizationResult", "UtilityOptimizationEngine",
     "OpponentType", "EcosystemConfig", "NashEquilibrium",
     "MarketImpactStats", "GameTheoryResult", "GameTheoryEngine",
+    "SovereignMode", "ObjectiveLevel", "ClusterLifecycle", "DirectiveType",
+    "SovereignPolicy", "ClusterState", "ClusterDirective",
+    "NetworkObjectiveTree", "SovereignOversightResult", "SovereignOversightEngine",
 ]
