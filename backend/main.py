@@ -47,6 +47,7 @@ from engine import (
     EvolutionaryEngine, EvolutionResult,
     MetaLearningEngine, MetaLearningResult, GeneImportance,
     CausalStrategyEngine, CausalIntelligenceResult,
+    UtilityConfig, UtilityOptimizationEngine, UtilityOptimizationResult,
 )
 from engine.signal_coordinator import TradeSignal as CoordSignal
 from engine.risk_manager import RiskConfig, MartingaleConfig
@@ -169,6 +170,12 @@ class AppState:
         # correlations, tests regime robustness, and infers counterfactual strategies.
         self.causal_engine: CausalStrategyEngine = CausalStrategyEngine()
         self.causal_result: Optional[CausalIntelligenceResult] = None
+
+        # Utility optimization engine — decision theory + rational strategic agent.
+        # Optimises multi-dimensional utility (growth, trust, stability, speed,
+        # dominance) and applies Kelly criterion for rational lot sizing.
+        self.utility_engine: UtilityOptimizationEngine = UtilityOptimizationEngine()
+        self.utility_result: Optional[UtilityOptimizationResult] = None
 
         # Maps trade_id → {mode, wave_state, retrace_zone, initial_risk}
         # populated at open, consumed at close for DecisionEngine.record_outcome()
@@ -1898,6 +1905,240 @@ async def causal_apply():
         "applied_genome":      result.counterfactual_genome.to_dict(),
         "causal_insights":     result.causal_insights,
         "world_model_r2":      result.world_model_r2,
+    }
+
+
+# ── Utility Optimization API ───────────────────────────────────────────── #
+
+@app.post("/api/utility/run")
+async def utility_run(
+    n_genomes:           int   = 25,
+    episodes:            int   = 8,
+    bars_per_episode:    int   = 70,
+    growth_weight:       float = 0.35,
+    trust_weight:        float = 0.30,
+    stability_weight:    float = 0.20,
+    speed_weight:        float = 0.10,
+    dominance_weight:    float = 0.05,
+    risk_aversion:       float = 0.40,
+    time_preference:     float = 0.60,
+    kelly_safety_factor: float = 0.25,
+    apply_to_live:       bool  = False,
+):
+    """
+    Chạy Decision Theory + Utility Optimization Engine.
+
+    Đây là tầng cao nhất của intelligence stack — rational strategic agent.
+    Hệ không chỉ tối ưu win/loss hay causal_score, mà tối ưu theo utility
+    đa chiều dài hạn:
+
+    1. Growth utility  : E[log(wealth)] — Kelly-optimal geometric growth
+    2. Trust utility   : (1 − max_drawdown) × profit_factor — không blow up
+    3. Stability utility: Sharpe-like equity smoothness
+    4. Speed utility   : trade frequency — more opportunities vs noise
+    5. Dominance utility: long-term vs short-term performance split
+
+    Trade-offs được kiểm soát bởi UtilityConfig:
+    - growth_weight vs trust_weight    → growth vs capital preservation
+    - speed_weight vs stability_weight → frequency vs smoothness
+    - time_preference                  → myopic vs far-sighted dominance
+    - risk_aversion                    → arithmetic vs log-return optimisation
+    - kelly_safety_factor              → fraction of Kelly for lot sizing
+
+    Params
+    ------
+    n_genomes           : số genomes cần evaluate (default 25)
+    episodes            : số episodes mỗi genome (default 8)
+    bars_per_episode    : số bars mỗi episode (default 70)
+    growth_weight       : trọng số utility growth (default 0.35)
+    trust_weight        : trọng số utility trust/drawdown (default 0.30)
+    stability_weight    : trọng số utility equity smoothness (default 0.20)
+    speed_weight        : trọng số utility trade frequency (default 0.10)
+    dominance_weight    : trọng số utility long-term dominance (default 0.05)
+    risk_aversion       : 0=risk-neutral, 1=fully risk-averse (default 0.40)
+    time_preference     : 0=myopic, 1=far-sighted (default 0.60)
+    kelly_safety_factor : fraction of Kelly criterion (default 0.25)
+    apply_to_live       : tự động apply optimal genome sau khi chạy
+    """
+    cfg = UtilityConfig(
+        growth_weight       = growth_weight,
+        trust_weight        = trust_weight,
+        stability_weight    = stability_weight,
+        speed_weight        = speed_weight,
+        dominance_weight    = dominance_weight,
+        risk_aversion       = risk_aversion,
+        time_preference     = time_preference,
+        kelly_safety_factor = kelly_safety_factor,
+    )
+    engine = UtilityOptimizationEngine(
+        n_genomes        = n_genomes,
+        episodes         = episodes,
+        bars_per_episode = bars_per_episode,
+        utility_config   = cfg,
+    )
+    app_state.utility_engine = engine
+    result = engine.run()
+    app_state.utility_result = result
+
+    if apply_to_live:
+        result.apply_to(app_state.decision_engine)
+
+    return {
+        "status":         "ok",
+        "n_genomes":      result.n_genomes,
+        "pareto_count":   len(result.pareto_indices),
+        "duration_secs":  result.duration_secs,
+        "kelly_lot_scale": result.kelly_lot_scale,
+        "optimal_utility": result.optimal_utility.to_dict(),
+        "optimal_genome":  result.optimal_genome.to_dict(),
+        "utility_insights": result.utility_insights,
+        "applied_to_live":  result.applied_to_live,
+    }
+
+
+@app.get("/api/utility/status")
+async def utility_status():
+    """
+    Trả về kết quả utility optimization gần nhất.
+
+    Bao gồm:
+    - optimal_genome     : genome tối ưu theo expected utility
+    - optimal_utility    : breakdown 5 chiều utility
+    - kelly_lot_scale    : lot size tối ưu theo Kelly criterion
+    - pareto_indices     : chỉ số các genome Pareto-efficient
+    - all_utilities      : composite utility của tất cả genome
+    - utility_config     : cấu hình UtilityConfig đã dùng
+    - utility_insights   : phân tích trade-off bằng ngôn ngữ tự nhiên
+    """
+    result = app_state.utility_result
+    if result is None:
+        return {"status": "not_run", "message": "Utility optimization chưa được chạy"}
+    return {"status": "ok", **result.to_dict()}
+
+
+@app.get("/api/utility/pareto")
+async def utility_pareto():
+    """
+    Trả về dữ liệu Pareto frontier để visualisation.
+
+    Mỗi genome bao gồm:
+    - genome_idx  : chỉ số trong population
+    - is_pareto   : True nếu genome này là Pareto-efficient
+    - utility     : UtilityVector (5 chiều + composite)
+    - genome      : thông số genome chính (min_score, tp_rr, lot_scale...)
+
+    Pareto-efficient strategy = không có strategy nào tốt hơn trên TẤT CẢ 5 chiều.
+    Đây là tập hợp "chiến lược không bị dominated" — mỗi điểm đại diện cho
+    một trade-off khác nhau giữa growth/trust/stability/speed/dominance.
+    """
+    result = app_state.utility_result
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Chưa có kết quả utility. Hãy chạy POST /api/utility/run trước."
+        )
+    return {
+        "status":          "ok",
+        "pareto_data":     result.pareto_data(),
+        "pareto_count":    len(result.pareto_indices),
+        "n_genomes":       result.n_genomes,
+        "optimal_idx":     int(
+            max(result.pareto_indices or range(result.n_genomes),
+                key=lambda i: result.utility_vectors[i].composite)
+        ),
+    }
+
+
+@app.post("/api/utility/configure")
+async def utility_configure(
+    growth_weight:       float = 0.35,
+    trust_weight:        float = 0.30,
+    stability_weight:    float = 0.20,
+    speed_weight:        float = 0.10,
+    dominance_weight:    float = 0.05,
+    risk_aversion:       float = 0.40,
+    time_preference:     float = 0.60,
+    kelly_safety_factor: float = 0.25,
+):
+    """
+    Cập nhật UtilityConfig mà KHÔNG cần chạy lại simulation.
+
+    Sử dụng khi bạn muốn thay đổi trade-off preferences mà không tốn thời gian
+    re-run toàn bộ evaluation. Engine sẽ recompute utility vectors và chọn lại
+    optimal genome với config mới.
+
+    Ví dụ:
+    - risk_aversion=0.8 → bảo thủ hơn, ưu tiên capital preservation
+    - growth_weight=0.5 → aggressive growth, chấp nhận rủi ro cao hơn
+    - time_preference=0.9 → ưu tiên strategies tốt trong RECENT trades
+    - kelly_safety_factor=0.1 → dùng chỉ 10% Kelly fraction
+    """
+    result = app_state.utility_result
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa có kết quả utility. Hãy chạy POST /api/utility/run trước."
+        )
+    new_cfg = UtilityConfig(
+        growth_weight       = growth_weight,
+        trust_weight        = trust_weight,
+        stability_weight    = stability_weight,
+        speed_weight        = speed_weight,
+        dominance_weight    = dominance_weight,
+        risk_aversion       = risk_aversion,
+        time_preference     = time_preference,
+        kelly_safety_factor = kelly_safety_factor,
+    )
+    app_state.utility_engine.reconfigure(new_cfg)
+    # reconfigure() updates last_result in place
+    result = app_state.utility_result
+    return {
+        "status":            "reconfigured",
+        "new_config":        new_cfg.to_dict(),
+        "new_optimal_utility": result.optimal_utility.to_dict() if result else None,
+        "new_kelly_lot_scale": result.kelly_lot_scale if result else None,
+        "utility_insights":    result.utility_insights if result else [],
+    }
+
+
+@app.post("/api/utility/apply")
+async def utility_apply():
+    """
+    Apply kết quả utility optimization vào live DecisionEngine.
+
+    Áp dụng:
+    - optimal_genome   : mode_weights, min_score (từ utility-maximising strategy)
+    - kelly_lot_scale  : lot size tối ưu theo Kelly criterion (risk-aversion adjusted)
+
+    Đây là bước cuối cùng của intelligence stack:
+    Evolution → Meta-Learning → Causal Intelligence → Rational Agent (Utility)
+
+    Rational agent chọn chiến lược theo expected utility đa chiều, không chỉ
+    maximise một metric. Kelly criterion đảm bảo lot size tối ưu về geometric
+    growth rate.
+    """
+    result = app_state.utility_result
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa có kết quả utility. Hãy chạy POST /api/utility/run trước."
+        )
+    if result.applied_to_live:
+        return {
+            "status":            "already_applied",
+            "message":           "Rational agent policy đã được apply trước đó",
+            "optimal_genome":    result.optimal_genome.to_dict(),
+            "kelly_lot_scale":   result.kelly_lot_scale,
+            "optimal_utility":   result.optimal_utility.to_dict(),
+        }
+    result.apply_to(app_state.decision_engine)
+    return {
+        "status":            "ok",
+        "message":           "Rational agent policy (utility-optimal + Kelly lot) đã được apply",
+        "optimal_genome":    result.optimal_genome.to_dict(),
+        "kelly_lot_scale":   result.kelly_lot_scale,
+        "optimal_utility":   result.optimal_utility.to_dict(),
+        "utility_insights":  result.utility_insights,
     }
 
 

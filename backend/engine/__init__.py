@@ -41,6 +41,13 @@ from .causal_strategy_engine import (
     CausalIntelligenceResult,
     CausalStrategyEngine,
 )
+from .utility_optimization_engine import (
+    UtilityConfig,
+    UtilityVector,
+    RichFitness,
+    UtilityOptimizationResult,
+    UtilityOptimizationEngine,
+)
 
 __all__ = [
     "WaveDetector", "WaveState",
@@ -65,4 +72,6 @@ __all__ = [
     "AgentGenome", "AgentFitness", "EvolutionResult", "EvolutionaryEngine",
     "GeneImportance", "GenePool", "MetaLearningResult", "MetaLearningEngine",
     "CausalScoreCard", "WorldModel", "CausalIntelligenceResult", "CausalStrategyEngine",
+    "UtilityConfig", "UtilityVector", "RichFitness",
+    "UtilityOptimizationResult", "UtilityOptimizationEngine",
 ]
