@@ -934,8 +934,6 @@ class CausalStrategyEngine:
         gen = sim._gen
         bars = sim.bars
 
-        import math as _math
-
         pnls:  list = []
         rrs:   list = []
         wins:  list = []
