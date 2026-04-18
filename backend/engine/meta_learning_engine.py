@@ -805,7 +805,7 @@ class MetaLearningEngine:
             next_pop.append(cloned)
 
         while len(next_pop) < self.pop_size:
-            # Tournament select two parents
+            # Tournament select two parents (returns population index directly)
             indices = self._rng.sample(range(len(population)), min(3, len(population)))
             fit_idx = max(indices, key=lambda i: fitnesses[i].fitness)
             pa = population[fit_idx]
@@ -815,8 +815,8 @@ class MetaLearningEngine:
             pb = population[fit_idx2]
 
             # Better parent first (genetics.breed biases toward parent_a)
-            if fitnesses[population.index(pa) if pa in population else 0].fitness < \
-               fitnesses[population.index(pb) if pb in population else 0].fitness:
+            # Use the tournament indices directly — avoids list.index() ambiguity
+            if fitnesses[fit_idx].fitness < fitnesses[fit_idx2].fitness:
                 pa, pb = pb, pa
 
             child = genetics.breed(pa, pb, gen)
