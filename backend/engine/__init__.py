@@ -48,6 +48,14 @@ from .utility_optimization_engine import (
     UtilityOptimizationResult,
     UtilityOptimizationEngine,
 )
+from .game_theory_engine import (
+    OpponentType,
+    EcosystemConfig,
+    NashEquilibrium,
+    MarketImpactStats,
+    GameTheoryResult,
+    GameTheoryEngine,
+)
 
 __all__ = [
     "WaveDetector", "WaveState",
@@ -74,4 +82,6 @@ __all__ = [
     "CausalScoreCard", "WorldModel", "CausalIntelligenceResult", "CausalStrategyEngine",
     "UtilityConfig", "UtilityVector", "RichFitness",
     "UtilityOptimizationResult", "UtilityOptimizationEngine",
+    "OpponentType", "EcosystemConfig", "NashEquilibrium",
+    "MarketImpactStats", "GameTheoryResult", "GameTheoryEngine",
 ]

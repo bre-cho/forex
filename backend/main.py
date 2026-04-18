@@ -48,6 +48,7 @@ from engine import (
     MetaLearningEngine, MetaLearningResult, GeneImportance,
     CausalStrategyEngine, CausalIntelligenceResult,
     UtilityConfig, UtilityOptimizationEngine, UtilityOptimizationResult,
+    EcosystemConfig, GameTheoryEngine, GameTheoryResult,
 )
 from engine.signal_coordinator import TradeSignal as CoordSignal
 from engine.risk_manager import RiskConfig, MartingaleConfig
@@ -176,6 +177,12 @@ class AppState:
         # dominance) and applies Kelly criterion for rational lot sizing.
         self.utility_engine: UtilityOptimizationEngine = UtilityOptimizationEngine()
         self.utility_result: Optional[UtilityOptimizationResult] = None
+
+        # Game theory engine — multi-agent ecosystem + Nash equilibrium.
+        # Optimises in environment with opponents, market maker algorithms,
+        # and market impact. Finds best-response strategy and Nash equilibrium.
+        self.ecosystem_engine: GameTheoryEngine = GameTheoryEngine()
+        self.ecosystem_result: Optional[GameTheoryResult] = None
 
         # Maps trade_id → {mode, wave_state, retrace_zone, initial_risk}
         # populated at open, consumed at close for DecisionEngine.record_outcome()
@@ -2139,6 +2146,178 @@ async def utility_apply():
         "kelly_lot_scale":   result.kelly_lot_scale,
         "optimal_utility":   result.optimal_utility.to_dict(),
         "utility_insights":  result.utility_insights,
+    }
+
+
+# ── Game Theory + Ecosystem API ────────────────────────────────────────── #
+
+@app.post("/api/ecosystem/run")
+async def ecosystem_run(
+    n_opponents:         int   = 5,
+    n_candidate_genomes: int   = 15,
+    episodes:            int   = 6,
+    bars_per_episode:    int   = 70,
+    nash_iterations:     int   = 8,
+    exploitation_rate:   float = 0.5,
+    impact_coefficient:  float = 0.15,
+    impact_decay:        float = 0.80,
+    apply_to_live:       bool  = False,
+):
+    """
+    Chạy Multi-Agent Game Theory + Market Ecosystem Engine.
+
+    Đây là tầng cao nhất của intelligence stack — strategic ecosystem intelligence.
+    Hệ không chỉ tối ưu utility của bản thân trong chân không, mà tối ưu trong
+    môi trường có đối thủ, thuật toán nền tảng, và market impact:
+
+    Opponent Types (5 loại):
+    - MOMENTUM_FOLLOWER : chase trends → crowds our entries, fades extremes
+    - MEAN_REVERTER     : fade extremes → counter-trades breakouts
+    - NOISE_TRADER      : random entries → random slippage injection
+    - MARKET_MAKER      : provide liquidity → adverse-selection risk
+    - TREND_FADER       : exploit late-trend crowding → challenges our momentum plays
+
+    Phases:
+    1. Spawn opponent agents với diverse behavioral profiles
+    2. Evaluate N candidate genomes trong multi-agent ecosystem với market impact
+    3. Iterative Best Response (IBR) → Nash equilibrium approximation
+    4. Exploitability scoring per opponent type (0=unexploitable, 1=fully exploitable)
+    5. Build ecosystem insights + strategic recommendations
+
+    Params
+    ------
+    n_opponents         : số lượng opponents (default 5)
+    n_candidate_genomes : số genomes để evaluate (default 15)
+    episodes            : số market episodes (default 6)
+    bars_per_episode    : số bars mỗi episode (default 70)
+    nash_iterations     : max IBR iterations for Nash (default 8)
+    exploitation_rate   : how aggressively opponents adapt (0=static, 1=adaptive)
+    impact_coefficient  : price impact per unit net crowd (default 0.15)
+    impact_decay        : market impact decay per bar (default 0.80)
+    apply_to_live       : tự động apply best response genome sau khi chạy
+    """
+    cfg = EcosystemConfig(
+        n_opponents         = n_opponents,
+        n_candidate_genomes = n_candidate_genomes,
+        episodes            = episodes,
+        bars_per_episode    = bars_per_episode,
+        nash_iterations     = nash_iterations,
+        exploitation_rate   = exploitation_rate,
+        impact_coefficient  = impact_coefficient,
+        impact_decay        = impact_decay,
+    )
+    engine = GameTheoryEngine(config=cfg)
+    app_state.ecosystem_engine = engine
+    result = engine.run()
+    app_state.ecosystem_result = result
+
+    if apply_to_live:
+        result.apply_to(app_state.decision_engine)
+
+    return {
+        "status":                "ok",
+        "nash_value":            result.nash_equilibrium.nash_value,
+        "ecosystem_pf":          result.ecosystem_pf,
+        "isolation_pf":          result.isolation_pf,
+        "pf_delta":              round(result.ecosystem_pf - result.isolation_pf, 3),
+        "n_opponents":           result.n_opponents,
+        "exploitability":        result.exploitability,
+        "duration_secs":         result.duration_secs,
+        "best_response_genome":  result.best_response_genome.to_dict(),
+        "ecosystem_insights":    result.ecosystem_insights,
+        "applied_to_live":       result.applied_to_live,
+    }
+
+
+@app.get("/api/ecosystem/status")
+async def ecosystem_status():
+    """
+    Trả về kết quả game theory / ecosystem simulation gần nhất.
+
+    Bao gồm:
+    - best_response_genome : genome tối ưu trong multi-agent ecosystem
+    - nash_equilibrium     : Nash equilibrium details + opponent profile
+    - exploitability       : Dict[opponent_type → score ∈ [0,1]]
+    - ecosystem_pf         : profit_factor trong ecosystem (có market impact)
+    - isolation_pf         : profit_factor benchmark (không có opponents)
+    - impact_stats         : crowding %, avg slippage, max impact
+    - ecosystem_insights   : phân tích chiến lược bằng ngôn ngữ tự nhiên
+    """
+    result = app_state.ecosystem_result
+    if result is None:
+        return {"status": "not_run", "message": "Ecosystem simulation chưa được chạy"}
+    return {"status": "ok", **result.to_dict()}
+
+
+@app.get("/api/ecosystem/nash")
+async def ecosystem_nash():
+    """
+    Trả về chi tiết Nash equilibrium từ lần chạy gần nhất.
+
+    Nash equilibrium = trạng thái mà không agent nào có thể cải thiện
+    kết quả của mình bằng cách đơn phương thay đổi chiến lược.
+
+    Bao gồm:
+    - our_strategy      : chiến lược tốt nhất của chúng ta tại equilibrium
+    - opponent_profile  : aggression của mỗi loại opponent tại equilibrium
+    - is_approximate    : luôn True (exact Nash requires LP for continuous games)
+    - iterations_used   : số IBR iterations để converge
+    - convergence_gap   : |strategy[t] - strategy[t-1]| tại vòng cuối
+    - nash_value        : profit_factor của chúng ta tại equilibrium
+    """
+    result = app_state.ecosystem_result
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Chưa có kết quả ecosystem. Hãy chạy POST /api/ecosystem/run trước."
+        )
+    return {
+        "status":          "ok",
+        "nash_equilibrium": result.nash_equilibrium.to_dict(),
+        "exploitability":  result.exploitability,
+        "impact_stats":    result.impact_stats.to_dict(),
+        "ecosystem_config": result.ecosystem_config.to_dict(),
+    }
+
+
+@app.post("/api/ecosystem/apply")
+async def ecosystem_apply():
+    """
+    Apply best-response genome từ Nash equilibrium vào live DecisionEngine.
+
+    Áp dụng chiến lược tối ưu trong multi-agent ecosystem:
+    - mode_weights  : đã tối ưu để chống lại các opponent types
+    - min_score     : điều chỉnh theo exploitability và market impact
+    - lot_scale     : được cân nhắc theo mức độ crowding
+
+    Đây là bước cuối của intelligence stack:
+    Evolution → Meta-Learning → Causal Intelligence → Rational Agent
+    → Strategic Ecosystem Intelligence (Game Theory + Nash Equilibrium)
+
+    Chiến lược được chọn không chỉ tối ưu utility đa chiều mà còn
+    là best response trong môi trường có đối thủ thực tế.
+    """
+    result = app_state.ecosystem_result
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa có kết quả ecosystem. Hãy chạy POST /api/ecosystem/run trước."
+        )
+    if result.applied_to_live:
+        return {
+            "status":               "already_applied",
+            "message":              "Ecosystem best-response policy đã được apply trước đó",
+            "best_response_genome": result.best_response_genome.to_dict(),
+            "nash_value":           result.nash_equilibrium.nash_value,
+        }
+    result.apply_to(app_state.decision_engine)
+    return {
+        "status":               "ok",
+        "message":              "Ecosystem best-response (Nash equilibrium) đã được apply",
+        "best_response_genome": result.best_response_genome.to_dict(),
+        "nash_value":           result.nash_equilibrium.nash_value,
+        "exploitability":       result.exploitability,
+        "ecosystem_insights":   result.ecosystem_insights,
     }
 
 
