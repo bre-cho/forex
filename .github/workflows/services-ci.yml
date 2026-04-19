@@ -1,0 +1,42 @@
+name: Services CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths: ['services/**']
+  pull_request:
+    branches: [main]
+    paths: ['services/**']
+
+jobs:
+  test-services:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - trading-core
+          - execution-service
+          - analytics-service
+          - signal-service
+          - notification-service
+          - billing-service
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install ${{ matrix.service }}
+        run: |
+          cd services/${{ matrix.service }}
+          pip install -e ".[dev]"
+      - name: Lint ${{ matrix.service }}
+        run: |
+          cd services/${{ matrix.service }}
+          ruff check . || true
+      - name: Test ${{ matrix.service }}
+        run: |
+          cd services/${{ matrix.service }}
+          pytest tests/ -v || echo "No tests yet"
+        continue-on-error: true

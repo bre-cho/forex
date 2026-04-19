@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build API image
+        run: |
+          docker build -t ${{ secrets.REGISTRY }}/forex-api:${{ github.ref_name }} apps/api/
+
+      - name: Build Web image
+        run: |
+          docker build -t ${{ secrets.REGISTRY }}/forex-web:${{ github.ref_name }} apps/web/
+
+      - name: Push images
+        run: |
+          echo ${{ secrets.REGISTRY_PASSWORD }} | docker login ${{ secrets.REGISTRY }} -u ${{ secrets.REGISTRY_USER }} --password-stdin
+          docker push ${{ secrets.REGISTRY }}/forex-api:${{ github.ref_name }}
+          docker push ${{ secrets.REGISTRY }}/forex-web:${{ github.ref_name }}
+
+      - name: Deploy
+        run: |
+          echo "Deploy ${{ github.ref_name }} to production"
+          # SSH deploy or kubectl apply here
+
+      - name: Smoke test
+        run: |
+          sleep 30
+          curl --fail ${{ secrets.APP_URL }}/health || exit 1
