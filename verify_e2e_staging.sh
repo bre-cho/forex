@@ -259,12 +259,20 @@ pass "Broker OK (id=$BROKER_ID)"
 info "Creating bot ($BOT_NAME)"
 BOT_PAYLOAD=$(python3 -c "
 import json, sys
-print(json.dumps({'name': sys.argv[1], 'symbol': 'EURUSD', 'timeframe': 'M5', 'mode': 'paper'}))
-" "$BOT_NAME")
+print(json.dumps({
+    'name': sys.argv[1],
+    'symbol': 'EURUSD',
+    'timeframe': 'M5',
+    'mode': 'paper',
+    'broker_connection_id': sys.argv[2]
+}))
+" "$BOT_NAME" "$BROKER_ID")
 
 BOT_RESP=$(http_json POST "$BASE_URL/v1/workspaces/$WS_ID/bots" \
   "$BOT_PAYLOAD" "$TOKEN") || fail "Bot creation failed"
 BOT_ID=$(extract_json "$BOT_RESP" "id") || fail "Could not read bot id from response"
+BOT_BROKER_ID=$(extract_json "$BOT_RESP" "broker_connection_id") || fail "Could not read bot broker_connection_id from response"
+[[ "$BOT_BROKER_ID" == "$BROKER_ID" ]] || fail "Bot không gắn đúng broker_connection_id"
 pass "Bot OK (id=$BOT_ID)"
 
 # ── 6. Start bot ──────────────────────────────────────────────────────────────
