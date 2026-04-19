@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.credentials_crypto import decrypt_credentials, encrypt_credentials
+from app.core.credentials_crypto import decrypt_credentials, encrypt_credentials, redact_credentials
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
 from app.dependencies.permissions import require_workspace_role
@@ -145,6 +145,11 @@ async def test_connection(
         await provider.connect()
         await provider.disconnect()
         return {"status": "ok", "message": "Connection successful"}
-    except Exception as exc:
-        logger.exception("Connection test failed for broker connection %s: %s", conn_id, exc)
+    except Exception:
+        logger.warning(
+            "Connection test failed for broker connection %s (type=%s, credentials=%s)",
+            conn_id,
+            conn.broker_type,
+            redact_credentials(decrypt_credentials(conn.credentials_encrypted)),
+        )
         return {"status": "error", "message": "Connection test failed"}

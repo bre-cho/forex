@@ -38,6 +38,7 @@ class RuntimeState:
             "open_trades": self.open_trades,
             "total_trades": self.total_trades,
             "error_message": self.error_message,
+            "metadata": dict(self.metadata),
             "uptime_seconds": (
                 (time.time() - self.started_at)
                 if self.started_at and self.status == RuntimeStatus.RUNNING

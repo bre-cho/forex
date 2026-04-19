@@ -38,6 +38,15 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: str = "http://localhost:3000,http://localhost:3001"
 
+    # WebSocket hardening
+    ws_idle_timeout_seconds: int = 90
+    ws_max_connections_per_user: int = 10
+    ws_max_connections_per_user_per_workspace: int = 5
+
+    # Credential encryption
+    fernet_key: str = ""
+    fernet_key_previous: str = ""
+
     @property
     def cors_origins_list(self) -> List[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

@@ -31,7 +31,15 @@ class RuntimeRegistry:
     def __init__(self) -> None:
         self._runtimes: Dict[str, BotRuntime] = {}
         self._lock = asyncio.Lock()
+        self._op_locks: Dict[str, asyncio.Lock] = {}
         logger.info("RuntimeRegistry initialised")
+
+    def _get_or_create_op_lock(self, bot_instance_id: str) -> asyncio.Lock:
+        lock = self._op_locks.get(bot_instance_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._op_locks[bot_instance_id] = lock
+        return lock
 
     async def create(
         self,
@@ -68,38 +76,53 @@ class RuntimeRegistry:
         return runtime
 
     async def start(self, bot_instance_id: str) -> None:
-        # Retrieve the runtime under the lock (protecting _runtimes dict),
-        # then release before awaiting the async operation to avoid holding
-        # the lock during potentially long I/O and to prevent deadlocks.
         async with self._lock:
             runtime = self.get_or_raise(bot_instance_id)
-        await runtime.start()
+            op_lock = self._get_or_create_op_lock(bot_instance_id)
+        async with op_lock:
+            await runtime.start()
 
     async def stop(self, bot_instance_id: str) -> None:
         async with self._lock:
             runtime = self.get_or_raise(bot_instance_id)
-        await runtime.stop()
+            op_lock = self._get_or_create_op_lock(bot_instance_id)
+        async with op_lock:
+            await runtime.stop()
 
     async def pause(self, bot_instance_id: str) -> None:
         async with self._lock:
             runtime = self.get_or_raise(bot_instance_id)
-        await runtime.pause()
+            op_lock = self._get_or_create_op_lock(bot_instance_id)
+        async with op_lock:
+            await runtime.pause()
 
     async def resume(self, bot_instance_id: str) -> None:
         async with self._lock:
             runtime = self.get_or_raise(bot_instance_id)
-        await runtime.resume()
+            op_lock = self._get_or_create_op_lock(bot_instance_id)
+        async with op_lock:
+            await runtime.resume()
 
     async def remove(self, bot_instance_id: str) -> None:
         async with self._lock:
-            runtime = self._runtimes.get(bot_instance_id)
+            runtime = self._runtimes.pop(bot_instance_id, None)
             if runtime is None:
                 return
-            if runtime.state.status == RuntimeStatus.RUNNING:
-                await runtime.stop()
-            del self._runtimes[bot_instance_id]
+            op_lock = self._get_or_create_op_lock(bot_instance_id)
+            remaining = len(self._runtimes)
+        try:
+            async with op_lock:
+                if runtime.state.status != RuntimeStatus.STOPPED:
+                    await runtime.stop()
+        except Exception:
+            async with self._lock:
+                self._runtimes[bot_instance_id] = runtime
+            raise
+        finally:
+            async with self._lock:
+                self._op_locks.pop(bot_instance_id, None)
         logger.info(
-            "Runtime removed: %s (remaining: %d)", bot_instance_id, len(self._runtimes)
+            "Runtime removed: %s (remaining: %d)", bot_instance_id, remaining
         )
 
     async def get_snapshot(self, bot_instance_id: str) -> dict:
@@ -118,9 +141,11 @@ class RuntimeRegistry:
     async def stop_all(self) -> None:
         async with self._lock:
             targets = [
-                rt for rt in self._runtimes.values()
+                (bid, rt) for bid, rt in self._runtimes.items()
                 if rt.state.status == RuntimeStatus.RUNNING
             ]
-        for runtime in targets:
-            await runtime.stop()
+            op_locks = {bid: self._get_or_create_op_lock(bid) for bid, _ in targets}
+        for bot_instance_id, runtime in targets:
+            async with op_locks[bot_instance_id]:
+                await runtime.stop()
         logger.info("All runtimes stopped")

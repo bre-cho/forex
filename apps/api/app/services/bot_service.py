@@ -60,6 +60,8 @@ async def create_runtime_for_bot(
             symbol=bot.symbol,
             timeframe=bot.timeframe,
         )
+        if bot.mode == "live":
+            await _assert_provider_usable(provider, bot.id)
 
         # Use the public registry.create() API — never access _runtimes directly
         await registry.create(
@@ -78,7 +80,7 @@ async def create_runtime_for_bot(
         # Registry raises ValueError if the runtime already exists
         logger.info("Runtime already exists for bot %s: %s", bot.id, exc)
     except Exception as exc:
-        logger.error("Failed to create runtime for bot %s: %s", bot.id, exc)
+        logger.error("Failed to create runtime for bot %s", bot.id)
         raise
 
 
@@ -119,3 +121,18 @@ async def _register_stub(bot_instance_id: str, registry: Any) -> None:
             "Registry does not support create(); stub runtime not registered for %s",
             bot_instance_id,
         )
+
+
+async def _assert_provider_usable(provider: Any, bot_id: str) -> None:
+    if hasattr(provider, "connect") and not getattr(provider, "is_connected", False):
+        await provider.connect()
+    if not getattr(provider, "is_connected", False):
+        raise RuntimeError(f"Live broker provider unavailable for bot {bot_id}")
+    health_check = getattr(provider, "health_check", None)
+    if callable(health_check):
+        details = await health_check()
+        if isinstance(details, dict):
+            status = str(details.get("status", "healthy")).lower()
+            if status in {"auth_failed", "disconnected", "degraded", "error"}:
+                reason = str(details.get("reason") or "provider_not_usable")
+                raise RuntimeError(f"Live broker provider unusable for bot {bot_id}: {reason}")

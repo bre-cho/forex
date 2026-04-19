@@ -49,6 +49,7 @@ class BotRuntime:
         self.state = RuntimeState(bot_instance_id=bot_instance_id)
         self._engine_task: Optional[asyncio.Task] = None
         self._tick_interval: float = 5.0
+        self._lifecycle_lock = asyncio.Lock()
 
         # Lazy-initialised engines (created on start)
         self._wave_detector = None
@@ -94,37 +95,51 @@ class BotRuntime:
     # ── Lifecycle ──────────────────────────────────────────────────────── #
 
     async def start(self) -> None:
-        if self.state.status == RuntimeStatus.RUNNING:
-            logger.warning("BotRuntime %s already running", self.bot_instance_id)
-            return
-        self.state.status = RuntimeStatus.STARTING
-        self._init_engines()
-        self.state.started_at = time.time()
-        self.state.status = RuntimeStatus.RUNNING
-        self._engine_task = asyncio.create_task(self._run_loop())
-        logger.info("BotRuntime started: %s", self.bot_instance_id)
+        async with self._lifecycle_lock:
+            if self.state.status in (RuntimeStatus.RUNNING, RuntimeStatus.STARTING):
+                logger.warning("BotRuntime %s already running or starting", self.bot_instance_id)
+                return
+            self.state.status = RuntimeStatus.STARTING
+            await self._ensure_provider_usable()
+            self._init_engines()
+            self.state.started_at = time.time()
+            self.state.status = RuntimeStatus.RUNNING
+            self._engine_task = asyncio.create_task(self._run_loop())
+            logger.info("BotRuntime started: %s", self.bot_instance_id)
 
     async def stop(self) -> None:
-        if self.state.status == RuntimeStatus.STOPPED:
-            return
-        self.state.status = RuntimeStatus.STOPPED
-        self.state.stopped_at = time.time()
-        if self._engine_task:
-            self._engine_task.cancel()
-            try:
-                await self._engine_task
-            except asyncio.CancelledError:
-                pass
-            self._engine_task = None
-        logger.info("BotRuntime stopped: %s", self.bot_instance_id)
+        async with self._lifecycle_lock:
+            if self.state.status == RuntimeStatus.STOPPED:
+                return
+            self.state.status = RuntimeStatus.STOPPED
+            self.state.stopped_at = time.time()
+            if self._engine_task:
+                self._engine_task.cancel()
+                try:
+                    await self._engine_task
+                except asyncio.CancelledError:
+                    pass
+                self._engine_task = None
+            if hasattr(self.broker_provider, "disconnect"):
+                try:
+                    await self.broker_provider.disconnect()
+                except Exception as exc:
+                    logger.warning(
+                        "Broker disconnect failed for %s: %s",
+                        self.bot_instance_id,
+                        exc,
+                    )
+            logger.info("BotRuntime stopped: %s", self.bot_instance_id)
 
     async def pause(self) -> None:
-        if self.state.status == RuntimeStatus.RUNNING:
-            self.state.status = RuntimeStatus.PAUSED
+        async with self._lifecycle_lock:
+            if self.state.status == RuntimeStatus.RUNNING:
+                self.state.status = RuntimeStatus.PAUSED
 
     async def resume(self) -> None:
-        if self.state.status == RuntimeStatus.PAUSED:
-            self.state.status = RuntimeStatus.RUNNING
+        async with self._lifecycle_lock:
+            if self.state.status == RuntimeStatus.PAUSED:
+                self.state.status = RuntimeStatus.RUNNING
 
     # ── Runtime loop ───────────────────────────────────────────────────── #
 
@@ -189,9 +204,50 @@ class BotRuntime:
         }
 
     async def _update_broker_health(self) -> None:
-        self.state.metadata["broker_connected"] = bool(
-            getattr(self.broker_provider, "is_connected", False)
-        )
+        connected = bool(getattr(self.broker_provider, "is_connected", False))
+        status = "disconnected"
+        reason = "provider_not_connected"
+        if connected:
+            status = "healthy"
+            reason = ""
+        health_check = getattr(self.broker_provider, "health_check", None)
+        if callable(health_check):
+            try:
+                details = await health_check()
+                if isinstance(details, dict):
+                    status = str(details.get("status") or status)
+                    reason = str(details.get("reason") or reason)
+            except Exception:
+                status = "degraded"
+                reason = "health_check_failed"
+        self.state.metadata["broker_connected"] = connected
+        self.state.metadata["broker_health"] = {"status": status, "reason": reason}
+
+    async def _ensure_provider_usable(self) -> None:
+        try:
+            if hasattr(self.broker_provider, "connect") and not getattr(
+                self.broker_provider, "is_connected", False
+            ):
+                await self.broker_provider.connect()
+            if not getattr(self.broker_provider, "is_connected", False):
+                self.state.status = RuntimeStatus.ERROR
+                self.state.error_message = "Broker provider unavailable"
+                raise RuntimeError("Broker provider is not connected")
+            health_check = getattr(self.broker_provider, "health_check", None)
+            if callable(health_check):
+                details = await health_check()
+                if isinstance(details, dict):
+                    status = str(details.get("status", "healthy")).lower()
+                    if status in {"auth_failed", "disconnected", "degraded", "error"}:
+                        self.state.status = RuntimeStatus.ERROR
+                        self.state.error_message = str(
+                            details.get("reason") or f"Provider health: {status}"
+                        )
+                        raise RuntimeError(self.state.error_message)
+        except Exception:
+            if self.state.status != RuntimeStatus.ERROR:
+                self.state.status = RuntimeStatus.ERROR
+            raise
 
     # ── Snapshot ───────────────────────────────────────────────────────── #
 

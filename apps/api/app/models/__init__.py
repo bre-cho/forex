@@ -244,7 +244,7 @@ class Signal(Base):
     entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     stop_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
     take_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
-    metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+    metadata_json: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
     bot_instance: Mapped["BotInstance"] = relationship(back_populates="signals")
@@ -336,7 +336,7 @@ class Notification(Base):
     body: Mapped[str] = mapped_column(Text, default="")
     type: Mapped[str] = mapped_column(String(50), default="info")
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
-    metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+    metadata_json: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
