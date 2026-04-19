@@ -1,0 +1,9 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-brand: #10b981;
+  --color-surface: #1e1e2e;
+  --color-surface-muted: #2a2a3e;
+}

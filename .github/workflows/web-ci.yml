@@ -1,0 +1,45 @@
+name: Web CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths: ['apps/web/**', 'packages/**']
+  pull_request:
+    branches: [main]
+    paths: ['apps/web/**', 'packages/**']
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: apps/web
+
+      - name: Type check
+        run: pnpm typecheck
+        working-directory: apps/web
+
+      - name: Lint
+        run: pnpm lint
+        working-directory: apps/web
+
+      - name: Build
+        run: pnpm build
+        working-directory: apps/web
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
