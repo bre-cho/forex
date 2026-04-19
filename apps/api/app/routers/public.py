@@ -67,11 +67,9 @@ async def leaderboard(db: AsyncSession = Depends(get_db)):
         win_rate = (win_count / total_trades) if total_trades > 0 else 0.0
         items.append(
             {
-                "bot_id": row["bot_id"],
                 "bot_name": row["bot_name"],
                 "symbol": row["symbol"],
                 "timeframe": row["timeframe"],
-                "mode": row["mode"],
                 "total_trades": total_trades,
                 "total_pnl": round(float(row["total_pnl"]), 2),
                 "win_rate": round(win_rate, 4),
@@ -79,4 +77,3 @@ async def leaderboard(db: AsyncSession = Depends(get_db)):
         )
 
     return {"items": items, "count": len(items)}
-

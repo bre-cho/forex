@@ -49,6 +49,12 @@ class RuntimeFactory:
                 async def get_candles(self, symbol: str, timeframe: str, limit: int = 200):
                     return self._provider.get_candles(limit=limit, timeframe=timeframe)
 
+                async def health_check(self) -> Dict[str, Any]:
+                    return {
+                        "status": "healthy" if self._connected else "disconnected",
+                        "reason": "" if self._connected else "provider_not_connected",
+                    }
+
             return _AsyncPaperAdapter(symbol)
 
         if provider_type == "paper":

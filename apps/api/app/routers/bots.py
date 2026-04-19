@@ -24,6 +24,15 @@ def _get_registry(request: Request):
     return getattr(request.app.state, "registry", None)
 
 
+def _lifecycle_response(target_status: str, bot_id: str, already_in_state: bool) -> dict:
+    return {
+        "status": target_status,
+        "bot_id": bot_id,
+        "idempotent": True,
+        "already_in_state": already_in_state,
+    }
+
+
 async def _get_bot_or_404(bot_id: str, workspace_id: str, db: AsyncSession) -> BotInstance:
     result = await db.execute(
         select(BotInstance).where(
@@ -208,12 +217,13 @@ async def start_bot(
     registry = _get_registry(request)
     if registry is None:
         raise HTTPException(status_code=503, detail="Runtime registry unavailable")
+    already_running = bot.status == "running"
     if registry.get(bot_id) is None:
         from app.services.bot_service import create_runtime_for_bot
         await create_runtime_for_bot(bot, registry, db)
     await registry.start(bot_id)
     bot.status = "running"
-    return {"status": "running", "bot_id": bot_id}
+    return _lifecycle_response("running", bot_id, already_running)
 
 
 @router.post("/{bot_id}/stop")
@@ -227,10 +237,11 @@ async def stop_bot(
 ):
     bot = await _get_bot_or_404(bot_id, workspace_id, db)
     registry = _get_registry(request)
+    already_stopped = bot.status == "stopped"
     if registry and registry.get(bot_id):
         await registry.stop(bot_id)
     bot.status = "stopped"
-    return {"status": "stopped", "bot_id": bot_id}
+    return _lifecycle_response("stopped", bot_id, already_stopped)
 
 
 @router.post("/{bot_id}/pause")
@@ -244,10 +255,11 @@ async def pause_bot(
 ):
     bot = await _get_bot_or_404(bot_id, workspace_id, db)
     registry = _get_registry(request)
+    already_paused = bot.status == "paused"
     if registry and registry.get(bot_id):
         await registry.pause(bot_id)
     bot.status = "paused"
-    return {"status": "paused", "bot_id": bot_id}
+    return _lifecycle_response("paused", bot_id, already_paused)
 
 
 @router.post("/{bot_id}/resume")
@@ -261,10 +273,11 @@ async def resume_bot(
 ):
     bot = await _get_bot_or_404(bot_id, workspace_id, db)
     registry = _get_registry(request)
+    already_running = bot.status == "running"
     if registry and registry.get(bot_id):
         await registry.resume(bot_id)
     bot.status = "running"
-    return {"status": "running", "bot_id": bot_id}
+    return _lifecycle_response("running", bot_id, already_running)
 
 
 @router.get("/{bot_id}/runtime")

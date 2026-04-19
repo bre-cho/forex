@@ -107,4 +107,18 @@ app.include_router(legacy.router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "1.0.0", "env": settings.app_env}
+    registry = getattr(app.state, "registry", None)
+    runtime_health = {"total": 0, "running": 0, "paused": 0, "error": 0}
+    if registry is not None and hasattr(registry, "list_all"):
+        runtimes = registry.list_all()
+        runtime_health["total"] = len(runtimes)
+        for item in runtimes:
+            status = item.get("status")
+            if status in runtime_health:
+                runtime_health[status] += 1
+    return {
+        "status": "ok",
+        "version": "1.0.0",
+        "env": settings.app_env,
+        "runtime_health": runtime_health,
+    }

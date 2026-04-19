@@ -113,6 +113,12 @@ class PaperProvider(BrokerProvider):
     async def get_trade_history(self, limit: int = 100) -> List[Dict[str, Any]]:
         return self._history[-limit:]
 
+    async def health_check(self) -> Dict[str, Any]:
+        return {
+            "status": "healthy" if self._connected else "disconnected",
+            "reason": "" if self._connected else "provider_not_connected",
+        }
+
     @property
     def is_connected(self) -> bool:
         return self._connected

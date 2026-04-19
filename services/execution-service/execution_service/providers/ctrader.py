@@ -128,6 +128,13 @@ class CTraderProvider(BrokerProvider):
             return await self._provider.get_history(limit=limit)
         return []
 
+    async def health_check(self) -> Dict[str, Any]:
+        if not self._connected:
+            return {"status": "disconnected", "reason": "provider_not_connected"}
+        if self._provider is None:
+            return {"status": "degraded", "reason": "provider_running_in_stub_mode"}
+        return {"status": "healthy", "reason": ""}
+
     @property
     def is_connected(self) -> bool:
         return self._connected

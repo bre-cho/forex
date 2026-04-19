@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
 from app.dependencies.permissions import require_workspace_role
-from app.models import Trade, User
+from app.models import BotInstance, Trade, User
 
 router = APIRouter(
     prefix="/v1/workspaces/{workspace_id}/analytics",
@@ -27,7 +27,9 @@ async def analytics_summary(
     _member=Depends(require_workspace_role("viewer")),
 ):
     """Return aggregated performance metrics for a workspace or specific bot."""
-    query = select(Trade)
+    query = select(Trade).join(BotInstance, BotInstance.id == Trade.bot_instance_id).where(
+        BotInstance.workspace_id == workspace_id
+    )
     if bot_id:
         query = query.where(Trade.bot_instance_id == bot_id)
     result = await db.execute(query)
@@ -64,7 +66,12 @@ async def equity_curve(
     _member=Depends(require_workspace_role("viewer")),
 ):
     """Return equity curve data points."""
-    query = select(Trade).order_by(Trade.opened_at)
+    query = (
+        select(Trade)
+        .join(BotInstance, BotInstance.id == Trade.bot_instance_id)
+        .where(BotInstance.workspace_id == workspace_id)
+        .order_by(Trade.opened_at)
+    )
     if bot_id:
         query = query.where(Trade.bot_instance_id == bot_id)
     result = await db.execute(query)
@@ -81,4 +88,3 @@ async def equity_curve(
             "trade_id": t.id,
         })
     return curve
-
