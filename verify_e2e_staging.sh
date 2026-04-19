@@ -13,10 +13,12 @@
 #   ./verify_e2e_staging.sh
 #
 # Environment overrides (optional):
-#   BASE_URL      — HTTP base URL  (default: http://127.0.0.1:8000)
-#   WS_BASE_URL   — WebSocket base URL (default: ws://127.0.0.1:8000)
-#   SKIP_SETUP    — set to 1 to skip venv/docker/migration/test steps
-#                   (useful when the stack is already running)
+#   BASE_URL           — HTTP base URL  (default: http://127.0.0.1:8000)
+#   WS_BASE_URL        — WebSocket base URL (default: ws://127.0.0.1:8000)
+#   SKIP_SETUP         — set to 1 to skip venv/docker/migration/test steps
+#                        (useful when the stack is already running)
+#   TEST_PASSWORD      — password for the ephemeral staging user
+#                        (default: randomly generated 24-char string)
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,6 +30,10 @@ API_LOG="$LOG_DIR/api.log"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8000}"
 WS_BASE_URL="${WS_BASE_URL:-ws://127.0.0.1:8000}"
 SKIP_SETUP="${SKIP_SETUP:-0}"
+
+# Tunable constants
+MAX_POLL_ATTEMPTS=40   # seconds to wait for the API health check
+WS_TIMEOUT=10          # seconds to wait for a WebSocket response
 
 mkdir -p "$LOG_DIR"
 
@@ -95,7 +101,7 @@ http_json() {
 wait_for_http() {
   local url="$1"
   info "Polling $url ..."
-  for _ in {1..40}; do
+  for _ in $(seq 1 "$MAX_POLL_ATTEMPTS"); do
     if curl -fsS "$url" >/dev/null 2>&1; then
       return 0
     fi
@@ -109,10 +115,10 @@ smoke_test_ws() {
 
   if command -v websocat >/dev/null 2>&1; then
     # Send "ping"; the server replies with a JSON pong event.
-    echo "ping" | timeout 10s websocat "$ws_url" \
+    echo "ping" | timeout "${WS_TIMEOUT}s" websocat "$ws_url" \
       >"$LOG_DIR/ws.out" 2>"$LOG_DIR/ws.err" || true
   elif command -v wscat >/dev/null 2>&1; then
-    timeout 10s wscat --execute "ping" -c "$ws_url" \
+    timeout "${WS_TIMEOUT}s" wscat --execute "ping" -c "$ws_url" \
       >"$LOG_DIR/ws.out" 2>"$LOG_DIR/ws.err" || true
   else
     fail "websocat or wscat is required for the WebSocket smoke test"
@@ -185,7 +191,11 @@ fi
 
 TS="$(date +%s)"
 TEST_EMAIL="staging.${TS}@example.com"
-TEST_PASSWORD="Str0ngPass!234"
+# Generate a random password unless the caller supplies one explicitly.
+TEST_PASSWORD="${TEST_PASSWORD:-$(python3 -c "import secrets,string; \
+  chars=string.ascii_letters+string.digits+'!@#'; \
+  print(secrets.token_urlsafe(16)[:16] + secrets.choice(string.digits) \
+        + secrets.choice('!@#') + secrets.choice(string.ascii_uppercase))")}"
 TEST_NAME="Staging Verify User"
 WORKSPACE_SLUG="staging-ws-${TS}"
 WORKSPACE_NAME="Staging Workspace ${TS}"
