@@ -6,12 +6,13 @@ from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.core.security import decode_token
+from app.core.token_revocation import is_user_access_token_revoked_after, normalize_iat_ms
 from app.models import User
-from sqlalchemy import select
 
 security = HTTPBearer(auto_error=False)
 
@@ -28,10 +29,21 @@ async def get_current_user(
         )
     try:
         payload = decode_token(credentials.credentials)
+        if payload.get("type") != "access":
+            raise ValueError("Token is not an access token")
         user_id: str = payload.get("sub")
         if not user_id:
             raise ValueError("No subject in token")
     except (JWTError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
+
+    if await is_user_access_token_revoked_after(
+        user_id,
+        normalize_iat_ms(payload.get("iat_ms", payload.get("iat"))),
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
+from app.dependencies.permissions import require_workspace_role
 from app.models import User, Workspace, WorkspaceMember
 from app.schemas import (
     AddMemberRequest,
@@ -62,6 +63,7 @@ async def get_workspace(
     workspace_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("viewer")),
 ):
     return await _get_workspace_or_404(workspace_id, db)
 
@@ -100,6 +102,7 @@ async def list_members(
     workspace_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("viewer")),
 ):
     result = await db.execute(
         select(WorkspaceMember).where(WorkspaceMember.workspace_id == workspace_id)
@@ -113,10 +116,11 @@ async def add_member(
     body: AddMemberRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("admin")),
 ):
-    ws = await _get_workspace_or_404(workspace_id, db)
-    if ws.owner_id != current_user.id and not current_user.is_superuser:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    # Keep explicit existence check to return 404 for stale workspace IDs
+    # after role validation succeeds.
+    await _get_workspace_or_404(workspace_id, db)
     user_result = await db.execute(select(User).where(User.email == body.email))
     target_user = user_result.scalar_one_or_none()
     if not target_user:
@@ -135,10 +139,11 @@ async def remove_member(
     user_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("admin")),
 ):
-    ws = await _get_workspace_or_404(workspace_id, db)
-    if ws.owner_id != current_user.id and not current_user.is_superuser:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    # Keep explicit existence check to return 404 for stale workspace IDs
+    # after role validation succeeds.
+    await _get_workspace_or_404(workspace_id, db)
     result = await db.execute(
         select(WorkspaceMember).where(
             WorkspaceMember.workspace_id == workspace_id,

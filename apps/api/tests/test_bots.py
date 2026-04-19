@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.core import token_revocation
 from app.core.db import Base, get_db
 from app.routers import auth, bots, workspaces
 from app.services import bot_service
@@ -47,6 +48,11 @@ class _FakeRegistry:
         self._runtimes.pop(bot_id, None)
 
 
+class _FakeRedis:
+    async def get(self, _key: str):
+        return None
+
+
 async def _register_and_login(client: AsyncClient, email: str) -> dict:
     await client.post(
         "/v1/auth/register",
@@ -85,11 +91,17 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
         registry._runtimes.setdefault(bot.id, _Runtime())
 
     monkeypatch.setattr(bot_service, "create_runtime_for_bot", _fake_create_runtime_for_bot)
+    fake_redis = _FakeRedis()
+
+    async def _get_fake_redis():
+        return fake_redis
+
+    monkeypatch.setattr(token_revocation, "get_redis", _get_fake_redis)
     app.dependency_overrides[get_db] = _override_get_db
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         user1_tokens = await _register_and_login(client, "owner1@example.com")
-        user2_tokens = await _register_and_login(client, "owner2@example.com")
+        user2_tokens = await _register_and_login(client, "user2@example.com")
 
         user1_headers = {"Authorization": f"Bearer {user1_tokens['access_token']}"}
         user2_headers = {"Authorization": f"Bearer {user2_tokens['access_token']}"}
@@ -122,6 +134,12 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
         )
         assert isolation_resp.status_code == 403
 
+        workspace_read_isolation = await client.get(
+            f"/v1/workspaces/{ws1_id}",
+            headers=user2_headers,
+        )
+        assert workspace_read_isolation.status_code == 403
+
         start_first = await client.post(
             f"/v1/workspaces/{ws1_id}/bots/{bot_id}/start",
             headers=user1_headers,
@@ -149,6 +167,49 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
         )
         assert stop_second.status_code == 200
         assert stop_second.json()["already_in_state"] is True
+
+        add_viewer_resp = await client.post(
+            f"/v1/workspaces/{ws1_id}/members",
+            headers=user1_headers,
+            json={"email": "user2@example.com", "role": "viewer"},
+        )
+        assert add_viewer_resp.status_code == 200
+        owner2_user_id = add_viewer_resp.json()["user_id"]
+
+        viewer_start_resp = await client.post(
+            f"/v1/workspaces/{ws1_id}/bots/{bot_id}/start",
+            headers=user2_headers,
+        )
+        assert viewer_start_resp.status_code == 403
+
+        user3_tokens = await _register_and_login(client, "user3@example.com")
+        user3_headers = {"Authorization": f"Bearer {user3_tokens['access_token']}"}
+
+        remove_viewer_resp = await client.delete(
+            f"/v1/workspaces/{ws1_id}/members/{owner2_user_id}",
+            headers=user1_headers,
+        )
+        assert remove_viewer_resp.status_code == 204
+
+        add_admin_resp = await client.post(
+            f"/v1/workspaces/{ws1_id}/members",
+            headers=user1_headers,
+            json={"email": "user2@example.com", "role": "admin"},
+        )
+        assert add_admin_resp.status_code == 200
+
+        admin_add_member_resp = await client.post(
+            f"/v1/workspaces/{ws1_id}/members",
+            headers=user2_headers,
+            json={"email": "user3@example.com", "role": "viewer"},
+        )
+        assert admin_add_member_resp.status_code == 200
+
+        user3_workspace_access = await client.get(
+            f"/v1/workspaces/{ws1_id}",
+            headers=user3_headers,
+        )
+        assert user3_workspace_access.status_code == 200
 
         list_other_workspace = await client.get(
             f"/v1/workspaces/{ws2_id}/bots",

@@ -28,15 +28,18 @@ def create_access_token(
     extra: dict[str, Any] | None = None,
     extra_claims: dict[str, Any] | None = None,
 ) -> str:
+    now = datetime.now(UTC)
     if expires_delta is not None:
-        expire = datetime.now(UTC) + expires_delta
+        expire = now + expires_delta
     else:
-        expire = datetime.now(UTC) + timedelta(
+        expire = now + timedelta(
             minutes=settings.jwt_access_token_expire_minutes
         )
     payload: dict[str, Any] = {
         "sub": subject,
         "exp": expire,
+        "iat": now,
+        "iat_ms": int(now.timestamp() * 1000),
         "type": "access",
     }
     if extra:
@@ -51,7 +54,13 @@ def create_refresh_token(subject: str) -> str:
     expire = now + timedelta(
         days=settings.jwt_refresh_token_expire_days
     )
-    payload = {"sub": subject, "exp": expire, "iat": now, "type": "refresh"}
+    payload = {
+        "sub": subject,
+        "exp": expire,
+        "iat": now,
+        "iat_ms": int(now.timestamp() * 1000),
+        "type": "refresh",
+    }
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
