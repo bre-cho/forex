@@ -14,6 +14,7 @@ from app.core.cache import get_redis
 from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal
 from app.core.security import decode_token
+from app.core.token_revocation import is_user_access_token_revoked_after, normalize_iat
 from app.models import BotInstance, User, WorkspaceMember
 
 logger = logging.getLogger(__name__)
@@ -162,8 +163,12 @@ async def _resolve_authenticated_user(websocket: WebSocket) -> User | None:
         payload = decode_token(token)
     except Exception:
         return None
+    if payload.get("type") != "access":
+        return None
     user_id = payload.get("sub")
     if not user_id:
+        return None
+    if await is_user_access_token_revoked_after(user_id, normalize_iat(payload.get("iat"))):
         return None
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(User).where(User.id == user_id, User.is_active.is_(True)))

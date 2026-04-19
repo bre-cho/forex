@@ -122,6 +122,12 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
         )
         assert isolation_resp.status_code == 403
 
+        workspace_read_isolation = await client.get(
+            f"/v1/workspaces/{ws1_id}",
+            headers=user2_headers,
+        )
+        assert workspace_read_isolation.status_code == 403
+
         start_first = await client.post(
             f"/v1/workspaces/{ws1_id}/bots/{bot_id}/start",
             headers=user1_headers,
@@ -149,6 +155,49 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
         )
         assert stop_second.status_code == 200
         assert stop_second.json()["already_in_state"] is True
+
+        add_viewer_resp = await client.post(
+            f"/v1/workspaces/{ws1_id}/members",
+            headers=user1_headers,
+            json={"email": "owner2@example.com", "role": "viewer"},
+        )
+        assert add_viewer_resp.status_code == 200
+        owner2_user_id = add_viewer_resp.json()["user_id"]
+
+        viewer_start_resp = await client.post(
+            f"/v1/workspaces/{ws1_id}/bots/{bot_id}/start",
+            headers=user2_headers,
+        )
+        assert viewer_start_resp.status_code == 403
+
+        user3_tokens = await _register_and_login(client, "owner3@example.com")
+        user3_headers = {"Authorization": f"Bearer {user3_tokens['access_token']}"}
+
+        add_admin_resp = await client.post(
+            f"/v1/workspaces/{ws1_id}/members/{owner2_user_id}",
+            headers=user1_headers,
+        )
+        assert add_admin_resp.status_code == 204
+
+        add_admin_resp = await client.post(
+            f"/v1/workspaces/{ws1_id}/members",
+            headers=user1_headers,
+            json={"email": "owner2@example.com", "role": "admin"},
+        )
+        assert add_admin_resp.status_code == 200
+
+        admin_add_member_resp = await client.post(
+            f"/v1/workspaces/{ws1_id}/members",
+            headers=user2_headers,
+            json={"email": "owner3@example.com", "role": "viewer"},
+        )
+        assert admin_add_member_resp.status_code == 200
+
+        user3_workspace_access = await client.get(
+            f"/v1/workspaces/{ws1_id}",
+            headers=user3_headers,
+        )
+        assert user3_workspace_access.status_code == 200
 
         list_other_workspace = await client.get(
             f"/v1/workspaces/{ws2_id}/bots",

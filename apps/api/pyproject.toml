@@ -22,6 +22,7 @@ dependencies = [
     "aioredis>=2.0",
     "httpx>=0.27",
     "python-dotenv>=1.0",
+    "email-validator>=2.2",
     "sentry-sdk[fastapi]>=2.0",
     "stripe>=8.0",
     "aiohttp>=3.9",

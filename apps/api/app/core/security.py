@@ -28,15 +28,17 @@ def create_access_token(
     extra: dict[str, Any] | None = None,
     extra_claims: dict[str, Any] | None = None,
 ) -> str:
+    now = datetime.now(UTC)
     if expires_delta is not None:
-        expire = datetime.now(UTC) + expires_delta
+        expire = now + expires_delta
     else:
-        expire = datetime.now(UTC) + timedelta(
+        expire = now + timedelta(
             minutes=settings.jwt_access_token_expire_minutes
         )
     payload: dict[str, Any] = {
         "sub": subject,
         "exp": expire,
+        "iat": now,
         "type": "access",
     }
     if extra:

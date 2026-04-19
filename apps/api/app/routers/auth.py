@@ -19,6 +19,7 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
+from app.core.token_revocation import normalize_iat, revoke_all_user_access_tokens
 from app.dependencies.auth import get_current_user
 from app.models import User
 from app.schemas import (
@@ -85,7 +86,7 @@ async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found")
-    if await _is_user_refresh_revoked_after(user_id, payload.get("iat")):
+    if await _is_user_refresh_revoked_after(user_id, normalize_iat(payload.get("iat"))):
         raise HTTPException(status_code=401, detail="Refresh token revoked")
     return TokenResponse(
         access_token=create_access_token(user.id),
@@ -96,7 +97,11 @@ async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)
 @router.post("/logout")
 async def logout(body: RefreshRequest):
     """Revoke the provided refresh token and terminate the client session."""
+    user_id = _extract_refresh_user_id(body.refresh_token)
     await _revoke_refresh_token(body.refresh_token)
+    if user_id:
+        await _revoke_all_user_refresh_tokens(user_id)
+        await revoke_all_user_access_tokens(user_id)
     return {"message": "Logged out"}
 
 
@@ -180,6 +185,7 @@ async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(
         raise HTTPException(status_code=404, detail="User not found")
     user.hashed_password = hash_password(body.new_password)
     await _revoke_all_user_refresh_tokens(user.id)
+    await revoke_all_user_access_tokens(user.id)
     return {"message": "Password updated"}
 
 
@@ -219,6 +225,19 @@ async def _is_user_refresh_revoked_after(user_id: str, token_iat: int | None) ->
     if value is None:
         return False
     try:
-        return int(token_iat) < int(value)
+        return int(token_iat) <= int(value)
     except (TypeError, ValueError):
         return False
+
+
+def _extract_refresh_user_id(refresh_token: str) -> str | None:
+    try:
+        payload = decode_token(refresh_token)
+        if payload.get("type") != "refresh":
+            return None
+        user_id = payload.get("sub")
+        if isinstance(user_id, str) and user_id:
+            return user_id
+    except Exception:
+        return None
+    return None
