@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import uuid
-
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -99,14 +97,14 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
         ws1 = await client.post(
             "/v1/workspaces",
             headers=user1_headers,
-            json={"name": "Workspace 1", "slug": f"ws-{uuid.uuid4().hex[:8]}"},
+            json={"name": "Workspace 1", "slug": "ws-owner1"},
         )
         ws1_id = ws1.json()["id"]
 
         ws2 = await client.post(
             "/v1/workspaces",
             headers=user2_headers,
-            json={"name": "Workspace 2", "slug": f"ws-{uuid.uuid4().hex[:8]}"},
+            json={"name": "Workspace 2", "slug": "ws-owner2"},
         )
         ws2_id = ws2.json()["id"]
 

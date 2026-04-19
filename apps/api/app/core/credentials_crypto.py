@@ -26,6 +26,14 @@ def _build_derived_key(seed: str) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(seed.encode("utf-8")).digest()).decode("utf-8")
 
 
+def _is_valid_fernet_key(key: str) -> bool:
+    try:
+        decoded = base64.urlsafe_b64decode(key.encode("utf-8"))
+        return len(decoded) == 32
+    except Exception:
+        return False
+
+
 def _candidate_fernet_keys() -> list[str]:
     settings = get_settings()
     keys: list[str] = []
@@ -40,7 +48,17 @@ def _candidate_fernet_keys() -> list[str]:
 
 
 def _fernet() -> MultiFernet:
-    fernets = [Fernet(key.encode("utf-8")) for key in _candidate_fernet_keys()]
+    settings = get_settings()
+    valid_keys = [key for key in _candidate_fernet_keys() if _is_valid_fernet_key(key)]
+    if not valid_keys:
+        if settings.app_env == "production":
+            raise ValueError(
+                "FERNET_KEY environment variable is required in production. "
+                "Generate one with: python -c "
+                "\"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            )
+        valid_keys = [_build_derived_key("dev-insecure-secret")]
+    fernets = [Fernet(key.encode("utf-8")) for key in valid_keys]
     return MultiFernet(fernets)
 
 

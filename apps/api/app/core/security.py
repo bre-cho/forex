@@ -1,7 +1,7 @@
 """JWT security utilities."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from jose import jwt
@@ -29,9 +29,9 @@ def create_access_token(
     extra_claims: dict[str, Any] | None = None,
 ) -> str:
     if expires_delta is not None:
-        expire = datetime.now(timezone.utc) + expires_delta
+        expire = datetime.now(UTC) + expires_delta
     else:
-        expire = datetime.now(timezone.utc) + timedelta(
+        expire = datetime.now(UTC) + timedelta(
             minutes=settings.jwt_access_token_expire_minutes
         )
     payload: dict[str, Any] = {
@@ -47,7 +47,7 @@ def create_access_token(
 
 
 def create_refresh_token(subject: str) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expire = now + timedelta(
         days=settings.jwt_refresh_token_expire_days
     )

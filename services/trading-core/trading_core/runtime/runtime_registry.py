@@ -110,11 +110,17 @@ class RuntimeRegistry:
                 return
             op_lock = self._get_or_create_op_lock(bot_instance_id)
             remaining = len(self._runtimes)
-        async with op_lock:
-            if runtime.state.status != RuntimeStatus.STOPPED:
-                await runtime.stop()
-        async with self._lock:
-            self._op_locks.pop(bot_instance_id, None)
+        try:
+            async with op_lock:
+                if runtime.state.status != RuntimeStatus.STOPPED:
+                    await runtime.stop()
+        except Exception:
+            async with self._lock:
+                self._runtimes[bot_instance_id] = runtime
+            raise
+        finally:
+            async with self._lock:
+                self._op_locks.pop(bot_instance_id, None)
         logger.info(
             "Runtime removed: %s (remaining: %d)", bot_instance_id, remaining
         )

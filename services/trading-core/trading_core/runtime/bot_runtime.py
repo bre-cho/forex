@@ -97,7 +97,7 @@ class BotRuntime:
     async def start(self) -> None:
         async with self._lifecycle_lock:
             if self.state.status in (RuntimeStatus.RUNNING, RuntimeStatus.STARTING):
-                logger.warning("BotRuntime %s already running", self.bot_instance_id)
+                logger.warning("BotRuntime %s already running or starting", self.bot_instance_id)
                 return
             self.state.status = RuntimeStatus.STARTING
             await self._ensure_provider_usable()
@@ -123,8 +123,12 @@ class BotRuntime:
             if hasattr(self.broker_provider, "disconnect"):
                 try:
                     await self.broker_provider.disconnect()
-                except Exception:
-                    logger.warning("Broker disconnect failed for %s", self.bot_instance_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Broker disconnect failed for %s: %s",
+                        self.bot_instance_id,
+                        exc,
+                    )
             logger.info("BotRuntime stopped: %s", self.bot_instance_id)
 
     async def pause(self) -> None:
