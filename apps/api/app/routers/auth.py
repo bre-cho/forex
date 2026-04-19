@@ -95,6 +95,7 @@ async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)
 
 @router.post("/logout")
 async def logout(body: RefreshRequest):
+    """Revoke the provided refresh token and terminate the client session."""
     await _revoke_refresh_token(body.refresh_token)
     return {"message": "Logged out"}
 
@@ -127,11 +128,10 @@ async def _send_reset_email(email: str, reset_token: str) -> None:
     reset_url = f"{settings.frontend_url}/reset-password?token={reset_token}"
 
     if not settings.smtp_username or not settings.smtp_password:
-        # SMTP not configured — log the link so developers can test locally
+        # SMTP not configured — do not log reset token content.
         logger.warning(
-            "SMTP not configured. Password-reset link for %s: %s",
+            "SMTP not configured. Password-reset requested for %s",
             email,
-            reset_url,
         )
         return
 
