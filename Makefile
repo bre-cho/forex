@@ -1,4 +1,4 @@
-.PHONY: dev build test lint migrate seed docker-up docker-down docker-prod
+.PHONY: dev build test test-api test-services install-test lint migrate seed docker-up docker-down docker-prod
 
 # ── Development ──────────────────────────────────────────────────────────────
 dev:
@@ -8,7 +8,13 @@ build:
 	pnpm turbo build
 
 test:
-	pnpm turbo test
+	pytest apps/api/tests services/trading-core/tests -q
+
+test-api:
+	pytest apps/api/tests -q
+
+test-services:
+	pytest services/trading-core/tests -q
 
 lint:
 	pnpm turbo lint
@@ -39,6 +45,11 @@ install-python:
 	cd services/notification-service && pip install -e ".[dev]"
 	cd services/billing-service && pip install -e ".[dev]"
 	cd apps/api && pip install -e ".[dev]"
+
+install-test:
+	pip install -r requirements-test.txt
+	pip install -e apps/api
+	pip install -e services/trading-core
 
 # ── Shorthand ────────────────────────────────────────────────────────────────
 up: docker-up
