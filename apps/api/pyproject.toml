@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "forex-api"
+name = "api-app"
 version = "0.1.0"
 description = "FastAPI backend for the Forex trading platform"
 requires-python = ">=3.11"
