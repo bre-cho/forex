@@ -47,11 +47,20 @@ def create_access_token(
 
 
 def create_refresh_token(subject: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(
         days=settings.jwt_refresh_token_expire_days
     )
-    payload = {"sub": subject, "exp": expire, "type": "refresh"}
+    payload = {"sub": subject, "exp": expire, "iat": now, "type": "refresh"}
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def create_password_reset_token(subject: str, expires_delta: timedelta) -> str:
+    return create_access_token(
+        subject,
+        expires_delta=expires_delta,
+        extra_claims={"purpose": "password_reset"},
+    )
 
 
 def decode_token(token: str) -> Dict[str, Any]:

@@ -68,6 +68,35 @@ async def _assert_same_workspace(
             )
 
 
+async def _validate_live_mode_requirements(
+    workspace_id: str,
+    mode: str,
+    broker_connection_id: str | None,
+    db: AsyncSession,
+) -> None:
+    if mode != "live":
+        return
+    if not broker_connection_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Live mode requires broker_connection_id",
+        )
+    result = await db.execute(
+        select(BrokerConnection).where(
+            BrokerConnection.id == broker_connection_id,
+            BrokerConnection.workspace_id == workspace_id,
+        )
+    )
+    conn = result.scalar_one_or_none()
+    if conn is None:
+        raise HTTPException(status_code=404, detail="Broker connection not found")
+    if not conn.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Live mode requires an active broker connection",
+        )
+
+
 @router.post("", response_model=BotOut, status_code=status.HTTP_201_CREATED)
 async def create_bot(
     workspace_id: str,
@@ -77,6 +106,7 @@ async def create_bot(
     _member=Depends(require_workspace_role("trader")),
 ):
     await _assert_same_workspace(workspace_id, body.strategy_id, body.broker_connection_id, db)
+    await _validate_live_mode_requirements(workspace_id, body.mode, body.broker_connection_id, db)
     bot = BotInstance(
         workspace_id=workspace_id,
         name=body.name,
@@ -127,8 +157,22 @@ async def update_bot(
     _member=Depends(require_workspace_role("trader")),
 ):
     bot = await _get_bot_or_404(bot_id, workspace_id, db)
+    if body.strategy_id is not None:
+        await _assert_same_workspace(workspace_id, body.strategy_id, None, db)
     if body.broker_connection_id is not None:
         await _assert_same_workspace(workspace_id, None, body.broker_connection_id, db)
+    effective_mode = body.mode or bot.mode
+    effective_broker_connection_id = (
+        body.broker_connection_id
+        if body.broker_connection_id is not None
+        else bot.broker_connection_id
+    )
+    await _validate_live_mode_requirements(
+        workspace_id,
+        effective_mode,
+        effective_broker_connection_id,
+        db,
+    )
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(bot, field, value)
     return bot
@@ -144,6 +188,7 @@ async def delete_bot(
     _member=Depends(require_workspace_role("admin")),
 ):
     bot = await _get_bot_or_404(bot_id, workspace_id, db)
+    await _validate_live_mode_requirements(workspace_id, bot.mode, bot.broker_connection_id, db)
     registry = _get_registry(request)
     if registry and registry.get(bot_id):
         await registry.remove(bot_id)
@@ -275,4 +320,3 @@ async def update_bot_config(
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(config, field, value)
     return {"message": "Config updated"}
-

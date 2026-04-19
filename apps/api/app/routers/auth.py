@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import get_redis
 from app.core.db import get_db
 from app.core.security import (
     create_access_token,
+    create_password_reset_token,
     create_refresh_token,
     decode_token,
     hash_password,
@@ -33,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 # Password-reset tokens are valid for 1 hour
 _RESET_TOKEN_TTL_MINUTES = 60
+_REVOKED_REFRESH_TOKEN_PREFIX = "auth:revoked:refresh:"
+_USER_REFRESH_REVOKED_AFTER_PREFIX = "auth:revoke_after:user:"
 
 
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
@@ -66,6 +71,8 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
+    if await _is_refresh_token_revoked(body.refresh_token):
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
     try:
         payload = decode_token(body.refresh_token)
         if payload.get("type") != "refresh":
@@ -78,6 +85,8 @@ async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found")
+    if await _is_user_refresh_revoked_after(user_id, payload.get("iat")):
+        raise HTTPException(status_code=401, detail="Refresh token revoked")
     return TokenResponse(
         access_token=create_access_token(user.id),
         refresh_token=create_refresh_token(user.id),
@@ -85,9 +94,8 @@ async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)
 
 
 @router.post("/logout")
-async def logout():
-    # JWT is stateless; client drops the token.
-    # Optionally blacklist token in Redis here.
+async def logout(body: RefreshRequest):
+    await _revoke_refresh_token(body.refresh_token)
     return {"message": "Logged out"}
 
 
@@ -102,10 +110,9 @@ async def forgot_password(body: ForgotPasswordRequest, db: AsyncSession = Depend
     user = result.scalar_one_or_none()
 
     if user and user.is_active:
-        reset_token = create_access_token(
+        reset_token = create_password_reset_token(
             user.id,
             expires_delta=timedelta(minutes=_RESET_TOKEN_TTL_MINUTES),
-            extra_claims={"purpose": "password_reset"},
         )
         await _send_reset_email(user.email, reset_token)
 
@@ -172,6 +179,7 @@ async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     user.hashed_password = hash_password(body.new_password)
+    await _revoke_all_user_refresh_tokens(user.id)
     return {"message": "Password updated"}
 
 
@@ -179,3 +187,38 @@ async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(
 async def me(current_user: User = Depends(get_current_user)):
     return current_user
 
+
+async def _revoke_refresh_token(refresh_token: str) -> None:
+    try:
+        payload = decode_token(refresh_token)
+        if payload.get("type") != "refresh":
+            return
+        exp = int(payload.get("exp", 0))
+    except Exception:
+        return
+    ttl = max(exp - int(time.time()), 1)
+    redis = await get_redis()
+    await redis.setex(f"{_REVOKED_REFRESH_TOKEN_PREFIX}{refresh_token}", ttl, "1")
+
+
+async def _is_refresh_token_revoked(refresh_token: str) -> bool:
+    redis = await get_redis()
+    return bool(await redis.exists(f"{_REVOKED_REFRESH_TOKEN_PREFIX}{refresh_token}"))
+
+
+async def _revoke_all_user_refresh_tokens(user_id: str) -> None:
+    redis = await get_redis()
+    await redis.set(f"{_USER_REFRESH_REVOKED_AFTER_PREFIX}{user_id}", int(time.time()))
+
+
+async def _is_user_refresh_revoked_after(user_id: str, token_iat: int | None) -> bool:
+    if token_iat is None:
+        return False
+    redis = await get_redis()
+    value = await redis.get(f"{_USER_REFRESH_REVOKED_AFTER_PREFIX}{user_id}")
+    if value is None:
+        return False
+    try:
+        return int(token_iat) < int(value)
+    except (TypeError, ValueError):
+        return False

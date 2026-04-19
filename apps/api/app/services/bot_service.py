@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.credentials_crypto import decrypt_credentials
 from app.models import BotInstance, BotInstanceConfig, BrokerConnection
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ async def create_runtime_for_bot(
         )
         bc = bc_result.scalar_one_or_none()
         if bc:
-            broker_credentials = bc.credentials or {}
+            broker_credentials = decrypt_credentials(bc.credentials_encrypted)
 
     try:
         from trading_core.runtime import RuntimeFactory, RuntimeRegistry
@@ -61,7 +62,7 @@ async def create_runtime_for_bot(
         )
 
         # Use the public registry.create() API — never access _runtimes directly
-        registry.create(
+        await registry.create(
             bot_instance_id=bot.id,
             strategy_config=strategy_config,
             broker_provider=provider,
@@ -72,7 +73,7 @@ async def create_runtime_for_bot(
 
     except ImportError:
         logger.warning("trading_core not available, creating stub runtime for bot: %s", bot.id)
-        _register_stub(bot.id, registry)
+        await _register_stub(bot.id, registry)
     except ValueError as exc:
         # Registry raises ValueError if the runtime already exists
         logger.info("Runtime already exists for bot %s: %s", bot.id, exc)
@@ -81,7 +82,7 @@ async def create_runtime_for_bot(
         raise
 
 
-def _register_stub(bot_instance_id: str, registry: Any) -> None:
+async def _register_stub(bot_instance_id: str, registry: Any) -> None:
     """Register a minimal stub runtime when trading_core is unavailable."""
 
     class _StubRuntime:
@@ -104,7 +105,7 @@ def _register_stub(bot_instance_id: str, registry: Any) -> None:
     # fall back gracefully without touching private fields.
     if hasattr(registry, "create"):
         try:
-            registry.create(
+            await registry.create(
                 bot_instance_id=bot_instance_id,
                 strategy_config={},
                 broker_provider=None,

@@ -142,16 +142,56 @@ class BotRuntime:
     async def tick(self) -> None:
         """Single trading cycle tick."""
         try:
-            self.broker_provider.advance()
-            df = self.broker_provider.get_candles(limit=200)
+            df = await self._fetch_market_data()
             if df is None or df.empty:
                 return
-            wave = self._wave_detector.analyse(df)
-            # Trade management, signal generation, etc. follow same pattern
-            # as original main.py engine loop, but scoped to this instance.
+            wave = self._analyse_market(df)
+            signal = self._generate_signal(df, wave)
+            await self._manage_trades(signal)
+            await self._persist_snapshot(df, wave, signal)
+            await self._publish_realtime_event(wave, signal)
+            await self._update_broker_health()
         except Exception as exc:
             logger.error("Tick error [%s]: %s", self.bot_instance_id, exc)
             raise
+
+    async def _fetch_market_data(self):
+        if hasattr(self.broker_provider, "is_connected") and not self.broker_provider.is_connected:
+            await self.broker_provider.connect()
+        symbol = getattr(self.broker_provider, "symbol", "EURUSD")
+        timeframe = getattr(self.broker_provider, "timeframe", "M5")
+        return await self.broker_provider.get_candles(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=200,
+        )
+
+    def _analyse_market(self, df):
+        return self._wave_detector.analyse(df)
+
+    def _generate_signal(self, df, wave):
+        return {"wave_state": str(getattr(wave, "main_wave", "")), "confidence": getattr(wave, "confidence", 0.0)}
+
+    async def _manage_trades(self, signal: Dict[str, Any]) -> None:
+        self.state.metadata["last_signal"] = signal
+
+    async def _persist_snapshot(self, df, wave, signal: Dict[str, Any]) -> None:
+        self.state.metadata["last_tick_at"] = time.time()
+        self.state.metadata["last_candle_close"] = float(df["close"].iloc[-1])
+        self.state.metadata["last_wave_confidence"] = float(getattr(wave, "confidence", 0.0))
+        self.state.metadata["last_signal"] = signal
+
+    async def _publish_realtime_event(self, wave, signal: Dict[str, Any]) -> None:
+        self.state.metadata["last_event"] = {
+            "bot_instance_id": self.bot_instance_id,
+            "wave_state": str(getattr(wave, "main_wave", "")),
+            "confidence": signal.get("confidence", 0.0),
+        }
+
+    async def _update_broker_health(self) -> None:
+        self.state.metadata["broker_connected"] = bool(
+            getattr(self.broker_provider, "is_connected", False)
+        )
 
     # ── Snapshot ───────────────────────────────────────────────────────── #
 

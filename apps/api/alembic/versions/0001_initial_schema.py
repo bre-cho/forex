@@ -116,7 +116,7 @@ def upgrade() -> None:
         ),
         sa.Column("name", sa.String(255), nullable=False),
         sa.Column("broker_type", sa.String(50), nullable=False),
-        sa.Column("credentials", sa.JSON(), nullable=False, server_default="{}"),
+        sa.Column("credentials_encrypted", sa.Text(), nullable=False, server_default=""),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
         sa.Column("last_synced_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(

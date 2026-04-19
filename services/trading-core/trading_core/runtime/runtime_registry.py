@@ -22,7 +22,7 @@ class RuntimeRegistry:
 
     Usage:
         registry = RuntimeRegistry()
-        runtime = registry.create(bot_instance_id, config)
+        runtime = await registry.create(bot_instance_id, config)
         await registry.start(bot_instance_id)
         snapshot = await registry.get_snapshot(bot_instance_id)
         await registry.stop(bot_instance_id)
@@ -33,7 +33,7 @@ class RuntimeRegistry:
         self._lock = asyncio.Lock()
         logger.info("RuntimeRegistry initialised")
 
-    def create(
+    async def create(
         self,
         bot_instance_id: str,
         strategy_config: dict,
@@ -42,16 +42,17 @@ class RuntimeRegistry:
         ai_config: Optional[dict] = None,
     ) -> BotRuntime:
         """Register a new BotRuntime.  Raises ValueError if one already exists."""
-        if bot_instance_id in self._runtimes:
-            raise ValueError(f"Runtime already exists: {bot_instance_id}")
-        runtime = BotRuntime(
-            bot_instance_id=bot_instance_id,
-            strategy_config=strategy_config,
-            broker_provider=broker_provider,
-            risk_config=risk_config,
-            ai_config=ai_config,
-        )
-        self._runtimes[bot_instance_id] = runtime
+        async with self._lock:
+            if bot_instance_id in self._runtimes:
+                raise ValueError(f"Runtime already exists: {bot_instance_id}")
+            runtime = BotRuntime(
+                bot_instance_id=bot_instance_id,
+                strategy_config=strategy_config,
+                broker_provider=broker_provider,
+                risk_config=risk_config,
+                ai_config=ai_config,
+            )
+            self._runtimes[bot_instance_id] = runtime
         logger.info(
             "Runtime registered: %s (total: %d)", bot_instance_id, len(self._runtimes)
         )
