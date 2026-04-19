@@ -1,8 +1,8 @@
-export default function Broker-healthPage() {
+export default function BrokerHealthPage() {
   return (
     <div>
       <h1 style={{ fontSize: '28px', fontWeight: 'bold', marginBottom: '16px' }}>
-        Broker health
+        Broker Health
       </h1>
       <div style={{ background: '#2a2a3e', borderRadius: '12px', padding: '24px', color: '#aaa' }}>
         Broker health management — connect to API.

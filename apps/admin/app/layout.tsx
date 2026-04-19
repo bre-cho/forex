@@ -6,7 +6,13 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           <strong style={{ color: '#10b981' }}>Admin</strong>
           {['/', '/users', '/workspaces', '/runtime', '/broker-health'].map((path) => (
             <a key={path} href={path} style={{ color: '#aaa', textDecoration: 'none', fontSize: '14px' }}>
-              {path === '/' ? 'Dashboard' : path.replace('/', '').replace('-', ' ')}
+              {path === '/'
+                ? 'Dashboard'
+                : path
+                    .replace('/', '')
+                    .split('-')
+                    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+                    .join(' ')}
             </a>
           ))}
         </nav>

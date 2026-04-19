@@ -1,5 +1,9 @@
 -- Forex Platform — Initial Seed Data
 -- Run: psql "$DATABASE_URL" -f db/seeds/001_initial_seed.sql
+--
+-- WARNING: FOR DEVELOPMENT/TESTING ONLY. NEVER RUN IN PRODUCTION.
+-- The admin password below is a known bcrypt hash. Change or remove this
+-- account immediately after any non-local deployment.
 
 -- Sample admin user (password: Admin1234!)
 INSERT INTO users (id, email, hashed_password, full_name, is_active, is_superuser, email_verified)

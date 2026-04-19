@@ -24,7 +24,7 @@ def rate_limit(max_requests: int = 60, window_seconds: int = 60):
         now = int(time.time())
         window_start = now - window_seconds
 
-        pipe = redis.pipeline()
+        pipe = redis.pipeline(transaction=True)
         pipe.zremrangebyscore(key, 0, window_start)
         pipe.zadd(key, {str(now): now})
         pipe.zcard(key)

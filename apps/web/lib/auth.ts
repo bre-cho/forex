@@ -27,6 +27,8 @@ export const useAuthStore = create<AuthState>((set) => ({
   login: async (email, password) => {
     set({ isLoading: true });
     const { data } = await authApi.login({ email, password });
+    // NOTE: localStorage is vulnerable to XSS. For production, migrate to
+    // httpOnly cookies set by the API server (Set-Cookie with Secure + SameSite).
     localStorage.setItem('access_token', data.access_token);
     localStorage.setItem('refresh_token', data.refresh_token);
     const me = await authApi.me();

@@ -14,7 +14,7 @@ router = APIRouter(prefix="/v1/public", tags=["public"])
 
 @router.get("/strategies", response_model=list[StrategyOut])
 async def public_strategies(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Strategy).where(Strategy.is_public == True).limit(50))
+    result = await db.execute(select(Strategy).where(Strategy.is_public.is_(True)).limit(50))
     return result.scalars().all()
 
 
