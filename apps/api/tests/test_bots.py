@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.core import token_revocation
 from app.core.db import Base, get_db
 from app.routers import auth, bots, workspaces
 from app.services import bot_service
@@ -47,6 +48,11 @@ class _FakeRegistry:
         self._runtimes.pop(bot_id, None)
 
 
+class _FakeRedis:
+    async def get(self, _key: str):
+        return None
+
+
 async def _register_and_login(client: AsyncClient, email: str) -> dict:
     await client.post(
         "/v1/auth/register",
@@ -85,6 +91,12 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
         registry._runtimes.setdefault(bot.id, _Runtime())
 
     monkeypatch.setattr(bot_service, "create_runtime_for_bot", _fake_create_runtime_for_bot)
+    fake_redis = _FakeRedis()
+
+    async def _get_fake_redis():
+        return fake_redis
+
+    monkeypatch.setattr(token_revocation, "get_redis", _get_fake_redis)
     app.dependency_overrides[get_db] = _override_get_db
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -173,7 +185,7 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
         user3_tokens = await _register_and_login(client, "owner3@example.com")
         user3_headers = {"Authorization": f"Bearer {user3_tokens['access_token']}"}
 
-        add_admin_resp = await client.post(
+        add_admin_resp = await client.delete(
             f"/v1/workspaces/{ws1_id}/members/{owner2_user_id}",
             headers=user1_headers,
         )

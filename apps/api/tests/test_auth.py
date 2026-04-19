@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.core import token_revocation
 from app.core.db import Base, get_db
 from app.routers import auth
 
@@ -52,6 +53,7 @@ async def test_login_refresh_logout_flow(monkeypatch: pytest.MonkeyPatch):
         return fake_redis
 
     monkeypatch.setattr(auth, "get_redis", _get_fake_redis)
+    monkeypatch.setattr(token_revocation, "get_redis", _get_fake_redis)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         register_resp = await client.post(
@@ -131,6 +133,7 @@ async def test_forgot_reset_revokes_old_tokens(monkeypatch: pytest.MonkeyPatch):
         captured["token"] = reset_token
 
     monkeypatch.setattr(auth, "get_redis", _get_fake_redis)
+    monkeypatch.setattr(token_revocation, "get_redis", _get_fake_redis)
     monkeypatch.setattr(auth, "_send_reset_email", _capture_reset_email)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

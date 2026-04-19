@@ -6,13 +6,13 @@ from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.core.security import decode_token
 from app.core.token_revocation import is_user_access_token_revoked_after, normalize_iat
 from app.models import User
-from sqlalchemy import select
 
 security = HTTPBearer(auto_error=False)
 
