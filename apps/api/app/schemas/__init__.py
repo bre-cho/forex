@@ -151,6 +151,15 @@ class StrategyOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class PublicStrategyOut(BaseModel):
+    id: str
+    name: str
+    description: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class StrategyVersionOut(BaseModel):
     id: str
     strategy_id: str
