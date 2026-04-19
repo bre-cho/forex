@@ -22,6 +22,7 @@ async def ws_bot(websocket: WebSocket, bot_instance_id: str):
     await websocket.accept()
     _bot_connections.setdefault(bot_instance_id, set()).add(websocket)
     logger.info("WS connected: bot=%s", bot_instance_id)
+    listen_task: asyncio.Task | None = None
     try:
         redis = await get_redis()
         channel = f"signals:{bot_instance_id}"
@@ -39,10 +40,8 @@ async def ws_bot(websocket: WebSocket, bot_instance_id: str):
         logger.error("WS error: %s", exc)
     finally:
         _bot_connections.get(bot_instance_id, set()).discard(websocket)
-        try:
+        if listen_task is not None:
             listen_task.cancel()
-        except Exception:
-            pass
 
 
 @router.websocket("/ws/workspaces/{workspace_id}/notifications")
@@ -50,6 +49,7 @@ async def ws_workspace(websocket: WebSocket, workspace_id: str):
     await websocket.accept()
     _workspace_connections.setdefault(workspace_id, set()).add(websocket)
     logger.info("WS connected: workspace=%s", workspace_id)
+    listen_task: asyncio.Task | None = None
     try:
         redis = await get_redis()
         channel = f"workspace:{workspace_id}:notifications"
@@ -66,10 +66,8 @@ async def ws_workspace(websocket: WebSocket, workspace_id: str):
         logger.error("WS error: %s", exc)
     finally:
         _workspace_connections.get(workspace_id, set()).discard(websocket)
-        try:
+        if listen_task is not None:
             listen_task.cancel()
-        except Exception:
-            pass
 
 
 async def _listen_redis(pubsub, websocket: WebSocket):

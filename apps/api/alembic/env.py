@@ -12,7 +12,8 @@ config = context.config
 if config.config_file_name:
     fileConfig(config.config_file_name)
 
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.models import *  # noqa: F401, F403 — registers all models

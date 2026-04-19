@@ -16,12 +16,12 @@ class Settings(BaseSettings):
     app_name: str = "Forex Trading Platform"
     app_url: str = "http://localhost:8000"
     frontend_url: str = "http://localhost:3000"
-    secret_key: str = "REPLACE_ME_OR_APP_WILL_FAIL"
+    secret_key: str = ""
     debug: bool = False
     log_level: str = "INFO"
 
     # JWT
-    jwt_secret: str = "REPLACE_ME_OR_APP_WILL_FAIL"
+    jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 30
     jwt_refresh_token_expire_days: int = 30
@@ -90,9 +90,9 @@ class Settings(BaseSettings):
 
     @field_validator("secret_key", "jwt_secret", mode="after")
     @classmethod
-    def check_secrets_in_production(cls, v: str, info) -> str:
+    def check_secrets_not_empty(cls, v: str, info) -> str:
         import os
-        if os.getenv("APP_ENV") == "production" and v == "REPLACE_ME_OR_APP_WILL_FAIL":
+        if os.getenv("APP_ENV") == "production" and not v:
             raise ValueError(
                 f"'{info.field_name}' must be set to a secure value in production"
             )

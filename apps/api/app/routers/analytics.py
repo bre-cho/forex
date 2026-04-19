@@ -34,7 +34,7 @@ async def analytics_summary(
     pnl_list = [t.pnl for t in trades if t.pnl is not None]
     total_pnl = sum(pnl_list)
     wins = [p for p in pnl_list if p > 0]
-    losses = [p for p in pnl_list if p <= 0]
+    losses = [p for p in pnl_list if p < 0]   # break-even trades (pnl == 0) excluded from both
 
     win_rate = len(wins) / len(pnl_list) if pnl_list else 0.0
     avg_win = sum(wins) / len(wins) if wins else 0.0

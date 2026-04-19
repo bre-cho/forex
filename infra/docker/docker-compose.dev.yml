@@ -109,6 +109,7 @@ services:
   grafana:
     image: grafana/grafana:latest
     ports:
+      # 3100 on host avoids conflict with Next.js web app on 3000 and admin on 3001
       - "3100:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
