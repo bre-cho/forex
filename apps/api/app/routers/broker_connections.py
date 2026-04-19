@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
+from app.dependencies.permissions import require_workspace_role
 from app.models import BrokerConnection, User
 from app.schemas import BrokerConnectionCreate, BrokerConnectionOut, BrokerConnectionUpdate
 
@@ -22,6 +23,7 @@ async def create_connection(
     body: BrokerConnectionCreate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("admin")),
 ):
     conn = BrokerConnection(
         workspace_id=workspace_id,
@@ -39,6 +41,7 @@ async def list_connections(
     workspace_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("viewer")),
 ):
     result = await db.execute(
         select(BrokerConnection).where(BrokerConnection.workspace_id == workspace_id)
@@ -52,6 +55,7 @@ async def get_connection(
     conn_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("viewer")),
 ):
     result = await db.execute(
         select(BrokerConnection).where(
@@ -72,6 +76,7 @@ async def update_connection(
     body: BrokerConnectionUpdate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("admin")),
 ):
     result = await db.execute(
         select(BrokerConnection).where(
@@ -93,6 +98,7 @@ async def delete_connection(
     conn_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("admin")),
 ):
     result = await db.execute(
         select(BrokerConnection).where(
@@ -111,6 +117,7 @@ async def test_connection(
     conn_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("admin")),
 ):
     result = await db.execute(
         select(BrokerConnection).where(
@@ -130,3 +137,4 @@ async def test_connection(
         return {"status": "ok", "message": "Connection successful"}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
+

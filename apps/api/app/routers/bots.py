@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
-from app.models import BotInstance, BotInstanceConfig, BotRuntimeSnapshot, User
+from app.dependencies.permissions import require_workspace_role
+from app.models import BotInstance, BotInstanceConfig, BotRuntimeSnapshot, BrokerConnection, Strategy, User
 from app.schemas import (
     BotConfigUpdate,
     BotCreate,
@@ -36,13 +37,46 @@ async def _get_bot_or_404(bot_id: str, workspace_id: str, db: AsyncSession) -> B
     return bot
 
 
+async def _assert_same_workspace(
+    workspace_id: str,
+    strategy_id: str | None,
+    broker_connection_id: str | None,
+    db: AsyncSession,
+) -> None:
+    """Raise 400 if referenced strategy or broker connection belongs to a different workspace."""
+    if strategy_id:
+        result = await db.execute(select(Strategy).where(Strategy.id == strategy_id))
+        s = result.scalar_one_or_none()
+        if s is None:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        if s.workspace_id != workspace_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Strategy does not belong to this workspace",
+            )
+    if broker_connection_id:
+        result = await db.execute(
+            select(BrokerConnection).where(BrokerConnection.id == broker_connection_id)
+        )
+        bc = result.scalar_one_or_none()
+        if bc is None:
+            raise HTTPException(status_code=404, detail="Broker connection not found")
+        if bc.workspace_id != workspace_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Broker connection does not belong to this workspace",
+            )
+
+
 @router.post("", response_model=BotOut, status_code=status.HTTP_201_CREATED)
 async def create_bot(
     workspace_id: str,
     body: BotCreate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("trader")),
 ):
+    await _assert_same_workspace(workspace_id, body.strategy_id, body.broker_connection_id, db)
     bot = BotInstance(
         workspace_id=workspace_id,
         name=body.name,
@@ -64,6 +98,7 @@ async def list_bots(
     workspace_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("viewer")),
 ):
     result = await db.execute(
         select(BotInstance).where(BotInstance.workspace_id == workspace_id)
@@ -77,6 +112,7 @@ async def get_bot(
     bot_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("viewer")),
 ):
     return await _get_bot_or_404(bot_id, workspace_id, db)
 
@@ -88,8 +124,11 @@ async def update_bot(
     body: BotUpdate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("trader")),
 ):
     bot = await _get_bot_or_404(bot_id, workspace_id, db)
+    if body.broker_connection_id is not None:
+        await _assert_same_workspace(workspace_id, None, body.broker_connection_id, db)
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(bot, field, value)
     return bot
@@ -102,6 +141,7 @@ async def delete_bot(
     request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("admin")),
 ):
     bot = await _get_bot_or_404(bot_id, workspace_id, db)
     registry = _get_registry(request)
@@ -117,13 +157,13 @@ async def start_bot(
     request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("trader")),
 ):
     bot = await _get_bot_or_404(bot_id, workspace_id, db)
     registry = _get_registry(request)
     if registry is None:
         raise HTTPException(status_code=503, detail="Runtime registry unavailable")
-    runtime = registry.get(bot_id)
-    if runtime is None:
+    if registry.get(bot_id) is None:
         from app.services.bot_service import create_runtime_for_bot
         await create_runtime_for_bot(bot, registry, db)
     await registry.start(bot_id)
@@ -138,6 +178,7 @@ async def stop_bot(
     request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("trader")),
 ):
     bot = await _get_bot_or_404(bot_id, workspace_id, db)
     registry = _get_registry(request)
@@ -154,6 +195,7 @@ async def pause_bot(
     request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("trader")),
 ):
     bot = await _get_bot_or_404(bot_id, workspace_id, db)
     registry = _get_registry(request)
@@ -170,6 +212,7 @@ async def resume_bot(
     request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("trader")),
 ):
     bot = await _get_bot_or_404(bot_id, workspace_id, db)
     registry = _get_registry(request)
@@ -186,6 +229,7 @@ async def get_runtime(
     request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("viewer")),
 ):
     await _get_bot_or_404(bot_id, workspace_id, db)
     registry = _get_registry(request)
@@ -200,6 +244,7 @@ async def list_snapshots(
     bot_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("viewer")),
 ):
     await _get_bot_or_404(bot_id, workspace_id, db)
     result = await db.execute(
@@ -218,6 +263,7 @@ async def update_bot_config(
     body: BotConfigUpdate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("trader")),
 ):
     await _get_bot_or_404(bot_id, workspace_id, db)
     result = await db.execute(
@@ -229,3 +275,4 @@ async def update_bot_config(
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(config, field, value)
     return {"message": "Config updated"}
+

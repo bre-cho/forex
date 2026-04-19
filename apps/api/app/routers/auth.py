@@ -1,6 +1,9 @@
 """Auth router — register, login, token refresh, logout."""
 from __future__ import annotations
 
+import logging
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +29,10 @@ from app.schemas import (
 )
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
+
+# Password-reset tokens are valid for 1 hour
+_RESET_TOKEN_TTL_MINUTES = 60
 
 
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
@@ -86,19 +93,77 @@ async def logout():
 
 @router.post("/forgot-password")
 async def forgot_password(body: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Generate a password-reset token and send it via email.
+
+    Always returns 200 regardless of whether the email is registered,
+    to prevent email enumeration attacks.
+    """
     result = await db.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
-    # Always return 200 to prevent email enumeration
-    if user:
-        # TODO: send password reset email
-        pass
+
+    if user and user.is_active:
+        reset_token = create_access_token(
+            user.id,
+            expires_delta=timedelta(minutes=_RESET_TOKEN_TTL_MINUTES),
+            extra_claims={"purpose": "password_reset"},
+        )
+        await _send_reset_email(user.email, reset_token)
+
     return {"message": "If that email is registered, a reset link has been sent."}
+
+
+async def _send_reset_email(email: str, reset_token: str) -> None:
+    """Send a password-reset email.  Falls back to logging when SMTP is not configured."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    reset_url = f"{settings.frontend_url}/reset-password?token={reset_token}"
+
+    if not settings.smtp_username or not settings.smtp_password:
+        # SMTP not configured — log the link so developers can test locally
+        logger.warning(
+            "SMTP not configured. Password-reset link for %s: %s",
+            email,
+            reset_url,
+        )
+        return
+
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    subject = f"[{settings.app_name}] Password Reset"
+    body_html = (
+        f"<p>You requested a password reset.</p>"
+        f"<p><a href='{reset_url}'>Click here to reset your password</a></p>"
+        f"<p>This link expires in {_RESET_TOKEN_TTL_MINUTES} minutes.</p>"
+        f"<p>If you did not request this, please ignore this email.</p>"
+    )
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = f"{settings.smtp_from_name} <{settings.smtp_from_email}>"
+    msg["To"] = email
+    msg.attach(MIMEText(body_html, "html"))
+
+    try:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
+            if settings.smtp_tls:
+                smtp.starttls()
+            smtp.login(settings.smtp_username, settings.smtp_password)
+            smtp.sendmail(settings.smtp_from_email, email, msg.as_string())
+        logger.info("Password-reset email sent to %s", email)
+    except Exception as exc:
+        # Do not leak SMTP errors to the caller
+        logger.error("Failed to send password-reset email to %s: %s", email, exc)
 
 
 @router.post("/reset-password")
 async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
     try:
         payload = decode_token(body.token)
+        if payload.get("purpose") != "password_reset":
+            raise ValueError("Invalid token purpose")
         user_id = payload["sub"]
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
@@ -113,3 +178,4 @@ async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(
 @router.get("/me", response_model=UserOut)
 async def me(current_user: User = Depends(get_current_user)):
     return current_user
+

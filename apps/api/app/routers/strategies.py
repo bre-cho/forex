@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
+from app.dependencies.permissions import require_workspace_role
 from app.models import Strategy, StrategyVersion, User
 from app.schemas import (
     StrategyCreate,
@@ -27,6 +28,7 @@ async def create_strategy(
     body: StrategyCreate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("trader")),
 ):
     strategy = Strategy(
         workspace_id=workspace_id,
@@ -52,6 +54,7 @@ async def list_strategies(
     workspace_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("viewer")),
 ):
     result = await db.execute(
         select(Strategy).where(Strategy.workspace_id == workspace_id)
@@ -65,6 +68,7 @@ async def get_strategy(
     strategy_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("viewer")),
 ):
     result = await db.execute(
         select(Strategy).where(
@@ -85,6 +89,7 @@ async def update_strategy(
     body: StrategyUpdate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("trader")),
 ):
     result = await db.execute(
         select(Strategy).where(
@@ -106,6 +111,7 @@ async def delete_strategy(
     strategy_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("admin")),
 ):
     result = await db.execute(
         select(Strategy).where(
@@ -124,6 +130,7 @@ async def list_versions(
     strategy_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("viewer")),
 ):
     result = await db.execute(
         select(StrategyVersion)
@@ -139,6 +146,7 @@ async def publish_strategy(
     strategy_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("admin")),
 ):
     result = await db.execute(
         select(Strategy).where(
@@ -151,3 +159,4 @@ async def publish_strategy(
         raise HTTPException(status_code=404, detail="Strategy not found")
     s.is_public = True
     return {"message": "Strategy published"}
+
