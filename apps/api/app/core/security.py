@@ -39,6 +39,7 @@ def create_access_token(
         "sub": subject,
         "exp": expire,
         "iat": now,
+        "iat_ms": int(now.timestamp() * 1000),
         "type": "access",
     }
     if extra:
@@ -53,7 +54,13 @@ def create_refresh_token(subject: str) -> str:
     expire = now + timedelta(
         days=settings.jwt_refresh_token_expire_days
     )
-    payload = {"sub": subject, "exp": expire, "iat": now, "type": "refresh"}
+    payload = {
+        "sub": subject,
+        "exp": expire,
+        "iat": now,
+        "iat_ms": int(now.timestamp() * 1000),
+        "type": "refresh",
+    }
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 

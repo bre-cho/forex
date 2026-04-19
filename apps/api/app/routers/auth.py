@@ -19,7 +19,7 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
-from app.core.token_revocation import normalize_iat, revoke_all_user_access_tokens
+from app.core.token_revocation import normalize_iat_ms, revoke_all_user_access_tokens
 from app.dependencies.auth import get_current_user
 from app.models import User
 from app.schemas import (
@@ -86,7 +86,10 @@ async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found")
-    if await _is_user_refresh_revoked_after(user_id, normalize_iat(payload.get("iat"))):
+    if await _is_user_refresh_revoked_after(
+        user_id,
+        normalize_iat_ms(payload.get("iat_ms", payload.get("iat"))),
+    ):
         raise HTTPException(status_code=401, detail="Refresh token revoked")
     return TokenResponse(
         access_token=create_access_token(user.id),
@@ -214,7 +217,7 @@ async def _is_refresh_token_revoked(refresh_token: str) -> bool:
 
 async def _revoke_all_user_refresh_tokens(user_id: str) -> None:
     redis = await get_redis()
-    await redis.set(f"{_USER_REFRESH_REVOKED_AFTER_PREFIX}{user_id}", int(time.time()))
+    await redis.set(f"{_USER_REFRESH_REVOKED_AFTER_PREFIX}{user_id}", int(time.time() * 1000))
 
 
 async def _is_user_refresh_revoked_after(user_id: str, token_iat: int | None) -> bool:

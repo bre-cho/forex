@@ -185,11 +185,11 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
         user3_tokens = await _register_and_login(client, "owner3@example.com")
         user3_headers = {"Authorization": f"Bearer {user3_tokens['access_token']}"}
 
-        add_admin_resp = await client.delete(
+        remove_viewer_resp = await client.delete(
             f"/v1/workspaces/{ws1_id}/members/{owner2_user_id}",
             headers=user1_headers,
         )
-        assert add_admin_resp.status_code == 204
+        assert remove_viewer_resp.status_code == 204
 
         add_admin_resp = await client.post(
             f"/v1/workspaces/{ws1_id}/members",
