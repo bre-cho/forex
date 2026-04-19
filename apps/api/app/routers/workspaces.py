@@ -118,6 +118,8 @@ async def add_member(
     db: AsyncSession = Depends(get_db),
     _member=Depends(require_workspace_role("admin")),
 ):
+    # Keep explicit existence check to return 404 for stale workspace IDs
+    # after role validation succeeds.
     await _get_workspace_or_404(workspace_id, db)
     user_result = await db.execute(select(User).where(User.email == body.email))
     target_user = user_result.scalar_one_or_none()
@@ -139,6 +141,8 @@ async def remove_member(
     db: AsyncSession = Depends(get_db),
     _member=Depends(require_workspace_role("admin")),
 ):
+    # Keep explicit existence check to return 404 for stale workspace IDs
+    # after role validation succeeds.
     await _get_workspace_or_404(workspace_id, db)
     result = await db.execute(
         select(WorkspaceMember).where(
