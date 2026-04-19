@@ -67,6 +67,9 @@ class RuntimeRegistry:
         return runtime
 
     async def start(self, bot_instance_id: str) -> None:
+        # Retrieve the runtime under the lock (protecting _runtimes dict),
+        # then release before awaiting the async operation to avoid holding
+        # the lock during potentially long I/O and to prevent deadlocks.
         async with self._lock:
             runtime = self.get_or_raise(bot_instance_id)
         await runtime.start()

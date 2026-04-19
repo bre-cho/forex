@@ -7,7 +7,7 @@ interface Stats {
   active_bots: number;
   total_pnl: number;
   win_rate: number;
-  open_trades: number;
+  total_trades: number;
 }
 
 export default function DashboardPage() {
@@ -41,7 +41,7 @@ export default function DashboardPage() {
           active_bots: bots.filter((b) => b.status === 'running').length,
           total_pnl: summary.total_pnl ?? 0,
           win_rate: summary.win_rate ?? 0,
-          open_trades: bots.filter((b) => b.status === 'running').length,
+          total_trades: summary.total_trades ?? 0,
         });
       } catch (err: unknown) {
         setError('Failed to load dashboard data.');
@@ -60,13 +60,13 @@ export default function DashboardPage() {
           value: `$${stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(2)}`,
         },
         { label: 'Win Rate', value: `${(stats.win_rate * 100).toFixed(1)}%` },
-        { label: 'Open Trades', value: stats.open_trades.toString() },
+        { label: 'Total Trades', value: stats.total_trades.toString() },
       ]
     : [
         { label: 'Active Bots', value: '—' },
         { label: 'Total PnL', value: '—' },
         { label: 'Win Rate', value: '—' },
-        { label: 'Open Trades', value: '—' },
+        { label: 'Total Trades', value: '—' },
       ];
 
   return (
