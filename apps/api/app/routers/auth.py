@@ -101,10 +101,11 @@ async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)
 async def logout(body: RefreshRequest):
     """Revoke the provided refresh token and terminate the client session."""
     user_id = _extract_refresh_user_id(body.refresh_token)
-    await _revoke_refresh_token(body.refresh_token)
     if user_id:
         await _revoke_all_user_refresh_tokens(user_id)
         await revoke_all_user_access_tokens(user_id)
+    else:
+        await _revoke_refresh_token(body.refresh_token)
     return {"message": "Logged out"}
 
 

@@ -101,7 +101,7 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         user1_tokens = await _register_and_login(client, "owner1@example.com")
-        user2_tokens = await _register_and_login(client, "owner2@example.com")
+        user2_tokens = await _register_and_login(client, "user2@example.com")
 
         user1_headers = {"Authorization": f"Bearer {user1_tokens['access_token']}"}
         user2_headers = {"Authorization": f"Bearer {user2_tokens['access_token']}"}
@@ -171,7 +171,7 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
         add_viewer_resp = await client.post(
             f"/v1/workspaces/{ws1_id}/members",
             headers=user1_headers,
-            json={"email": "owner2@example.com", "role": "viewer"},
+            json={"email": "user2@example.com", "role": "viewer"},
         )
         assert add_viewer_resp.status_code == 200
         owner2_user_id = add_viewer_resp.json()["user_id"]
@@ -182,7 +182,7 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
         )
         assert viewer_start_resp.status_code == 403
 
-        user3_tokens = await _register_and_login(client, "owner3@example.com")
+        user3_tokens = await _register_and_login(client, "user3@example.com")
         user3_headers = {"Authorization": f"Bearer {user3_tokens['access_token']}"}
 
         remove_viewer_resp = await client.delete(
@@ -194,14 +194,14 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
         add_admin_resp = await client.post(
             f"/v1/workspaces/{ws1_id}/members",
             headers=user1_headers,
-            json={"email": "owner2@example.com", "role": "admin"},
+            json={"email": "user2@example.com", "role": "admin"},
         )
         assert add_admin_resp.status_code == 200
 
         admin_add_member_resp = await client.post(
             f"/v1/workspaces/{ws1_id}/members",
             headers=user2_headers,
-            json={"email": "owner3@example.com", "role": "viewer"},
+            json={"email": "user3@example.com", "role": "viewer"},
         )
         assert admin_add_member_resp.status_code == 200
 

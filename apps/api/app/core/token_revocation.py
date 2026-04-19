@@ -16,6 +16,7 @@ def normalize_iat_ms(token_iat: int | float | str | datetime | None) -> int | No
         return int(token_iat.timestamp() * 1000)
     try:
         value = float(token_iat)
+        # Values above ~1e12 are treated as unix timestamps in milliseconds.
         if value > 1_000_000_000_000:
             return int(value)
         return int(value * 1000)
