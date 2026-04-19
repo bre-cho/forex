@@ -24,11 +24,16 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def create_access_token(
     subject: str,
+    expires_delta: Optional[timedelta] = None,
     extra: Optional[Dict[str, Any]] = None,
+    extra_claims: Optional[Dict[str, Any]] = None,
 ) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(
-        minutes=settings.jwt_access_token_expire_minutes
-    )
+    if expires_delta is not None:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(
+            minutes=settings.jwt_access_token_expire_minutes
+        )
     payload: Dict[str, Any] = {
         "sub": subject,
         "exp": expire,
@@ -36,6 +41,8 @@ def create_access_token(
     }
     if extra:
         payload.update(extra)
+    if extra_claims:
+        payload.update(extra_claims)
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 

@@ -92,4 +92,10 @@ export const analyticsApi = {
     }),
 };
 
+// ── Public (unauthenticated) ──────────────────────────────────────────────────
+export const publicApi = {
+  strategies: () => api.get('/v1/public/strategies'),
+  leaderboard: () => api.get('/v1/public/performance/leaderboard'),
+};
+
 export default api;

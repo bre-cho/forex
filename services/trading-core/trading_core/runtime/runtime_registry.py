@@ -41,6 +41,7 @@ class RuntimeRegistry:
         risk_config: dict,
         ai_config: Optional[dict] = None,
     ) -> BotRuntime:
+        """Register a new BotRuntime.  Raises ValueError if one already exists."""
         if bot_instance_id in self._runtimes:
             raise ValueError(f"Runtime already exists: {bot_instance_id}")
         runtime = BotRuntime(
@@ -66,28 +67,36 @@ class RuntimeRegistry:
         return runtime
 
     async def start(self, bot_instance_id: str) -> None:
-        runtime = self.get_or_raise(bot_instance_id)
+        # Retrieve the runtime under the lock (protecting _runtimes dict),
+        # then release before awaiting the async operation to avoid holding
+        # the lock during potentially long I/O and to prevent deadlocks.
+        async with self._lock:
+            runtime = self.get_or_raise(bot_instance_id)
         await runtime.start()
 
     async def stop(self, bot_instance_id: str) -> None:
-        runtime = self.get_or_raise(bot_instance_id)
+        async with self._lock:
+            runtime = self.get_or_raise(bot_instance_id)
         await runtime.stop()
 
     async def pause(self, bot_instance_id: str) -> None:
-        self.get_or_raise(bot_instance_id)
-        await self._runtimes[bot_instance_id].pause()
+        async with self._lock:
+            runtime = self.get_or_raise(bot_instance_id)
+        await runtime.pause()
 
     async def resume(self, bot_instance_id: str) -> None:
-        self.get_or_raise(bot_instance_id)
-        await self._runtimes[bot_instance_id].resume()
+        async with self._lock:
+            runtime = self.get_or_raise(bot_instance_id)
+        await runtime.resume()
 
     async def remove(self, bot_instance_id: str) -> None:
-        runtime = self.get(bot_instance_id)
-        if runtime is None:
-            return
-        if runtime.state.status == RuntimeStatus.RUNNING:
-            await runtime.stop()
-        del self._runtimes[bot_instance_id]
+        async with self._lock:
+            runtime = self._runtimes.get(bot_instance_id)
+            if runtime is None:
+                return
+            if runtime.state.status == RuntimeStatus.RUNNING:
+                await runtime.stop()
+            del self._runtimes[bot_instance_id]
         logger.info(
             "Runtime removed: %s (remaining: %d)", bot_instance_id, len(self._runtimes)
         )
@@ -106,7 +115,11 @@ class RuntimeRegistry:
         ]
 
     async def stop_all(self) -> None:
-        for runtime in list(self._runtimes.values()):
-            if runtime.state.status == RuntimeStatus.RUNNING:
-                await runtime.stop()
+        async with self._lock:
+            targets = [
+                rt for rt in self._runtimes.values()
+                if rt.state.status == RuntimeStatus.RUNNING
+            ]
+        for runtime in targets:
+            await runtime.stop()
         logger.info("All runtimes stopped")
