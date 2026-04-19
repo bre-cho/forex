@@ -2,17 +2,17 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.models import BotInstance, Strategy, Trade
-from app.schemas import StrategyOut
+from app.schemas import PublicStrategyOut
 
 router = APIRouter(prefix="/v1/public", tags=["public"])
 
 
-@router.get("/strategies", response_model=list[StrategyOut])
+@router.get("/strategies", response_model=list[PublicStrategyOut])
 async def public_strategies(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Strategy).where(Strategy.is_public.is_(True)).limit(50))
     return result.scalars().all()
@@ -36,10 +36,7 @@ async def leaderboard(db: AsyncSession = Depends(get_db)):
             func.count(Trade.id).label("total_trades"),
             func.coalesce(func.sum(Trade.pnl), 0).label("total_pnl"),
             func.coalesce(
-                func.sum(
-                    # win count: positive pnl
-                    func.cast(Trade.pnl > 0, type_=func.Float())  # type: ignore[arg-type]
-                ),
+                func.sum(case((Trade.pnl > 0, 1), else_=0)),
                 0,
             ).label("win_count"),
         )
