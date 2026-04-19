@@ -19,7 +19,7 @@ def require_workspace_role(min_role: str = "viewer") -> Callable:
         workspace_id: str,
         current_user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
-    ) -> WorkspaceMember:
+    ) -> WorkspaceMember | None:
         if current_user.is_superuser:
             return None
         result = await db.execute(

@@ -1,10 +1,13 @@
 """Broker connections router."""
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.credentials_crypto import decrypt_credentials, encrypt_credentials
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
 from app.dependencies.permissions import require_workspace_role
@@ -15,6 +18,7 @@ router = APIRouter(
     prefix="/v1/workspaces/{workspace_id}/broker-connections",
     tags=["broker-connections"],
 )
+logger = logging.getLogger(__name__)
 
 
 @router.post("", response_model=BrokerConnectionOut, status_code=status.HTTP_201_CREATED)
@@ -29,7 +33,7 @@ async def create_connection(
         workspace_id=workspace_id,
         name=body.name,
         broker_type=body.broker_type,
-        credentials=body.credentials,
+        credentials_encrypted=encrypt_credentials(body.credentials),
     )
     db.add(conn)
     await db.flush()
@@ -87,8 +91,13 @@ async def update_connection(
     conn = result.scalar_one_or_none()
     if not conn:
         raise HTTPException(status_code=404, detail="Connection not found")
-    for field, value in body.model_dump(exclude_none=True).items():
-        setattr(conn, field, value)
+    updates = body.model_dump(exclude_none=True)
+    if "name" in updates:
+        conn.name = updates["name"]
+    if "is_active" in updates:
+        conn.is_active = updates["is_active"]
+    if "credentials" in updates:
+        conn.credentials_encrypted = encrypt_credentials(updates["credentials"])
     return conn
 
 
@@ -131,10 +140,11 @@ async def test_connection(
     # Try a test connect
     try:
         from execution_service.providers import get_provider
-        provider = get_provider(conn.broker_type, **(conn.credentials or {}))
+        credentials = decrypt_credentials(conn.credentials_encrypted)
+        provider = get_provider(conn.broker_type, **credentials)
         await provider.connect()
         await provider.disconnect()
         return {"status": "ok", "message": "Connection successful"}
     except Exception as exc:
-        return {"status": "error", "message": str(exc)}
-
+        logger.exception("Connection test failed for broker connection %s: %s", conn_id, exc)
+        return {"status": "error", "message": "Connection test failed"}

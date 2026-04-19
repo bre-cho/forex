@@ -106,7 +106,7 @@ class BrokerConnection(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     broker_type: Mapped[str] = mapped_column(String(50), nullable=False)  # ctrader|paper|mt5
-    credentials: Mapped[dict] = mapped_column(JSON, default=dict)          # encrypted at rest
+    credentials_encrypted: Mapped[str] = mapped_column(Text, default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

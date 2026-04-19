@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -101,7 +101,7 @@ class AddMemberRequest(BaseModel):
 
 class BrokerConnectionCreate(BaseModel):
     name: str
-    broker_type: str
+    broker_type: Literal["paper", "ctrader", "mt5", "bybit"]
     credentials: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -168,7 +168,7 @@ class BotCreate(BaseModel):
     name: str
     symbol: str = "EURUSD"
     timeframe: str = "M5"
-    mode: str = "paper"
+    mode: Literal["paper", "demo", "live"] = "paper"
     strategy_id: Optional[str] = None
     broker_connection_id: Optional[str] = None
 
@@ -177,6 +177,8 @@ class BotUpdate(BaseModel):
     name: Optional[str] = None
     symbol: Optional[str] = None
     timeframe: Optional[str] = None
+    mode: Optional[Literal["paper", "demo", "live"]] = None
+    strategy_id: Optional[str] = None
     broker_connection_id: Optional[str] = None
 
 

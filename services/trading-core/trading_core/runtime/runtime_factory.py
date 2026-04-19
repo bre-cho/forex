@@ -23,21 +23,43 @@ class RuntimeFactory:
         Instantiate the correct broker provider based on provider_type.
         provider_type: 'ctrader' | 'paper' | 'mt5' | 'bybit'
         """
-        if provider_type == "ctrader":
-            from trading_core.engines.ctrader_provider import CTraderDataProvider
-
-            return CTraderDataProvider(symbol=symbol, timeframe=timeframe)
-        elif provider_type == "paper":
+        try:
+            from execution_service.providers import get_provider
+        except ImportError:
+            logger.warning("execution_service.providers unavailable, using local paper adapter")
             from trading_core.engines.data_provider import MockDataProvider
 
-            return MockDataProvider(symbol=symbol)
-        else:
-            logger.warning(
-                "Unknown provider_type '%s', falling back to paper", provider_type
-            )
-            from trading_core.engines.data_provider import MockDataProvider
+            class _AsyncPaperAdapter:
+                def __init__(self, symbol_name: str) -> None:
+                    self.symbol = symbol_name
+                    self.timeframe = timeframe
+                    self._provider = MockDataProvider(symbol=symbol_name)
+                    self._connected = False
 
-            return MockDataProvider(symbol=symbol)
+                @property
+                def is_connected(self) -> bool:
+                    return self._connected
+
+                async def connect(self) -> None:
+                    self._connected = True
+
+                async def disconnect(self) -> None:
+                    self._connected = False
+
+                async def get_candles(self, symbol: str, timeframe: str, limit: int = 200):
+                    return self._provider.get_candles(limit=limit, timeframe=timeframe)
+
+            return _AsyncPaperAdapter(symbol)
+
+        if provider_type == "paper":
+            return get_provider("paper", symbol=symbol)
+        if provider_type in {"ctrader", "mt5", "bybit"}:
+            kwargs = dict(credentials or {})
+            kwargs.setdefault("symbol", symbol)
+            kwargs.setdefault("timeframe", timeframe)
+            return get_provider(provider_type, **kwargs)
+        logger.warning("Unknown provider_type '%s', falling back to paper", provider_type)
+        return get_provider("paper", symbol=symbol)
 
     @staticmethod
     def from_bot_config(

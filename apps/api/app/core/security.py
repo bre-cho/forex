@@ -1,10 +1,10 @@
 """JWT security utilities."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from datetime import datetime, timedelta
+from typing import Any
 
-from jose import JWTError, jwt
+from jose import jwt
 from passlib.context import CryptContext
 
 from .config import get_settings
@@ -24,17 +24,17 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def create_access_token(
     subject: str,
-    expires_delta: Optional[timedelta] = None,
-    extra: Optional[Dict[str, Any]] = None,
-    extra_claims: Optional[Dict[str, Any]] = None,
+    expires_delta: timedelta | None = None,
+    extra: dict[str, Any] | None = None,
+    extra_claims: dict[str, Any] | None = None,
 ) -> str:
     if expires_delta is not None:
-        expire = datetime.now(timezone.utc) + expires_delta
+        expire = datetime.now(datetime.UTC) + expires_delta
     else:
-        expire = datetime.now(timezone.utc) + timedelta(
+        expire = datetime.now(datetime.UTC) + timedelta(
             minutes=settings.jwt_access_token_expire_minutes
         )
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "sub": subject,
         "exp": expire,
         "type": "access",
@@ -47,13 +47,22 @@ def create_access_token(
 
 
 def create_refresh_token(subject: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(
+    now = datetime.now(datetime.UTC)
+    expire = now + timedelta(
         days=settings.jwt_refresh_token_expire_days
     )
-    payload = {"sub": subject, "exp": expire, "type": "refresh"}
+    payload = {"sub": subject, "exp": expire, "iat": now, "type": "refresh"}
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
-def decode_token(token: str) -> Dict[str, Any]:
+def create_password_reset_token(subject: str, expires_delta: timedelta) -> str:
+    return create_access_token(
+        subject,
+        expires_delta=expires_delta,
+        extra_claims={"purpose": "password_reset"},
+    )
+
+
+def decode_token(token: str) -> dict[str, Any]:
     """Decode and validate a JWT token. Raises JWTError on failure."""
     return jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
