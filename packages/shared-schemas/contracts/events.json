@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "title": "Forex Platform Event Registry",
+  "version": "1.0",
+  "events": [
+    {
+      "type": "bot.status_changed",
+      "description": "Fired when a bot runtime status changes",
+      "source": "trading-core",
+      "payload_schema": {
+        "status": { "type": "string", "enum": ["stopped", "starting", "running", "paused", "error"] },
+        "error_message": { "type": "string", "nullable": true }
+      }
+    },
+    {
+      "type": "trade.executed",
+      "description": "Fired when a trade order is filled",
+      "source": "execution-service",
+      "payload_schema": {
+        "trade_id": { "type": "string" },
+        "symbol": { "type": "string" },
+        "side": { "type": "string", "enum": ["buy", "sell"] },
+        "volume": { "type": "number" },
+        "entry_price": { "type": "number" },
+        "commission": { "type": "number" }
+      }
+    },
+    {
+      "type": "trade.closed",
+      "description": "Fired when an open trade is closed",
+      "source": "execution-service",
+      "payload_schema": {
+        "trade_id": { "type": "string" },
+        "symbol": { "type": "string" },
+        "exit_price": { "type": "number" },
+        "pnl": { "type": "number" },
+        "duration_seconds": { "type": "number" }
+      }
+    },
+    {
+      "type": "signal.generated",
+      "description": "Fired when a new trading signal is produced",
+      "source": "signal-service",
+      "payload_schema": {
+        "signal_id": { "type": "string" },
+        "symbol": { "type": "string" },
+        "direction": { "type": "string", "enum": ["buy", "sell", "close"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "wave_state": { "type": "string" },
+        "entry_price": { "type": "number", "nullable": true },
+        "stop_loss": { "type": "number", "nullable": true },
+        "take_profit": { "type": "number", "nullable": true }
+      }
+    },
+    {
+      "type": "account.updated",
+      "description": "Fired when broker account state is refreshed",
+      "source": "execution-service",
+      "payload_schema": {
+        "balance": { "type": "number" },
+        "equity": { "type": "number" },
+        "margin": { "type": "number" },
+        "free_margin": { "type": "number" },
+        "daily_pnl": { "type": "number" }
+      }
+    },
+    {
+      "type": "notification.sent",
+      "description": "Fired after a notification is dispatched",
+      "source": "notification-service",
+      "payload_schema": {
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "channel": { "type": "string", "enum": ["email", "telegram", "discord", "webhook"] }
+      }
+    }
+  ]
+}
