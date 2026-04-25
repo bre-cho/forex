@@ -45,6 +45,9 @@ from engine.signal_coordinator import TradeSignal as CoordSignal
 from engine.risk_manager import RiskConfig, MartingaleConfig
 from engine.trade_manager import PartialCloseConfig, TrailingConfig, GridConfig
 from engine.session_manager import DSTMode
+from engine.governance import TradingRuntimeGuard, GovernancePolicy
+from ai_trading_brain import ForexBrainRuntime, TradeOutcome
+from routers.operator import router as operator_router
 from models.schemas import (
     AutoPilotStatusSchema,
     AutoPilotLastDecisionSchema,
@@ -133,6 +136,8 @@ class AppState:
 
         self._ws_clients: Set[WebSocket] = set()
         self._engine_task: Optional[asyncio.Task] = None
+        self._ai_brain: Optional[ForexBrainRuntime] = None
+        self._guard: Optional[TradingRuntimeGuard] = None
 
     def rebuild_components(self) -> None:
         s = self.settings
@@ -231,6 +236,12 @@ class AppState:
             float(getattr(self, "_base_min_score", 0.25))
         )
         self.coordinator.set_execute_callback(self._on_signal_execute)
+        # AI Brain + Governance
+        self._ai_brain = ForexBrainRuntime(
+            policy=getattr(self, "_brain_policy", {}),
+            governance_config=getattr(self, "_brain_governance_config", {}),
+        )
+        self._guard = TradingRuntimeGuard()
 
     async def _on_signal_execute(self, signal: CoordSignal) -> None:
         """Called by coordinator when a signal is approved for execution."""
@@ -345,6 +356,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(operator_router)
+
 
 # ── Robot Engine (background task) ────────────────────────────────────────#
 
@@ -392,6 +405,13 @@ class RobotEngine:
         df = self.state.data_provider.get_candles(limit=200)
         if len(df) < 60:
             return
+
+        # ── Governance: market data check ──────────────────────────────── #
+        if self.state._guard is not None:
+            md_report = self.state._guard.validate_market_data(df)
+            if not md_report.allowed:
+                logger.warning("Governance blocked tick — market data: %s", md_report.issues)
+                return
 
         # Daily reset check
         today = int(time.time() // 86400)
@@ -468,10 +488,38 @@ class RobotEngine:
                         atr=ctx.get("atr", 0.0),
                         price=ctx.get("entry_price", 0.0),
                     )
+                    # ── AI Brain: record outcome for memory + evolution ─ #
+                    if self.state._ai_brain is not None:
+                        import time as _time
+                        self.state._ai_brain.record_outcome(TradeOutcome(
+                            trade_id=str(ct.trade_id),
+                            symbol=ct.symbol,
+                            direction=ct.direction,
+                            opened_at=float(ct.open_time or 0),
+                            closed_at=float(ct.close_time or _time.time()),
+                            entry_price=float(ct.entry_price),
+                            exit_price=float(ct.close_price or ct.entry_price),
+                            pnl=float(ct.pnl),
+                            pnl_pips=float(ct.pnl) / max(float(s.pip_value_per_lot * ct.lot_size), 1e-9),
+                            decision_score=float(ctx.get("decision_score", 0.0)),
+                            decision_reason=str(ctx.get("decision_reason", "")),
+                            policy_snapshot=ctx.get("policy_snapshot", {}),
+                        ))
             finally:
                 db.close()
 
         # ── Decision Engine: tự quyết định action + tự dự đoán ──────── #
+        # ── Governance: daily loss check ────────────────────────────── #
+        if self.state._guard is not None:
+            daily_pnl = float(self.state.balance - self.state.risk_manager._initial_day_balance
+                              if hasattr(self.state.risk_manager, "_initial_day_balance") else 0.0)
+            dl_report = self.state._guard.validate_daily_loss(
+                balance=float(self.state.balance), daily_pnl=daily_pnl
+            )
+            if not dl_report.allowed:
+                logger.warning("Governance blocked — daily loss limit: %s", dl_report.issues)
+                return
+
         open_count = len(self.state.trade_manager.get_open_trades())
         decision_ctx = self.state.decision_engine.decide(
             df=df,
@@ -626,6 +674,49 @@ class RobotEngine:
 
         priority = self.state.auto_pilot.score_to_priority(best.score)
 
+        # ── AI Brain: governance + decision preflight ───────────────────── #
+        if self.state._ai_brain is not None:
+            ai_signal = {
+                "symbol": entry_signal.symbol,
+                "direction": entry_signal.direction,
+                "confidence": float(getattr(best, "score", 0.0)),
+                "spread_pips": float(self.state.data_provider.get_spread_points()),
+                "atr_pips": float(atr / max(s.pip_value_per_lot, 1e-9)),
+                "rr": float(entry_signal.risk_reward),
+                "trend_strength": float(getattr(best, "score", 0.0)),
+            }
+            ai_context = {
+                "symbol": entry_signal.symbol,
+                "broker_connected": bool(getattr(self.state.data_provider, "is_connected", True)),
+                "market_data_ok": True,
+                "daily_loss_pct": float(self.state.state.metadata.get("daily_loss_pct", 0.0))
+                    if hasattr(self.state, "state") else 0.0,
+                "consecutive_losses": int(
+                    self.state.risk_manager.consecutive_losses
+                    if hasattr(self.state.risk_manager, "consecutive_losses") else 0
+                ),
+                "open_positions": len(self.state.trade_manager.get_open_trades()),
+                "spread_pips": float(self.state.data_provider.get_spread_points()),
+                "atr_pips": float(atr / max(s.pip_value_per_lot, 1e-9)),
+                "rr": float(entry_signal.risk_reward),
+                "trend_strength": float(getattr(best, "score", 0.0)),
+                "account_equity": float(self.state.equity),
+            }
+            ai_decision = self.state._ai_brain.decide(ai_signal, ai_context)
+            if ai_decision.action in {"BLOCK", "SKIP"}:
+                logger.info("AI Brain %s signal: %s", ai_decision.action, ai_decision.reason)
+                return
+            # Apply lot multiplier from AI brain
+            lot_size = round(
+                min(s.max_lot, max(s.min_lot, entry_signal.lot_size * ai_decision.lot_multiplier)), 2
+            )
+            # Store decision metadata for outcome recording
+            self.state._trade_context.setdefault(entry_signal.signal_id, {}).update({
+                "decision_score": ai_decision.score,
+                "decision_reason": ai_decision.reason,
+                "policy_snapshot": ai_decision.policy_snapshot,
+            })
+
         logger.info(
             "AutoPilot → mode=%-20s dir=%s score=%.3f rr=%.2f priority=%d "
             "lot=%.2f scale=%.2f EV=%.5f",
@@ -643,7 +734,7 @@ class RobotEngine:
             entry_price=entry_signal.entry_price,
             sl=entry_signal.sl,
             tp=entry_signal.tp,
-            lot_size=entry_signal.lot_size,
+            lot_size=lot_size,
             entry_mode=entry_signal.entry_mode,
             priority=priority,
         )
