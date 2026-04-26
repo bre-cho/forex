@@ -78,6 +78,12 @@ export const botApi = {
     api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/resume`),
   runtime: (workspaceId: string, botId: string) =>
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/runtime`),
+  signals: (workspaceId: string, botId: string) =>
+    api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/signals`),
+  orders: (workspaceId: string, botId: string) =>
+    api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/orders`),
+  trades: (workspaceId: string, botId: string) =>
+    api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/trades`),
 };
 
 // ── Analytics ─────────────────────────────────────────────────────────────────

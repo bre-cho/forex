@@ -1,6 +1,6 @@
 """
-Robot Forex — Streamlit Dashboard
-5-page trading robot dashboard polling the FastAPI backend.
+Robot Forex — Bang dieu khien Streamlit
+Bang dieu khien robot giao dich 6 trang, goi du lieu tu FastAPI backend.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ BACKEND = os.environ.get("BACKEND_URL", "http://localhost:8000")
 POLL_INTERVAL = 5   # seconds between auto-refresh
 
 st.set_page_config(
-    page_title="Robot Forex Dashboard",
+    page_title="Bang dieu khien Robot Forex",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -45,7 +45,7 @@ def api_post(path: str, data: Optional[dict] = None) -> Any:
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        st.error(f"API error: {e}")
+        st.error(f"Loi API: {e}")
         return None
 
 
@@ -89,36 +89,36 @@ with st.sidebar:
     loss_locked = daily_lock.get("loss_locked", False)
 
     if profit_locked:
-        st.markdown('<div style="background:#1b5e20;border-radius:8px;padding:8px 12px;margin-bottom:8px">🏆 <b>Daily Profit Target Hit!</b><br><small>Robot auto-stopped. Reset to resume.</small></div>', unsafe_allow_html=True)
+        st.markdown('<div style="background:#1b5e20;border-radius:8px;padding:8px 12px;margin-bottom:8px">🏆 <b>Da dat muc tieu loi nhuan ngay!</b><br><small>Robot da tu dung. Dat lai de tiep tuc.</small></div>', unsafe_allow_html=True)
     elif loss_locked:
-        st.markdown('<div style="background:#b71c1c;border-radius:8px;padding:8px 12px;margin-bottom:8px">🛑 <b>Daily Loss Limit Hit!</b><br><small>Robot auto-stopped. Reset to resume.</small></div>', unsafe_allow_html=True)
+        st.markdown('<div style="background:#b71c1c;border-radius:8px;padding:8px 12px;margin-bottom:8px">🛑 <b>Da cham gioi han lo ngay!</b><br><small>Robot da tu dung. Dat lai de tiep tuc.</small></div>', unsafe_allow_html=True)
 
     if running:
-        st.markdown('<span class="running-badge">● RUNNING</span>', unsafe_allow_html=True)
+        st.markdown('<span class="running-badge">● DANG CHAY</span>', unsafe_allow_html=True)
     else:
-        st.markdown('<span class="stopped-badge">● STOPPED</span>', unsafe_allow_html=True)
+        st.markdown('<span class="stopped-badge">● DA DUNG</span>', unsafe_allow_html=True)
 
     st.markdown("")
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("▶ Start", use_container_width=True, type="primary", disabled=running or lock_active):
+        if st.button("▶ Bat dau", use_container_width=True, type="primary", disabled=running or lock_active):
             result = api_post("/api/robot/start")
             if result:
-                st.success("Started!")
+                st.success("Da bat dau!")
                 st.rerun()
     with col2:
-        if st.button("■ Stop", use_container_width=True, type="secondary", disabled=not running):
+        if st.button("■ Dung", use_container_width=True, type="secondary", disabled=not running):
             result = api_post("/api/robot/stop")
             if result:
-                st.warning("Stopped")
+                st.warning("Da dung")
                 st.rerun()
 
     # Reset daily lock button
     if lock_active:
-        if st.button("🔓 Reset Daily Lock", use_container_width=True, type="secondary"):
+        if st.button("🔓 Dat lai khoa ngay", use_container_width=True, type="secondary"):
             result = api_post("/api/robot/reset_daily_lock")
             if result:
-                st.success("Daily lock reset! You can now restart the robot.")
+            st.success("Da dat lai khoa ngay! Ban co the khoi dong lai robot.")
                 st.rerun()
 
     st.markdown("---")
@@ -129,8 +129,8 @@ with st.sidebar:
     wave_cls = "bull" if "BULL" in wave else ("bear" if "BEAR" in wave else "sideways")
     st.markdown(f'<div style="text-align:center"><span class="{wave_cls}" style="font-size:1.2rem;font-weight:700">{wave}</span></div>', unsafe_allow_html=True)
     if sub:
-        st.markdown(f'<div style="text-align:center"><span class="subwave">⚠ Sub-wave: {sub}</span></div>', unsafe_allow_html=True)
-    st.progress(conf, text=f"Confidence: {conf:.0%}")
+        st.markdown(f'<div style="text-align:center"><span class="subwave">⚠ Song phu: {sub}</span></div>', unsafe_allow_html=True)
+    st.progress(conf, text=f"Do tin cay: {conf:.0%}")
 
     st.markdown("---")
     bal = status.get("balance", 10000)
@@ -140,24 +140,24 @@ with st.sidebar:
     profit_target_sb = daily_lock.get("daily_profit_target", 0.0)
     loss_limit_sb = daily_lock.get("daily_loss_limit", 0.0)
 
-    st.metric("Balance", f"${bal:,.2f}")
-    st.metric("Equity", f"${eq:,.2f}", delta=f"{eq - bal:+.2f}")
-    st.metric("Total P&L", f"${pnl:,.2f}", delta=f"{pnl:+.2f}")
+    st.metric("So du", f"${bal:,.2f}")
+    st.metric("Von chu so huu", f"${eq:,.2f}", delta=f"{eq - bal:+.2f}")
+    st.metric("Tong Lai/Lo", f"${pnl:,.2f}", delta=f"{pnl:+.2f}")
 
     # Daily PnL progress bar
-    st.markdown("**Daily P&L**")
+    st.markdown("**Lai/Lo trong ngay**")
     st.markdown(f"${daily_pnl_sidebar:+.2f}")
     if profit_target_sb > 0:
         pct = min(max(daily_pnl_sidebar / profit_target_sb, 0), 1)
-        st.progress(pct, text=f"Profit target: {pct:.0%} of ${profit_target_sb:.0f}")
+        st.progress(pct, text=f"Muc tieu loi nhuan: {pct:.0%} cua ${profit_target_sb:.0f}")
     if loss_limit_sb > 0:
         loss_pct = min(max(-daily_pnl_sidebar / loss_limit_sb, 0), 1)
         if loss_pct > 0:
-            st.progress(loss_pct, text=f"Loss limit: {loss_pct:.0%} of ${loss_limit_sb:.0f}")
+            st.progress(loss_pct, text=f"Gioi han lo: {loss_pct:.0%} cua ${loss_limit_sb:.0f}")
 
     st.markdown("---")
-    auto_refresh = st.checkbox("Auto-refresh (5s)", value=True)
-    if st.button("🔄 Refresh Now"):
+    auto_refresh = st.checkbox("Tu dong lam moi (5s)", value=True)
+    if st.button("🔄 Lam moi ngay"):
         st.rerun()
 
     if auto_refresh:
@@ -167,12 +167,12 @@ with st.sidebar:
 # ── Navigation ─────────────────────────────────────────────────────────── #
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "📊 Dashboard",
-    "🌊 Wave Analysis",
-    "📋 Signal Queue",
-    "⚙️ Settings",
-    "📜 Trade History",
-    "🤖 AI & Controls",
+    "📊 Tong quan",
+    "🌊 Phan tich song",
+    "📋 Hang doi tin hieu",
+    "⚙️ Cai dat",
+    "📜 Lich su giao dich",
+    "🤖 AI va dieu khien",
 ])
 
 
@@ -181,7 +181,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 # ══════════════════════════════════════════════════════════════════════════ #
 
 with tab1:
-    st.markdown("## 📊 Dashboard")
+    st.markdown("## 📊 Tong quan")
 
     status = api_get("/api/status", {})
     risk = api_get("/api/risk/metrics", {})
@@ -191,17 +191,17 @@ with tab1:
     # ── Daily Lock / Drawdown Alerts ────────────────────────────────── #
     if daily_lock_d.get("profit_locked"):
         st.success(
-            f"🏆 **Daily profit target reached!** "
-            f"Daily PnL: ${daily_lock_d.get('daily_pnl', 0):+.2f} "
-            f"(target: ${daily_lock_d.get('daily_profit_target', 0):.2f}) — "
-            "Robot **auto-stopped**. Use the sidebar to reset and restart."
+            f"🏆 **Da dat muc tieu loi nhuan ngay!** "
+            f"Lai/Lo ngay: ${daily_lock_d.get('daily_pnl', 0):+.2f} "
+            f"(muc tieu: ${daily_lock_d.get('daily_profit_target', 0):.2f}) — "
+            "Robot **da tu dung**. Dung thanh ben de dat lai va khoi dong lai."
         )
     elif daily_lock_d.get("loss_locked"):
         st.error(
-            f"🛑 **Daily loss limit reached!** "
-            f"Daily PnL: ${daily_lock_d.get('daily_pnl', 0):+.2f} "
-            f"(limit: -${daily_lock_d.get('daily_loss_limit', 0):.2f}) — "
-            "Robot **auto-stopped**. Use the sidebar to reset and restart."
+            f"🛑 **Da cham gioi han lo ngay!** "
+            f"Lai/Lo ngay: ${daily_lock_d.get('daily_pnl', 0):+.2f} "
+            f"(gioi han: -${daily_lock_d.get('daily_loss_limit', 0):.2f}) — "
+            "Robot **da tu dung**. Dung thanh ben de dat lai va khoi dong lai."
         )
 
     # Top metrics row
@@ -209,32 +209,32 @@ with tab1:
     with c1:
         wave = status.get("wave_state", "—")
         wcolor = "🟢" if "BULL" in wave else ("🔴" if "BEAR" in wave else "🟡")
-        st.metric("Main Wave", f"{wcolor} {wave}")
+        st.metric("Song chinh", f"{wcolor} {wave}")
     with c2:
-        st.metric("Confidence", f"{status.get('confidence', 0):.0%}")
+        st.metric("Do tin cay", f"{status.get('confidence', 0):.0%}")
     with c3:
-        st.metric("Win Rate", f"{status.get('win_rate', 0):.1f}%")
+        st.metric("Ty le thang", f"{status.get('win_rate', 0):.1f}%")
     with c4:
-        st.metric("Profit Factor", f"{status.get('profit_factor', 0):.2f}")
+        st.metric("He so loi nhuan", f"{status.get('profit_factor', 0):.2f}")
     with c5:
-        st.metric("Open Trades", status.get("open_trades", 0))
+        st.metric("Lenh mo", status.get("open_trades", 0))
     with c6:
-        st.metric("Total Trades", status.get("total_trades", 0))
+        st.metric("Tong lenh", status.get("total_trades", 0))
 
     st.markdown("---")
 
     # Sub-wave warning
     sub_wave = status.get("sub_wave")
     if sub_wave:
-        st.warning(f"⚠️ **Sub-wave detected: {sub_wave}** — Trading paused until main wave resumes")
+        st.warning(f"⚠️ **Phat hien song phu: {sub_wave}** — Tam dung giao dich cho den khi song chinh tiep tuc")
 
     # Drawdown alert
     if risk.get("dd_triggered"):
-        st.error("🚨 **Drawdown protection triggered** — All trading halted")
+        st.error("🚨 **Bao ve drawdown da kich hoat** — Tat ca giao dich tam dung")
     elif risk.get("daily_profit_locked"):
-        st.success(f"🏆 **Daily profit lock** — {risk.get('lock_reason', '')}")
+        st.success(f"🏆 **Khoa loi nhuan ngay** — {risk.get('lock_reason', '')}")
     elif risk.get("daily_loss_locked"):
-        st.error(f"🛑 **Daily loss lock** — {risk.get('lock_reason', '')}")
+        st.error(f"🛑 **Khoa lo ngay** — {risk.get('lock_reason', '')}")
 
     col_left, col_right = st.columns([2, 1])
 
@@ -256,15 +256,15 @@ with tab1:
                 x=df_trades["open_time"],
                 y=df_trades["cumulative_pnl"],
                 mode="lines+markers",
-                name="Cumulative P&L",
+                name="Lai/Lo luy ke",
                 line=dict(color="#00e676", width=2),
                 fill="tozeroy",
                 fillcolor="rgba(0,230,118,0.1)",
             ))
             fig_equity.update_layout(
-                title="Cumulative P&L Curve",
-                xaxis_title="Time",
-                yaxis_title="P&L ($)",
+                title="Duong cong Lai/Lo luy ke",
+                xaxis_title="Thoi gian",
+                yaxis_title="Lai/Lo ($)",
                 height=350,
                 paper_bgcolor="#0e1117",
                 plot_bgcolor="#0e1117",
@@ -274,7 +274,7 @@ with tab1:
             )
             st.plotly_chart(fig_equity, use_container_width=True)
         else:
-            st.info("📈 Equity curve will appear after trades are closed.")
+            st.info("📈 Duong cong von se hien thi sau khi co lenh dong.")
 
         # Price mini-chart
         if candles:
@@ -287,12 +287,12 @@ with tab1:
                 high=df_c["high"],
                 low=df_c["low"],
                 close=df_c["close"],
-                name="Price",
+                name="Gia",
                 increasing_line_color="#00e676",
                 decreasing_line_color="#ff5252",
             )])
             fig_price.update_layout(
-                title="Recent Price Action (last 50 candles)",
+                title="Dien bien gia gan day (50 nen cuoi)",
                 height=280,
                 paper_bgcolor="#0e1117",
                 plot_bgcolor="#0e1117",
@@ -305,27 +305,27 @@ with tab1:
 
     with col_right:
         # Risk panel
-        st.markdown("### Risk Metrics")
+        st.markdown("### Chi so rui ro")
         balance = risk.get("balance", 0)
         equity_r = risk.get("equity", balance)
         peak = risk.get("peak_equity", balance)
         dd_pct = (peak - equity_r) / peak * 100 if peak > 0 else 0.0
 
-        st.metric("Balance", f"${balance:,.2f}")
-        st.metric("Equity", f"${equity_r:,.2f}")
-        st.metric("Daily P&L", f"${risk.get('daily_pnl', 0):+,.2f}")
-        st.metric("Peak Equity", f"${peak:,.2f}")
+        st.metric("So du", f"${balance:,.2f}")
+        st.metric("Von chu so huu", f"${equity_r:,.2f}")
+        st.metric("Lai/Lo ngay", f"${risk.get('daily_pnl', 0):+,.2f}")
+        st.metric("Dinh von", f"${peak:,.2f}")
 
         dd_color = "normal" if dd_pct < 5 else ("off" if dd_pct < 15 else "inverse")
-        st.metric("Current DD", f"{dd_pct:.2f}%", delta=f"-{dd_pct:.2f}%", delta_color="inverse")
-        st.metric("Martingale Step", risk.get("martingale_step", 0))
-        st.metric("Consec. Losses", risk.get("consecutive_losses", 0))
-        st.metric("Spread", f"{risk.get('spread', 0):.1f} pips")
+        st.metric("DD hien tai", f"{dd_pct:.2f}%", delta=f"-{dd_pct:.2f}%", delta_color="inverse")
+        st.metric("Buoc Martingale", risk.get("martingale_step", 0))
+        st.metric("So lenh lo lien tiep", risk.get("consecutive_losses", 0))
+        st.metric("Do chenh gia", f"{risk.get('spread', 0):.1f} pips")
 
         # Open trades
         open_trades = api_get("/api/trades/open", [])
         if open_trades:
-            st.markdown("### Open Trades")
+            st.markdown("### Lenh mo")
             df_open = pd.DataFrame(open_trades)
             st.dataframe(
                 df_open[["trade_id", "symbol", "direction", "lot_size", "entry_price", "pnl"]],
@@ -339,13 +339,13 @@ with tab1:
 # ══════════════════════════════════════════════════════════════════════════ #
 
 with tab2:
-    st.markdown("## 🌊 Wave Analysis")
+    st.markdown("## 🌊 Phan tich song")
 
     wave_data = api_get("/api/wave/analysis", {})
     candles = api_get("/api/candles?limit=200", [])
 
     if not wave_data:
-        st.error("Could not fetch wave analysis. Is the backend running?")
+        st.error("Khong the tai phan tich song. He thong may chu co dang chay khong?")
     else:
         # State banner
         main_wave = wave_data.get("main_wave", "SIDEWAYS")
@@ -356,24 +356,24 @@ with tab2:
         bcol1, bcol2, bcol3, bcol4 = st.columns(4)
         with bcol1:
             color = "🟢" if "BULL" in main_wave else ("🔴" if "BEAR" in main_wave else "🟡")
-            st.metric("Main Wave", f"{color} {main_wave}")
+            st.metric("Song chinh", f"{color} {main_wave}")
         with bcol2:
-            sub_label = sub_wave if sub_wave else "None"
-            st.metric("Sub Wave", f"{'⚠️ ' if sub_wave else ''}{sub_label}")
+            sub_label = sub_wave if sub_wave else "Khong co"
+            st.metric("Song phu", f"{'⚠️ ' if sub_wave else ''}{sub_label}")
         with bcol3:
-            st.metric("Confidence", f"{conf:.0%}")
+            st.metric("Do tin cay", f"{conf:.0%}")
         with bcol4:
-            st.metric("Sideways", "Yes 🟡" if sideways else "No ✅")
+            st.metric("Di ngang", "Co 🟡" if sideways else "Khong ✅")
 
         can_buy = wave_data.get("can_trade_buy", False)
         can_sell = wave_data.get("can_trade_sell", False)
         trade_status = []
         if can_buy:
-            trade_status.append("✅ BUY signals allowed")
+            trade_status.append("✅ Cho phep tin hieu MUA")
         if can_sell:
-            trade_status.append("✅ SELL signals allowed")
+            trade_status.append("✅ Cho phep tin hieu BAN")
         if not can_buy and not can_sell:
-            trade_status.append("🚫 Trading paused (sub-wave or sideways)")
+            trade_status.append("🚫 Tam dung giao dich (song phu hoac di ngang)")
 
         for ts in trade_status:
             if "✅" in ts:
@@ -381,7 +381,7 @@ with tab2:
             else:
                 st.warning(ts)
 
-        st.markdown(f"**Analysis:** {wave_data.get('description', '')}")
+        st.markdown(f"**Phan tich:** {wave_data.get('description', '')}")
 
         if candles:
             df_c = pd.DataFrame(candles).tail(150)
@@ -414,19 +414,19 @@ with tab2:
                 high=df_c["high"],
                 low=df_c["low"],
                 close=df_c["close"],
-                name="Price",
+                name="Gia",
                 increasing_line_color="#00e676",
                 decreasing_line_color="#ff5252",
             ), row=1, col=1)
 
             # EMAs
-            fig.add_trace(go.Scatter(x=df_c["dt"], y=ema_htf_fast, name="HTF Fast EMA(21)",
+            fig.add_trace(go.Scatter(x=df_c["dt"], y=ema_htf_fast, name="EMA nhanh HTF(21)",
                                       line=dict(color="#40c4ff", width=1.5)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_c["dt"], y=ema_htf_slow, name="HTF Slow EMA(50)",
+            fig.add_trace(go.Scatter(x=df_c["dt"], y=ema_htf_slow, name="EMA cham HTF(50)",
                                       line=dict(color="#ff6d00", width=1.5)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_c["dt"], y=ema_ltf_fast, name="LTF Fast EMA(8)",
+            fig.add_trace(go.Scatter(x=df_c["dt"], y=ema_ltf_fast, name="EMA nhanh LTF(8)",
                                       line=dict(color="#b39ddb", width=1, dash="dot")), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_c["dt"], y=ema_ltf_slow, name="LTF Slow EMA(21)",
+            fig.add_trace(go.Scatter(x=df_c["dt"], y=ema_ltf_slow, name="EMA cham LTF(21)",
                                       line=dict(color="#f48fb1", width=1, dash="dot")), row=1, col=1)
 
             # Fractal swing points
@@ -440,7 +440,7 @@ with tab2:
                 fig.add_trace(go.Scatter(
                     x=sh_xs, y=sh_prices,
                     mode="markers",
-                    name="Fractal High",
+                    name="Dinh fractal",
                     marker=dict(symbol="triangle-up", size=10, color="#ff5252"),
                 ), row=1, col=1)
 
@@ -451,19 +451,19 @@ with tab2:
                 fig.add_trace(go.Scatter(
                     x=sl_xs, y=sl_prices,
                     mode="markers",
-                    name="Fractal Low",
+                    name="Day fractal",
                     marker=dict(symbol="triangle-down", size=10, color="#00e676"),
                 ), row=1, col=1)
 
             # Volume bar
             fig.add_trace(go.Bar(
                 x=df_c["dt"], y=df_c["volume"],
-                name="Volume",
+                name="Khoi luong",
                 marker_color="rgba(128,128,200,0.5)",
             ), row=2, col=1)
 
             fig.update_layout(
-                title=f"Wave Analysis Chart — {main_wave}",
+                title=f"Bieu do phan tich song — {main_wave}",
                 height=650,
                 paper_bgcolor="#0e1117",
                 plot_bgcolor="#0e1117",
@@ -477,12 +477,12 @@ with tab2:
             st.plotly_chart(fig, use_container_width=True)
 
         # EMA values
-        st.markdown("### Current EMA Values")
+        st.markdown("### Gia tri EMA hien tai")
         col_a, col_b, col_c, col_d = st.columns(4)
-        col_a.metric("HTF Fast EMA(21)", f"{wave_data.get('htf_ema_fast', 0):.5f}")
-        col_b.metric("HTF Slow EMA(50)", f"{wave_data.get('htf_ema_slow', 0):.5f}")
-        col_c.metric("LTF Fast EMA(8)", f"{wave_data.get('ltf_ema_fast', 0):.5f}")
-        col_d.metric("LTF Slow EMA(21)", f"{wave_data.get('ltf_ema_slow', 0):.5f}")
+        col_a.metric("EMA nhanh HTF(21)", f"{wave_data.get('htf_ema_fast', 0):.5f}")
+        col_b.metric("EMA cham HTF(50)", f"{wave_data.get('htf_ema_slow', 0):.5f}")
+        col_c.metric("EMA nhanh LTF(8)", f"{wave_data.get('ltf_ema_fast', 0):.5f}")
+        col_d.metric("EMA cham LTF(21)", f"{wave_data.get('ltf_ema_slow', 0):.5f}")
         st.metric("ATR(14)", f"{wave_data.get('atr', 0):.5f}")
 
 
@@ -491,11 +491,11 @@ with tab2:
 # ══════════════════════════════════════════════════════════════════════════ #
 
 with tab3:
-    st.markdown("## 📋 Signal Queue")
+    st.markdown("## 📋 Hang doi tin hieu")
 
     queue = api_get("/api/queue/status", {})
     if not queue:
-        st.error("Could not fetch queue status.")
+        st.error("Khong the tai trang thai hang doi.")
     else:
         state = queue.get("state", "IDLE")
         authority = queue.get("authority", "NORMAL")
@@ -505,40 +505,52 @@ with tab3:
         s_col1, s_col2, s_col3, s_col4 = st.columns(4)
         with s_col1:
             state_emoji = {"IDLE": "⚫", "MONITORING": "🔵", "COOLDOWN": "🟠", "RESTRICTED": "🔴"}.get(state, "⚪")
-            st.metric("Coordinator State", f"{state_emoji} {state}")
+            state_label = {
+                "IDLE": "Nghi",
+                "MONITORING": "Giam sat",
+                "COOLDOWN": "Hoi chieu",
+                "RESTRICTED": "Bi gioi han",
+            }.get(state, state)
+            st.metric("Trang thai dieu phoi", f"{state_emoji} {state_label}")
         with s_col2:
             auth_emoji = {"BLOCKED": "🚫", "RESTRICTED": "⚠️", "NORMAL": "✅", "PRIORITY": "⭐"}.get(authority, "❓")
-            st.metric("Authority", f"{auth_emoji} {authority}")
+            authority_label = {
+                "BLOCKED": "Bi chan",
+                "RESTRICTED": "Gioi han",
+                "NORMAL": "Binh thuong",
+                "PRIORITY": "Uu tien",
+            }.get(authority, authority)
+            st.metric("Muc uu tien", f"{auth_emoji} {authority_label}")
         with s_col3:
-            st.metric("Queue Depth", queue.get("queue_depth", 0))
+            st.metric("Do sau hang doi", queue.get("queue_depth", 0))
         with s_col4:
             if cooldown_until > time.time():
                 remaining = max(0, int(cooldown_until - time.time()))
-                st.metric("Cooldown Remaining", f"{remaining}s")
+                st.metric("Thoi gian hoi chieu con lai", f"{remaining}s")
             else:
-                st.metric("Cooldown", "None ✅")
+                st.metric("Hoi chieu", "Khong co ✅")
 
         if state == "COOLDOWN":
-            st.warning(f"⏱ Cooldown active after loss. Resumes in {max(0, int(cooldown_until - time.time()))} seconds.")
+            st.warning(f"⏱ Dang hoi chieu sau khi lo. Se tiep tuc sau {max(0, int(cooldown_until - time.time()))} giay.")
 
         st.markdown("---")
 
         # Metrics row
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Signals Queued (total)", queue.get("signals_queued", 0))
-        m2.metric("Signals Executed", queue.get("signals_executed", 0))
-        m3.metric("Signals Rejected", queue.get("signals_rejected", 0))
-        m4.metric("Signals Expired", queue.get("signals_expired", 0))
+        m1.metric("Tong tin hieu da vao hang doi", queue.get("signals_queued", 0))
+        m2.metric("Tin hieu da thuc thi", queue.get("signals_executed", 0))
+        m3.metric("Tin hieu bi tu choi", queue.get("signals_rejected", 0))
+        m4.metric("Tin hieu het han", queue.get("signals_expired", 0))
 
         # Execution rate
         total = queue.get("signals_queued", 1) or 1
         exec_rate = queue.get("signals_executed", 0) / total * 100
-        st.progress(exec_rate / 100, text=f"Execution Rate: {exec_rate:.1f}%")
+        st.progress(exec_rate / 100, text=f"Ty le thuc thi: {exec_rate:.1f}%")
 
         # Recent signal history
         recent = queue.get("recent_signals", [])
         if recent:
-            st.markdown("### Recent Signal History")
+            st.markdown("### Lich su tin hieu gan day")
             df_sig = pd.DataFrame(recent)
             if "timestamp" in df_sig.columns:
                 df_sig["time"] = pd.to_datetime(df_sig["timestamp"], unit="s").dt.strftime("%H:%M:%S")
@@ -559,10 +571,10 @@ with tab3:
                 styled = df_sig[available_cols].style.applymap(color_status, subset=["status"] if "status" in available_cols else [])
                 st.dataframe(styled, use_container_width=True, hide_index=True)
         else:
-            st.info("No signal history yet. Start the robot to generate signals.")
+            st.info("Chua co lich su tin hieu. Hay bat dau robot de tao tin hieu.")
 
         # Visual queue depth gauge
-        st.markdown("### Load Monitor")
+        st.markdown("### Giam sat tai")
         max_q = api_get("/api/settings", {}).get("max_queue_size", 10)
         depth = queue.get("queue_depth", 0)
         load_pct = depth / max_q if max_q > 0 else 0
@@ -570,7 +582,7 @@ with tab3:
         fig_gauge = go.Figure(go.Indicator(
             mode="gauge+number",
             value=depth,
-            title={"text": "Queue Depth", "font": {"color": "#fafafa"}},
+            title={"text": "Do sau hang doi", "font": {"color": "#fafafa"}},
             gauge={
                 "axis": {"range": [0, max_q], "tickcolor": "#fafafa"},
                 "bar": {"color": "#40c4ff"},
@@ -596,153 +608,153 @@ with tab3:
 # ══════════════════════════════════════════════════════════════════════════ #
 
 with tab4:
-    st.markdown("## ⚙️ Robot Settings")
+    st.markdown("## ⚙️ Cai dat robot")
 
     current = api_get("/api/settings", {})
     if not current:
-        st.error("Could not load settings.")
+        st.error("Khong the tai cai dat.")
     else:
         with st.form("settings_form"):
             # ── Basic Setup ──────────────────────────────────────────── #
-            with st.expander("🔧 Basic Setup", expanded=True):
+            with st.expander("🔧 Thiet lap co ban", expanded=True):
                 bc1, bc2, bc3 = st.columns(3)
-                username = bc1.text_input("Username", value=current.get("username", "Trader"))
-                magic = bc2.number_input("Magic Number", value=current.get("magic_number", 100001), min_value=1)
-                symbol = bc3.text_input("Symbol", value=current.get("symbol", "EURUSD"))
+                username = bc1.text_input("Ten dang nhap", value=current.get("username", "Trader"))
+                magic = bc2.number_input("Ma Magic", value=current.get("magic_number", 100001), min_value=1)
+                symbol = bc3.text_input("Cap giao dich", value=current.get("symbol", "EURUSD"))
                 tf1, tf2 = st.columns(2)
-                timeframe = tf1.selectbox("Timeframe", ["M1", "M5", "M15", "M30", "H1", "H4", "D1"],
+                timeframe = tf1.selectbox("Khung thoi gian", ["M1", "M5", "M15", "M30", "H1", "H4", "D1"],
                                            index=["M1", "M5", "M15", "M30", "H1", "H4", "D1"].index(current.get("timeframe", "M5")))
-                htf_tf = tf2.selectbox("HTF Timeframe", ["M15", "M30", "H1", "H4", "D1"],
+                htf_tf = tf2.selectbox("Khung thoi gian HTF", ["M15", "M30", "H1", "H4", "D1"],
                                         index=["M15", "M30", "H1", "H4", "D1"].index(current.get("htf_timeframe", "H1")))
 
             # ── Risk & Position Sizing ───────────────────────────────── #
-            with st.expander("💰 Risk & Position Sizing"):
+            with st.expander("💰 Rui ro va kich thuoc vi the"):
                 r1, r2, r3 = st.columns(3)
-                lot_mode = r1.selectbox("Lot Mode", ["STATIC", "DYNAMIC_PERCENT", "LOT_PER_X_BALANCE"],
+                lot_mode = r1.selectbox("Che do lot", ["STATIC", "DYNAMIC_PERCENT", "LOT_PER_X_BALANCE"],
                                          index=["STATIC", "DYNAMIC_PERCENT", "LOT_PER_X_BALANCE"].index(current.get("lot_mode", "STATIC")))
-                lot_value = r2.number_input("Lot Value", value=float(current.get("lot_value", 0.01)),
+                lot_value = r2.number_input("Gia tri lot", value=float(current.get("lot_value", 0.01)),
                                              min_value=0.001, max_value=100.0, format="%.3f")
-                pip_value = r3.number_input("Pip Value/Lot ($)", value=float(current.get("pip_value_per_lot", 10.0)))
+                pip_value = r3.number_input("Gia tri pip/lot ($)", value=float(current.get("pip_value_per_lot", 10.0)))
                 rr1, rr2 = st.columns(2)
-                min_lot = rr1.number_input("Min Lot", value=float(current.get("min_lot", 0.01)), format="%.2f")
-                max_lot = rr2.number_input("Max Lot", value=float(current.get("max_lot", 10.0)), format="%.2f")
+                min_lot = rr1.number_input("Lot toi thieu", value=float(current.get("min_lot", 0.01)), format="%.2f")
+                max_lot = rr2.number_input("Lot toi da", value=float(current.get("max_lot", 10.0)), format="%.2f")
 
                 st.markdown("**Martingale**")
                 mg = current.get("martingale", {})
                 m1c, m2c, m3c = st.columns(3)
-                mg_enabled = m1c.checkbox("Enable Martingale", value=mg.get("enabled", False))
-                mg_mult = m2c.number_input("Multiplier", value=float(mg.get("multiplier", 2.0)), min_value=1.0, max_value=10.0)
-                mg_steps = m3c.number_input("Max Steps", value=int(mg.get("max_steps", 4)), min_value=1, max_value=10)
+                mg_enabled = m1c.checkbox("Bat Martingale", value=mg.get("enabled", False))
+                mg_mult = m2c.number_input("He so nhan", value=float(mg.get("multiplier", 2.0)), min_value=1.0, max_value=10.0)
+                mg_steps = m3c.number_input("So buoc toi da", value=int(mg.get("max_steps", 4)), min_value=1, max_value=10)
 
             # ── SL / TP ──────────────────────────────────────────────── #
-            with st.expander("🎯 Stop Loss & Take Profit"):
+            with st.expander("🎯 Cat lo va chot loi"):
                 sl_modes = ["POINTS", "ATR", "RANGE_SIZE", "PREV_CANDLE_POINTS", "PREV_CANDLE_ATR",
                             "LAST_SWING_POINTS", "LAST_SWING_ATR", "RANGE_OPPOSITE_POINTS", "RANGE_OPPOSITE_ATR"]
                 tp_modes = ["SL_RATIO", "ATR", "POINTS"]
                 s1, s2 = st.columns(2)
-                sl_mode = s1.selectbox("SL Mode", sl_modes,
+                sl_mode = s1.selectbox("Che do SL", sl_modes,
                                         index=sl_modes.index(current.get("sl_mode", "POINTS")))
-                sl_value = s1.number_input("SL Value", value=float(current.get("sl_value", 200.0)), min_value=1.0)
-                tp_mode = s2.selectbox("TP Mode", tp_modes,
+                sl_value = s1.number_input("Gia tri SL", value=float(current.get("sl_value", 200.0)), min_value=1.0)
+                tp_mode = s2.selectbox("Che do TP", tp_modes,
                                         index=tp_modes.index(current.get("tp_mode", "SL_RATIO")))
-                tp_value = s2.number_input("TP Value", value=float(current.get("tp_value", 2.0)), min_value=0.1)
+                tp_value = s2.number_input("Gia tri TP", value=float(current.get("tp_value", 2.0)), min_value=0.1)
 
             # ── Sessions & Time ──────────────────────────────────────── #
-            with st.expander("🕐 Sessions & Time"):
+            with st.expander("🕐 Phien giao dich va thoi gian"):
                 ss1, ss2, ss3 = st.columns(3)
                 sessions = ["AMERICAN", "NYSE", "EUROPEAN", "LONDON", "ASIAN", "CUSTOM", "ALL_DAY"]
-                session = ss1.selectbox("Session", sessions,
+                session = ss1.selectbox("Phien", sessions,
                                          index=sessions.index(current.get("session", "LONDON")))
                 dst_modes = ["NO_DST", "NORTH_AMERICA", "EUROPE"]
-                dst_mode = ss2.selectbox("DST Mode", dst_modes,
+                dst_mode = ss2.selectbox("Che do DST", dst_modes,
                                           index=dst_modes.index(current.get("dst_mode", "NO_DST")))
-                gmt_offset = ss3.number_input("GMT Offset", value=float(current.get("gmt_offset", 0.0)),
+                gmt_offset = ss3.number_input("Do lech GMT", value=float(current.get("gmt_offset", 0.0)),
                                                min_value=-12.0, max_value=14.0, step=0.5)
-                monitoring_minutes = st.number_input("Monitoring Minutes (Range period)",
+                monitoring_minutes = st.number_input("So phut giam sat (chu ky dao dong)",
                                                       value=int(current.get("monitoring_minutes", 60)),
                                                       min_value=5, max_value=240)
 
             # ── Entry Logic ──────────────────────────────────────────── #
-            with st.expander("📐 Entry Logic"):
+            with st.expander("📐 Logic vao lenh"):
                 entry_modes = ["BREAKOUT", "INSTANT_BREAKOUT", "RETRACE", "INSTANT_RETRACE",
                                "RETEST_SAME", "RETEST_OPPOSITE", "RETEST_LEVEL_X"]
                 e1, e2 = st.columns(2)
-                entry_mode = e1.selectbox("Entry Mode", entry_modes,
+                entry_mode = e1.selectbox("Che do vao lenh", entry_modes,
                                            index=entry_modes.index(current.get("entry_mode", "BREAKOUT")))
-                retrace_mult = e1.number_input("Retrace ATR Multiplier", value=float(current.get("retrace_atr_mult", 0.5)))
-                min_body_atr = e2.number_input("Min Body ATR", value=float(current.get("min_body_atr", 0.3)))
-                retest_lvl = e2.number_input("Retest Level X (0-1)", value=float(current.get("retest_level_x", 0.5)),
+                retrace_mult = e1.number_input("He so ATR cho retrace", value=float(current.get("retrace_atr_mult", 0.5)))
+                min_body_atr = e2.number_input("Than nen ATR toi thieu", value=float(current.get("min_body_atr", 0.3)))
+                retest_lvl = e2.number_input("Muc retest X (0-1)", value=float(current.get("retest_level_x", 0.5)),
                                               min_value=0.0, max_value=1.0)
 
             # ── Filters ──────────────────────────────────────────────── #
-            with st.expander("🔍 Filters"):
+            with st.expander("🔍 Bo loc"):
                 f1, f2 = st.columns(2)
-                ema_filter = f1.checkbox("EMA Filter", value=current.get("ema_filter_enabled", True))
-                ema_fast = f1.number_input("EMA Fast Period", value=int(current.get("ema_fast", 21)))
-                ema_slow = f1.number_input("EMA Slow Period", value=int(current.get("ema_slow", 50)))
-                sr_filter = f2.checkbox("S/R Filter (Fractals)", value=current.get("sr_filter_enabled", True))
-                max_spread = f2.number_input("Max Spread (pips)", value=float(current.get("max_spread", 30.0)))
-                news_filter = f2.checkbox("News Filter", value=current.get("news_filter_enabled", False))
+                ema_filter = f1.checkbox("Bo loc EMA", value=current.get("ema_filter_enabled", True))
+                ema_fast = f1.number_input("Chu ky EMA nhanh", value=int(current.get("ema_fast", 21)))
+                ema_slow = f1.number_input("Chu ky EMA cham", value=int(current.get("ema_slow", 50)))
+                sr_filter = f2.checkbox("Bo loc S/R (Fractal)", value=current.get("sr_filter_enabled", True))
+                max_spread = f2.number_input("Spread toi da (pips)", value=float(current.get("max_spread", 30.0)))
+                news_filter = f2.checkbox("Bo loc tin tuc", value=current.get("news_filter_enabled", False))
                 mt1, mt2 = st.columns(2)
-                max_trades_time = mt1.number_input("Max Trades at a Time", value=int(current.get("max_trades_at_time", 3)),
+                max_trades_time = mt1.number_input("So lenh toi da cung luc", value=int(current.get("max_trades_at_time", 3)),
                                                     min_value=1, max_value=50)
-                max_trades_daily = mt2.number_input("Max Trades Daily", value=int(current.get("max_trades_daily", 10)),
+                max_trades_daily = mt2.number_input("So lenh toi da moi ngay", value=int(current.get("max_trades_daily", 10)),
                                                      min_value=1, max_value=200)
 
             # ── ATR ──────────────────────────────────────────────────── #
-            with st.expander("📏 ATR Settings"):
+            with st.expander("📏 Cai dat ATR"):
                 at1, at2 = st.columns(2)
-                atr_period = at1.number_input("ATR Period", value=int(current.get("atr_period", 14)), min_value=1)
-                atr_tf = at2.selectbox("ATR Timeframe", ["M1", "M5", "M15", "M30", "H1", "H4"],
+                atr_period = at1.number_input("Chu ky ATR", value=int(current.get("atr_period", 14)), min_value=1)
+                atr_tf = at2.selectbox("Khung thoi gian ATR", ["M1", "M5", "M15", "M30", "H1", "H4"],
                                         index=["M1", "M5", "M15", "M30", "H1", "H4"].index(current.get("atr_timeframe", "M5")))
 
             # ── Trade Management ─────────────────────────────────────── #
-            with st.expander("🔄 Trade Management"):
-                st.markdown("**Partial Close**")
+            with st.expander("🔄 Quan ly lenh"):
+                st.markdown("**Dong mot phan**")
                 pc = current.get("partial_close", {})
                 pc1, pc2, pc3, pc4 = st.columns(4)
-                pc_enabled = pc1.checkbox("Enable Partial Close", value=pc.get("enabled", False))
-                pc_trigger = pc2.number_input("Trigger % of TP", value=float(pc.get("trigger_pct", 50.0)), min_value=1.0, max_value=99.0)
-                pc_close = pc3.number_input("Close % Lots", value=float(pc.get("close_pct", 50.0)), min_value=1.0, max_value=100.0)
-                pc_be = pc4.checkbox("Move SL to BE", value=pc.get("move_sl_to_be", True))
+                pc_enabled = pc1.checkbox("Bat dong mot phan", value=pc.get("enabled", False))
+                pc_trigger = pc2.number_input("Nguong % TP", value=float(pc.get("trigger_pct", 50.0)), min_value=1.0, max_value=99.0)
+                pc_close = pc3.number_input("Dong % khoi luong", value=float(pc.get("close_pct", 50.0)), min_value=1.0, max_value=100.0)
+                pc_be = pc4.checkbox("Dua SL ve hoa von", value=pc.get("move_sl_to_be", True))
 
-                st.markdown("**Trailing Stop**")
+                st.markdown("**Doi cat lo**")
                 tr = current.get("trailing", {})
                 tr1, tr2, tr3, tr4 = st.columns(4)
-                tr_enabled = tr1.checkbox("Enable Trailing", value=tr.get("enabled", False))
-                tr_mode = tr2.selectbox("Trail Mode", ["PCT_TP", "HILO"],
+                tr_enabled = tr1.checkbox("Bat trailing", value=tr.get("enabled", False))
+                tr_mode = tr2.selectbox("Che do trailing", ["PCT_TP", "HILO"],
                                          index=["PCT_TP", "HILO"].index(tr.get("mode", "PCT_TP")))
-                tr_trigger = tr3.number_input("Trail Trigger %", value=float(tr.get("trigger_pct", 50.0)))
-                tr_pct = tr4.number_input("Trail Distance %", value=float(tr.get("trail_pct", 30.0)))
+                tr_trigger = tr3.number_input("Nguong trailing %", value=float(tr.get("trigger_pct", 50.0)))
+                tr_pct = tr4.number_input("Khoang trailing %", value=float(tr.get("trail_pct", 30.0)))
 
-                st.markdown("**Grid System**")
+                st.markdown("**He thong Grid**")
                 gr = current.get("grid", {})
                 gr1, gr2, gr3 = st.columns(3)
-                gr_enabled = gr1.checkbox("Enable Grid", value=gr.get("enabled", False))
-                gr_levels = gr1.number_input("Grid Levels", value=int(gr.get("levels", 3)), min_value=1, max_value=10)
-                gr_dist = gr2.number_input("Distance (pips)", value=float(gr.get("distance_pips", 200.0)))
-                gr_dist_mult = gr2.number_input("Distance Multiplier", value=float(gr.get("distance_multiplier", 1.5)))
-                gr_vol_mult = gr3.number_input("Volume Multiplier", value=float(gr.get("volume_multiplier", 1.5)))
-                gr_max_lot = gr3.number_input("Max Grid Lot", value=float(gr.get("max_grid_lot", 1.0)))
+                gr_enabled = gr1.checkbox("Bat Grid", value=gr.get("enabled", False))
+                gr_levels = gr1.number_input("So tang Grid", value=int(gr.get("levels", 3)), min_value=1, max_value=10)
+                gr_dist = gr2.number_input("Khoang cach (pips)", value=float(gr.get("distance_pips", 200.0)))
+                gr_dist_mult = gr2.number_input("He so khoang cach", value=float(gr.get("distance_multiplier", 1.5)))
+                gr_vol_mult = gr3.number_input("He so khoi luong", value=float(gr.get("volume_multiplier", 1.5)))
+                gr_max_lot = gr3.number_input("Lot Grid toi da", value=float(gr.get("max_grid_lot", 1.0)))
 
             # ── Wave Detector ────────────────────────────────────────── #
-            with st.expander("🌊 Wave Detector Parameters"):
+            with st.expander("🌊 Tham so bo phat hien song"):
                 wd1, wd2 = st.columns(2)
-                htf_ef = wd1.number_input("HTF EMA Fast", value=int(current.get("htf_ema_fast", 21)))
-                htf_es = wd1.number_input("HTF EMA Slow", value=int(current.get("htf_ema_slow", 50)))
-                ltf_ef = wd2.number_input("LTF EMA Fast", value=int(current.get("ltf_ema_fast", 8)))
-                ltf_es = wd2.number_input("LTF EMA Slow", value=int(current.get("ltf_ema_slow", 21)))
+                htf_ef = wd1.number_input("EMA nhanh HTF", value=int(current.get("htf_ema_fast", 21)))
+                htf_es = wd1.number_input("EMA cham HTF", value=int(current.get("htf_ema_slow", 50)))
+                ltf_ef = wd2.number_input("EMA nhanh LTF", value=int(current.get("ltf_ema_fast", 8)))
+                ltf_es = wd2.number_input("EMA cham LTF", value=int(current.get("ltf_ema_slow", 21)))
                 sw1, sw2 = st.columns(2)
-                sw_mult = sw1.number_input("Sideways ATR Mult", value=float(current.get("sideways_atr_mult", 1.5)))
-                sw_candles = sw2.number_input("Sideways Candles", value=int(current.get("sideways_candles", 10)))
+                sw_mult = sw1.number_input("He so ATR khi di ngang", value=float(current.get("sideways_atr_mult", 1.5)))
+                sw_candles = sw2.number_input("So nen di ngang", value=int(current.get("sideways_candles", 10)))
 
-                st.markdown("**Wave Direction Filter**")
+                st.markdown("**Bo loc huong song**")
                 wdf_options = ["BOTH", "BUY_ONLY", "SELL_ONLY"]
-                wdf_labels  = ["🔄 Both (up + down)", "📈 Buy Only (uptrend)", "📉 Sell Only (downtrend)"]
+                wdf_labels  = ["🔄 Ca hai huong (len + xuong)", "📈 Chi MUA (xu huong tang)", "📉 Chi BAN (xu huong giam)"]
                 wdf_current = current.get("wave_direction_filter", "BOTH")
                 wdf_idx     = wdf_options.index(wdf_current) if wdf_current in wdf_options else 0
                 wave_dir_filter = st.radio(
-                    "Allow signals for:",
+                    "Cho phep tin hieu cho:",
                     options=wdf_options,
                     format_func=lambda x: wdf_labels[wdf_options.index(x)],
                     index=wdf_idx,
@@ -750,54 +762,54 @@ with tab4:
                 )
 
             # ── Advanced Risk ────────────────────────────────────────── #
-            with st.expander("🛡️ Advanced Risk Management"):
+            with st.expander("🛡️ Quan ly rui ro nang cao"):
                 ar1, ar2, ar3 = st.columns(3)
-                max_eq = ar1.number_input("Max Account Equity ($, 0=off)", value=float(current.get("max_account_equity", 0.0)), min_value=0.0)
-                max_daily_dd = ar2.number_input("Max Daily DD (%)", value=float(current.get("max_daily_dd_pct", 5.0)), min_value=0.1, max_value=100.0)
-                max_overall_dd = ar3.number_input("Max Overall DD (%)", value=float(current.get("max_overall_dd_pct", 20.0)), min_value=0.1, max_value=100.0)
+                max_eq = ar1.number_input("Von tai khoan toi da ($, 0=tat)", value=float(current.get("max_account_equity", 0.0)), min_value=0.0)
+                max_daily_dd = ar2.number_input("DD ngay toi da (%)", value=float(current.get("max_daily_dd_pct", 5.0)), min_value=0.1, max_value=100.0)
+                max_overall_dd = ar3.number_input("DD tong toi da (%)", value=float(current.get("max_overall_dd_pct", 20.0)), min_value=0.1, max_value=100.0)
 
                 cq1, cq2, cq3 = st.columns(3)
-                max_q = cq1.number_input("Max Queue Size", value=int(current.get("max_queue_size", 10)))
-                cooldown = cq2.number_input("Cooldown (minutes)", value=float(current.get("cooldown_minutes", 5.0)))
-                expiry = cq3.number_input("Signal Expiry (seconds)", value=float(current.get("signal_expiry_seconds", 300.0)))
+                max_q = cq1.number_input("Kich thuoc hang doi toi da", value=int(current.get("max_queue_size", 10)))
+                cooldown = cq2.number_input("Hoi chieu (phut)", value=float(current.get("cooldown_minutes", 5.0)))
+                expiry = cq3.number_input("Han tin hieu (giay)", value=float(current.get("signal_expiry_seconds", 300.0)))
 
             # ── Daily Lock Targets ───────────────────────────────────── #
-            with st.expander("🎯 Daily Profit & Loss Targets", expanded=True):
+            with st.expander("🎯 Muc tieu loi nhuan va thua lo ngay", expanded=True):
                 st.markdown(
-                    "Set daily targets. When reached, robot **auto-stops** until you manually reset. "
-                    "Set to **0** to disable."
+                    "Dat muc tieu theo ngay. Khi cham nguong, robot **tu dung** cho den khi ban dat lai thu cong. "
+                    "Dat **0** de tat."
                 )
                 dl1, dl2 = st.columns(2)
                 daily_profit_target = dl1.number_input(
-                    "📈 Daily Profit Target ($, 0=off)",
+                    "📈 Muc tieu loi nhuan ngay ($, 0=tat)",
                     value=float(current.get("daily_profit_target", 0.0)),
                     min_value=0.0,
                     step=10.0,
                     format="%.2f",
-                    help="Robot stops automatically when daily P&L ≥ this value",
+                    help="Robot tu dung khi Lai/Lo ngay ≥ gia tri nay",
                 )
                 daily_loss_limit = dl2.number_input(
-                    "📉 Daily Loss Limit ($, 0=off)",
+                    "📉 Gioi han lo ngay ($, 0=tat)",
                     value=float(current.get("daily_loss_limit", 0.0)),
                     min_value=0.0,
                     step=10.0,
                     format="%.2f",
-                    help="Robot stops automatically when daily P&L ≤ -(this value)",
+                    help="Robot tu dung khi Lai/Lo ngay ≤ -(gia tri nay)",
                 )
                 # Show suggested targets from backend
                 suggested = api_get("/api/capital/suggest_targets", {})
                 if suggested:
                     st.caption(
-                        f"💡 Suggested targets for current balance: "
-                        f"Profit=${suggested.get('daily_profit_target', 0):.2f}, "
-                        f"Loss=${suggested.get('daily_loss_limit', 0):.2f}"
+                        f"💡 Muc tieu goi y theo so du hien tai: "
+                        f"Loi nhuan=${suggested.get('daily_profit_target', 0):.2f}, "
+                        f"Thua lo=${suggested.get('daily_loss_limit', 0):.2f}"
                     )
 
             # ── Capital Profile ──────────────────────────────────────── #
-            with st.expander("💼 Capital Profile (Auto Risk Tuning)"):
+            with st.expander("💼 Ho so von (tu dong canh chinh rui ro)"):
                 st.markdown(
-                    "Auto-tune lot sizes and risk parameters based on account size. "
-                    "**AUTO** detects the appropriate bracket from your balance."
+                    "Tu dong canh chinh lot va tham so rui ro theo quy mo tai khoan. "
+                    "**AUTO** se tu nhan dien muc phu hop tu so du cua ban."
                 )
                 cp_options = [
                     "AUTO",
@@ -805,22 +817,22 @@ with tab4:
                     "MICRO", "SMALL", "MEDIUM", "LARGE", "CUSTOM",
                 ]
                 cp_labels  = [
-                    "🤖 AUTO (detect from balance)",
-                    "🔬 NANO ~$500 (< $600) — 0.01 lot, 0.5% risk",
-                    "🔬 NANO ~$600 ($600–$699) — 0.02 lot, 0.7% risk",
-                    "🔬 NANO ~$700 ($700–$799) — 0.03 lot, 0.8% risk",
-                    "🔬 NANO ~$800 ($800–$899) — 0.05 lot, 1.0% risk",
-                    "🔬 NANO ~$900 ($900–$999) — 0.07 lot, 1.0% risk",
-                    "🔬 MICRO (< $1,000 general)",
+                    "🤖 AUTO (tu nhan dien tu so du)",
+                    "🔬 NANO ~$500 (< $600) — 0.01 lot, rui ro 0.5%",
+                    "🔬 NANO ~$600 ($600–$699) — 0.02 lot, rui ro 0.7%",
+                    "🔬 NANO ~$700 ($700–$799) — 0.03 lot, rui ro 0.8%",
+                    "🔬 NANO ~$800 ($800–$899) — 0.05 lot, rui ro 1.0%",
+                    "🔬 NANO ~$900 ($900–$999) — 0.07 lot, rui ro 1.0%",
+                    "🔬 MICRO (< $1,000 tong quat)",
                     "🔹 SMALL ($1,000–$5,000)",
                     "🔷 MEDIUM ($5,000–$25,000)",
                     "💎 LARGE (≥ $25,000)",
-                    "🛠️ CUSTOM (manual settings)",
+                    "🛠️ CUSTOM (tu chinh thu cong)",
                 ]
                 cp_current = current.get("capital_profile", "AUTO")
                 cp_idx     = cp_options.index(cp_current) if cp_current in cp_options else 0
                 capital_profile = st.selectbox(
-                    "Capital Profile",
+                    "Ho so von",
                     options=cp_options,
                     format_func=lambda x: cp_labels[cp_options.index(x)],
                     index=cp_idx,
@@ -829,13 +841,13 @@ with tab4:
                 profile_info = api_get("/api/capital/profile", {})
                 if profile_info:
                     pi1, pi2, pi3, pi4 = st.columns(4)
-                    pi1.metric("Profile", profile_info.get("profile", ""))
-                    pi2.metric("Lot Mode", profile_info.get("lot_mode", ""))
-                    pi3.metric("Max Lot", f"{profile_info.get('max_lot', 0):.2f}")
-                    pi4.metric("Max Daily DD", f"{profile_info.get('max_daily_dd', 0):.1f}%")
+                    pi1.metric("Ho so", profile_info.get("profile", ""))
+                    pi2.metric("Che do lot", profile_info.get("lot_mode", ""))
+                    pi3.metric("Lot toi da", f"{profile_info.get('max_lot', 0):.2f}")
+                    pi4.metric("DD ngay toi da", f"{profile_info.get('max_daily_dd', 0):.1f}%")
                     st.caption(profile_info.get("description", ""))
 
-            submitted = st.form_submit_button("💾 Save Settings", use_container_width=True, type="primary")
+            submitted = st.form_submit_button("💾 Luu cai dat", use_container_width=True, type="primary")
 
         if submitted:
             new_settings = {
@@ -915,9 +927,9 @@ with tab4:
             }
             result = api_post("/api/settings", new_settings)
             if result:
-                st.success("✅ Settings saved and applied!")
+                st.success("✅ Da luu va ap dung cai dat!")
             else:
-                st.error("Failed to save settings.")
+                st.error("Luu cai dat that bai.")
 
 
 # ══════════════════════════════════════════════════════════════════════════ #
@@ -925,7 +937,7 @@ with tab4:
 # ══════════════════════════════════════════════════════════════════════════ #
 
 with tab5:
-    st.markdown("## 📜 Trade History")
+    st.markdown("## 📜 Lich su giao dich")
 
     trades_data = api_get("/api/trades?page_size=200", {})
     trades = trades_data.get("trades", []) if trades_data else []
@@ -933,7 +945,7 @@ with tab5:
     open_t = [t for t in trades if t.get("status") == "OPEN"]
 
     if not trades:
-        st.info("No trade history yet. Start the robot to begin trading.")
+        st.info("Chua co lich su giao dich. Hay bat dau robot de giao dich.")
     else:
         # Summary metrics
         h1, h2, h3, h4, h5 = st.columns(5)
@@ -947,11 +959,11 @@ with tab5:
         avg_win = gross_win / len(wins) if wins else 0.0
         avg_loss = gross_loss / len(losses) if losses else 0.0
 
-        h1.metric("Total P&L", f"${total_pnl_hist:,.2f}")
-        h2.metric("Win Rate", f"{win_rate_hist:.1f}%")
-        h3.metric("Profit Factor", f"{pf:.2f}")
-        h4.metric("Avg Win", f"${avg_win:.2f}")
-        h5.metric("Avg Loss", f"-${avg_loss:.2f}")
+        h1.metric("Tong Lai/Lo", f"${total_pnl_hist:,.2f}")
+        h2.metric("Ty le thang", f"{win_rate_hist:.1f}%")
+        h3.metric("He so loi nhuan", f"{pf:.2f}")
+        h4.metric("Loi nhuan TB", f"${avg_win:.2f}")
+        h5.metric("Thua lo TB", f"-${avg_loss:.2f}")
 
         st.markdown("---")
 
@@ -970,25 +982,25 @@ with tab5:
                 fig_eq.add_trace(go.Bar(
                     x=df_hist["open_time"],
                     y=df_hist["pnl"],
-                    name="Trade P&L",
+                    name="Lai/Lo moi lenh",
                     marker_color=bar_colors,
                 ))
                 fig_eq.add_trace(go.Scatter(
                     x=df_hist["open_time"],
                     y=df_hist["cum_pnl"],
-                    name="Cumulative P&L",
+                    name="Lai/Lo luy ke",
                     line=dict(color="#40c4ff", width=2),
                     yaxis="y2",
                 ))
                 fig_eq.update_layout(
-                    title="Trade P&L + Equity Curve",
+                    title="Lai/Lo tung lenh + duong cong von",
                     height=350,
                     paper_bgcolor="#0e1117",
                     plot_bgcolor="#0e1117",
                     font=dict(color="#fafafa"),
                     xaxis=dict(gridcolor="#1e2130"),
-                    yaxis=dict(gridcolor="#1e2130", title="Per-Trade P&L"),
-                    yaxis2=dict(overlaying="y", side="right", gridcolor="#1e2130", title="Cumulative"),
+                    yaxis=dict(gridcolor="#1e2130", title="Lai/Lo moi lenh"),
+                    yaxis2=dict(overlaying="y", side="right", gridcolor="#1e2130", title="Luy ke"),
                     legend=dict(bgcolor="rgba(30,33,48,0.8)"),
                 )
                 st.plotly_chart(fig_eq, use_container_width=True)
@@ -1006,13 +1018,13 @@ with tab5:
                     fillcolor="rgba(255,82,82,0.2)",
                 ))
                 fig_dd.update_layout(
-                    title="Drawdown Chart",
+                    title="Bieu do drawdown",
                     height=200,
                     paper_bgcolor="#0e1117",
                     plot_bgcolor="#0e1117",
                     font=dict(color="#fafafa"),
                     xaxis=dict(gridcolor="#1e2130"),
-                    yaxis=dict(gridcolor="#1e2130", title="DD ($)"),
+                    yaxis=dict(gridcolor="#1e2130", title="Drawdown ($)"),
                 )
                 st.plotly_chart(fig_dd, use_container_width=True)
 
@@ -1025,7 +1037,7 @@ with tab5:
                 daily_pnl.columns = ["Date", "P&L"]
                 daily_pnl["Color"] = daily_pnl["P&L"].apply(lambda x: "🟢" if x > 0 else "🔴")
 
-                st.markdown("### Daily P&L")
+                st.markdown("### Lai/Lo theo ngay")
                 st.dataframe(
                     daily_pnl.assign(**{"P&L": daily_pnl["P&L"].map(lambda x: f"${x:+.2f}")}),
                     use_container_width=True,
@@ -1042,7 +1054,7 @@ with tab5:
                     hole=0.4,
                 )])
                 fig_pie.update_layout(
-                    title="BUY vs SELL",
+                    title="MUA so voi BAN",
                     height=220,
                     paper_bgcolor="#0e1117",
                     font=dict(color="#fafafa"),
@@ -1050,7 +1062,7 @@ with tab5:
                 st.plotly_chart(fig_pie, use_container_width=True)
 
         # Full trade table
-        st.markdown("### All Closed Trades")
+        st.markdown("### Tat ca lenh da dong")
         if closed:
             df_table = pd.DataFrame(closed)
             display_cols = ["trade_id", "symbol", "direction", "lot_size",
@@ -1069,14 +1081,14 @@ with tab5:
             st.dataframe(styled_table, use_container_width=True, hide_index=True)
 
         if open_t:
-            st.markdown("### Open Trades")
+            st.markdown("### Lenh mo")
             df_open_t = pd.DataFrame(open_t)
             st.dataframe(df_open_t, use_container_width=True, hide_index=True)
 
     # Total stats footer
     st.markdown("---")
-    st.markdown(f"*Total records: {trades_data.get('total', 0) if trades_data else 0} | "
-                f"Displayed: {len(trades)} | Last updated: {datetime.now().strftime('%H:%M:%S')}*")
+    st.markdown(f"*Tong ban ghi: {trades_data.get('total', 0) if trades_data else 0} | "
+                f"Dang hien thi: {len(trades)} | Cap nhat luc: {datetime.now().strftime('%H:%M:%S')}*")
 
 
 # ══════════════════════════════════════════════════════════════════════════ #
@@ -1084,63 +1096,63 @@ with tab5:
 # ══════════════════════════════════════════════════════════════════════════ #
 
 with tab6:
-    st.markdown("## 🤖 AI & Controls")
+    st.markdown("## 🤖 AI va dieu khien")
 
     col_ai, col_ctrl = st.columns([3, 2])
 
     with col_ai:
         # ── LLM Orchestrator ─────────────────────────────────────── #
-        st.markdown("### 🧠 LLM Orchestrator")
+        st.markdown("### 🧠 Dieu phoi LLM")
         llm_status = api_get("/api/llm/status", {})
         if llm_status:
             enabled = llm_status.get("enabled", False)
-            backend = llm_status.get("model", "Not configured")
+            backend = llm_status.get("model", "Chua cau hinh")
             rag_size = llm_status.get("vector_store_size", 0)
             last_action = llm_status.get("last_action", "IDLE")
 
             la1, la2, la3 = st.columns(3)
             la1.metric(
-                "LLM Status",
-                "✅ Active" if enabled else "⚠️ Stub Mode",
+                "Trang thai LLM",
+                "✅ Dang hoat dong" if enabled else "⚠️ Che do gia lap",
             )
-            la2.metric("Model", backend if enabled else "—")
-            la3.metric("RAG Memory", f"{rag_size} docs")
+            la2.metric("Mo hinh", backend if enabled else "—")
+            la3.metric("Bo nho RAG", f"{rag_size} tai lieu")
             if not enabled:
                 st.info(
-                    "💡 To enable LLM, set **OPENAI_API_KEY** or **GEMINI_API_KEY** "
-                    "environment variable. The robot will use rule-based decisions in the meantime."
+                    "💡 De bat LLM, hay dat bien moi truong **OPENAI_API_KEY** hoac **GEMINI_API_KEY**. "
+                    "Trong luc do robot se dung quy tac de ra quyet dinh."
                 )
-            st.caption(f"Last action: {last_action}")
+            st.caption(f"Hanh dong gan nhat: {last_action}")
         else:
-            st.warning("Could not fetch LLM status.")
+            st.warning("Khong the tai trang thai LLM.")
 
         st.markdown("---")
 
         # ── Ask LLM ──────────────────────────────────────────────── #
-        st.markdown("### 💬 Ask AI Assistant")
+        st.markdown("### 💬 Hoi tro ly AI")
         user_q = st.text_area(
-            "Your question about market / robot state:",
+            "Cau hoi cua ban ve thi truong / trang thai robot:",
             placeholder=(
-                "e.g. What is the current market regime and should I trade now? "
-                "Or: Why was the last trade rejected?"
+                "vi du: Thi truong hien tai dang o trang thai nao va co nen giao dich ngay khong? "
+                "Hoac: Vi sao lenh gan nhat bi tu choi?"
             ),
             height=100,
         )
-        if st.button("🤖 Ask AI", type="primary", disabled=not user_q.strip()):
-            with st.spinner("Thinking..."):
+        if st.button("🤖 Hoi AI", type="primary", disabled=not user_q.strip()):
+            with st.spinner("Dang suy nghi..."):
                 resp = api_post("/api/llm/ask", {"prompt": user_q})
             if resp:
-                st.markdown("**AI Answer:**")
-                st.markdown(f"> {resp.get('answer', 'No answer')}")
-                st.caption(f"Backend: {resp.get('backend', 'NONE')}")
+                st.markdown("**Tra loi cua AI:**")
+                st.markdown(f"> {resp.get('answer', 'Khong co cau tra loi')}")
+                st.caption(f"Backend: {resp.get('backend', 'KHONG_CO')}")
             else:
-                st.error("LLM not responding. Check OPENAI_API_KEY / GEMINI_API_KEY.")
+                st.error("LLM khong phan hoi. Kiem tra OPENAI_API_KEY / GEMINI_API_KEY.")
 
         # ── LLM call log ─────────────────────────────────────────── #
         if llm_status:
             call_log = llm_status.get("function_call_log", [])
             if call_log:
-                st.markdown("### 📋 Recent AI Decisions")
+                st.markdown("### 📋 Quyet dinh AI gan day")
                 for entry in reversed(call_log[-5:]):
                     ts = datetime.fromtimestamp(entry.get("ts", 0)).strftime("%H:%M:%S")
                     st.markdown(
@@ -1151,7 +1163,7 @@ with tab6:
 
     with col_ctrl:
         # ── Daily Lock Controls ───────────────────────────────────── #
-        st.markdown("### 🔒 Daily Lock Controls")
+        st.markdown("### 🔒 Dieu khien khoa ngay")
         lock_info = api_get("/api/risk/daily_lock", {})
         if lock_info:
             locked   = lock_info.get("locked", False)
@@ -1162,33 +1174,33 @@ with tab6:
             dlimit   = lock_info.get("daily_loss_limit", 0.0)
 
             if p_lock:
-                st.success(f"🏆 Profit target reached! Daily PnL: ${dpnl:+.2f}")
+                st.success(f"🏆 Da dat muc tieu loi nhuan! Lai/Lo ngay: ${dpnl:+.2f}")
             elif l_lock:
-                st.error(f"🛑 Loss limit reached! Daily PnL: ${dpnl:+.2f}")
+                st.error(f"🛑 Da cham gioi han lo! Lai/Lo ngay: ${dpnl:+.2f}")
             else:
-                st.info(f"Daily PnL: ${dpnl:+.2f}")
+                st.info(f"Lai/Lo ngay: ${dpnl:+.2f}")
                 if dtarget > 0:
                     prog = min(max(dpnl / dtarget, 0), 1)
-                    st.progress(prog, text=f"Profit target: {prog:.0%} (${dtarget:.2f})")
+                    st.progress(prog, text=f"Muc tieu loi nhuan: {prog:.0%} (${dtarget:.2f})")
                 if dlimit > 0:
                     loss_prog = min(max(-dpnl / dlimit, 0), 1)
                     if loss_prog > 0:
-                        st.progress(loss_prog, text=f"Loss used: {loss_prog:.0%} (${dlimit:.2f})")
+                        st.progress(loss_prog, text=f"Muc lo da dung: {loss_prog:.0%} (${dlimit:.2f})")
 
             if locked:
                 lock_reason = lock_info.get("lock_reason", "")
                 if lock_reason:
-                    st.markdown(f"**Lock reason:** _{lock_reason}_")
-                if st.button("🔓 Reset Daily Lock & Resume", type="primary", use_container_width=True):
+                    st.markdown(f"**Ly do khoa:** _{lock_reason}_")
+                if st.button("🔓 Dat lai khoa ngay va tiep tuc", type="primary", use_container_width=True):
                     result = api_post("/api/robot/reset_daily_lock")
                     if result:
-                        st.success("✅ Daily lock reset. You can now restart the robot.")
+                        st.success("✅ Da dat lai khoa ngay. Ban co the khoi dong lai robot.")
                         st.rerun()
 
         st.markdown("---")
 
         # ── Candle Library Status ─────────────────────────────────── #
-        st.markdown("### 📚 Candle Library")
+        st.markdown("### 📚 Thu vien nen")
         cl_status = api_get("/api/candle_library/status", {})
         if cl_status:
             total   = cl_status.get("total_candles", 0)
@@ -1197,52 +1209,62 @@ with tab6:
             rt      = cl_status.get("realtime_enabled", False)
 
             clc1, clc2 = st.columns(2)
-            clc1.metric("Candles Stored", f"{total:,}")
-            clc2.metric("Capacity", f"{cap:,}")
+            clc1.metric("So nen da luu", f"{total:,}")
+            clc2.metric("Suc chua", f"{cap:,}")
             pct = total / cap if cap > 0 else 0
-            st.progress(pct, text=f"Library fill: {pct:.0%}")
+            st.progress(pct, text=f"Muc day thu vien: {pct:.0%}")
             if last_ts > 0:
                 st.caption(
-                    f"Last update: {datetime.fromtimestamp(last_ts).strftime('%Y-%m-%d %H:%M:%S')} | "
-                    f"Realtime: {'✅' if rt else '❌'}"
+                    f"Cap nhat cuoi: {datetime.fromtimestamp(last_ts).strftime('%Y-%m-%d %H:%M:%S')} | "
+                    f"Thoi gian thuc: {'✅' if rt else '❌'}"
                 )
             if total < 100:
-                st.info("📡 Building candle library... robot must run to collect data.")
+                st.info("📡 Dang xay dung thu vien nen... robot can chay de thu thap du lieu.")
         else:
-            st.warning("Candle library status unavailable.")
+            st.warning("Khong co trang thai thu vien nen.")
 
         st.markdown("---")
 
         # ── Capital Profile ───────────────────────────────────────── #
-        st.markdown("### 💼 Capital Profile")
+        st.markdown("### 💼 Ho so von")
         profile_info = api_get("/api/capital/profile", {})
         if profile_info:
-            st.metric("Active Profile", profile_info.get("profile", "?"))
+            st.metric("Ho so dang ap dung", profile_info.get("profile", "?"))
             pi1, pi2 = st.columns(2)
-            pi1.metric("Lot Mode", profile_info.get("lot_mode", ""))
-            pi2.metric("Lot Value", f"{profile_info.get('lot_value', 0):.3f}")
+            pi1.metric("Che do lot", profile_info.get("lot_mode", ""))
+            pi2.metric("Gia tri lot", f"{profile_info.get('lot_value', 0):.3f}")
             pi3, pi4 = st.columns(2)
-            pi3.metric("Max Lot", f"{profile_info.get('max_lot', 0):.2f}")
-            pi4.metric("Max Daily DD", f"{profile_info.get('max_daily_dd', 0):.1f}%")
+            pi3.metric("Lot toi da", f"{profile_info.get('max_lot', 0):.2f}")
+            pi4.metric("DD ngay toi da", f"{profile_info.get('max_daily_dd', 0):.1f}%")
             st.caption(profile_info.get("description", ""))
         else:
-            st.warning("Capital profile unavailable.")
+            st.warning("Khong co thong tin ho so von.")
 
         st.markdown("---")
 
         # ── Wave Direction Filter ─────────────────────────────────── #
-        st.markdown("### 🌊 Wave Filter (Quick Change)")
+        st.markdown("### 🌊 Bo loc song (doi nhanh)")
         current_settings = api_get("/api/settings", {})
         wf = current_settings.get("wave_direction_filter", "BOTH")
         wf_emoji = {"BOTH": "🔄", "BUY_ONLY": "📈", "SELL_ONLY": "📉"}.get(wf, "?")
-        st.metric("Current Filter", f"{wf_emoji} {wf}")
+        wf_label = {
+            "BOTH": "Ca hai huong",
+            "BUY_ONLY": "Chi MUA",
+            "SELL_ONLY": "Chi BAN",
+        }.get(wf, wf)
+        st.metric("Bo loc hien tai", f"{wf_emoji} {wf_label}")
         wf_options = ["BOTH", "BUY_ONLY", "SELL_ONLY"]
-        new_wf = st.radio("Change to:", wf_options,
+        new_wf = st.radio("Doi sang:", wf_options,
                           index=wf_options.index(wf) if wf in wf_options else 0,
                           horizontal=True,
+                          format_func=lambda x: {
+                              "BOTH": "Ca hai huong",
+                              "BUY_ONLY": "Chi MUA",
+                              "SELL_ONLY": "Chi BAN",
+                          }.get(x, x),
                           label_visibility="collapsed")
         if new_wf != wf:
-            if st.button(f"Apply {new_wf}", use_container_width=True):
+            if st.button("Ap dung bo loc moi", use_container_width=True):
                 # Note: This sends the full current settings with the wave filter
                 # updated. For production use, a dedicated PATCH endpoint would be
                 # preferable. For now, the full settings round-trip is safe since
@@ -1251,5 +1273,5 @@ with tab6:
                 updated["wave_direction_filter"] = new_wf
                 result = api_post("/api/settings", updated)
                 if result:
-                    st.success(f"✅ Wave filter updated to {new_wf}")
+                    st.success("✅ Da cap nhat bo loc song.")
                     st.rerun()

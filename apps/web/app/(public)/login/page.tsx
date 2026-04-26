@@ -18,32 +18,32 @@ export default function LoginPage() {
       await login(email, password);
       router.push('/dashboard');
     } catch {
-      setError('Invalid email or password');
+      setError('Email hoặc mật khẩu không đúng');
     }
   };
 
   return (
     <div className="min-h-screen bg-surface flex items-center justify-center">
       <div className="bg-surface-muted p-8 rounded-xl w-full max-w-md">
-        <h2 className="text-2xl font-bold text-white mb-6">Sign In</h2>
+        <h2 className="text-2xl font-bold text-white mb-6">Đăng nhập</h2>
         {error && <p className="text-red-400 mb-4">{error}</p>}
         <form onSubmit={handleSubmit} className="space-y-4">
           <input
             type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-            placeholder="Email" required
+            placeholder="Địa chỉ email" required
             className="w-full p-3 rounded-lg bg-surface text-white border border-gray-600 focus:border-brand outline-none"
           />
           <input
             type="password" value={password} onChange={(e) => setPassword(e.target.value)}
-            placeholder="Password" required
+            placeholder="Mật khẩu" required
             className="w-full p-3 rounded-lg bg-surface text-white border border-gray-600 focus:border-brand outline-none"
           />
           <button type="submit" className="w-full p-3 bg-brand text-white rounded-lg font-semibold hover:bg-brand-dark">
-            Sign In
+            Đăng nhập
           </button>
         </form>
         <p className="text-gray-400 mt-4 text-center">
-          No account? <Link href="/register" className="text-brand">Register</Link>
+          Chưa có tài khoản? <Link href="/register" className="text-brand">Đăng ký</Link>
         </p>
       </div>
     </div>

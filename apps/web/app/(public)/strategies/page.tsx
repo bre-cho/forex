@@ -26,7 +26,7 @@ async function StrategiesList() {
   if (strategies.length === 0) {
     return (
       <div className="bg-surface-muted p-8 rounded-xl text-center text-gray-400">
-        No public strategies yet. Check back soon.
+        Chưa có chiến lược công khai. Vui lòng quay lại sau.
       </div>
     );
   }
@@ -41,9 +41,9 @@ async function StrategiesList() {
         >
           <h3 className="text-lg font-bold text-brand">{s.name}</h3>
           <p className="text-gray-400 mt-2 text-sm line-clamp-3">
-            {s.description || 'No description available.'}
+            {s.description || 'Chưa có mô tả.'}
           </p>
-          <p className="text-xs text-gray-600 mt-4">ID: {s.id}</p>
+          <p className="text-xs text-gray-600 mt-4">Mã: {s.id}</p>
         </a>
       ))}
     </div>
@@ -53,9 +53,9 @@ async function StrategiesList() {
 export default function StrategiesPage() {
   return (
     <div className="min-h-screen bg-surface py-20 px-4">
-      <h1 className="text-4xl font-bold text-white text-center mb-4">Public Strategies</h1>
+      <h1 className="text-4xl font-bold text-white text-center mb-4">Chiến lược công khai</h1>
       <p className="text-gray-400 text-center mb-12 text-sm">
-        Strategies shared by our community. Click to view details.
+        Các chiến lược được cộng đồng chia sẻ. Nhấn để xem chi tiết.
       </p>
       <div className="max-w-5xl mx-auto">
         <Suspense

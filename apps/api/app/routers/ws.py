@@ -46,11 +46,11 @@ async def ws_bot(websocket: WebSocket, bot_instance_id: str):
     logger.info("WS connected: bot=%s", bot_instance_id)
     listen_task: asyncio.Task | None = None
     pubsub = None
-    channel = f"signals:{bot_instance_id}"
+    channels = [f"bot:{bot_instance_id}", f"signals:{bot_instance_id}"]
     try:
         redis = await get_redis()
         pubsub = redis.pubsub()
-        await pubsub.subscribe(channel)
+        await pubsub.subscribe(*channels)
         listen_task = asyncio.create_task(_listen_redis(pubsub, websocket))
         while True:
             data = await asyncio.wait_for(
@@ -74,7 +74,7 @@ async def ws_bot(websocket: WebSocket, bot_instance_id: str):
             listen_task.cancel()
         if pubsub is not None:
             try:
-                await pubsub.unsubscribe(channel)
+                await pubsub.unsubscribe(*channels)
             except Exception:
                 pass
             try:

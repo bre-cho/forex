@@ -48,6 +48,12 @@ class RuntimeRegistry:
         broker_provider: object,
         risk_config: dict,
         ai_config: Optional[dict] = None,
+        on_signal=None,
+        on_order=None,
+        on_trade=None,
+        on_trade_update=None,
+        on_snapshot=None,
+        on_event=None,
     ) -> BotRuntime:
         """Register a new BotRuntime.  Raises ValueError if one already exists."""
         async with self._lock:
@@ -59,6 +65,12 @@ class RuntimeRegistry:
                 broker_provider=broker_provider,
                 risk_config=risk_config,
                 ai_config=ai_config,
+                on_signal=on_signal,
+                on_order=on_order,
+                on_trade=on_trade,
+                on_trade_update=on_trade_update,
+                on_snapshot=on_snapshot,
+                on_event=on_event,
             )
             self._runtimes[bot_instance_id] = runtime
         logger.info(

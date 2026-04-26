@@ -3,14 +3,17 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
 const navItems = [
-  { href: '/dashboard', label: 'Dashboard' },
-  { href: '/bots', label: 'Bots' },
-  { href: '/signals', label: 'Signals' },
-  { href: '/analytics', label: 'Analytics' },
-  { href: '/broker-connections', label: 'Brokers' },
-  { href: '/billing', label: 'Billing' },
-  { href: '/notifications', label: 'Notifications' },
-  { href: '/settings', label: 'Settings' },
+  { href: '/dashboard', label: 'Tổng quan' },
+  { href: '/bots', label: 'Bot' },
+  { href: '/signals', label: 'Tín hiệu' },
+  { href: '/live-orders', label: 'Lệnh trực tiếp' },
+  { href: '/trades', label: 'Giao dịch' },
+  { href: '/runtime-control', label: 'Điều khiển runtime' },
+  { href: '/analytics', label: 'Phân tích' },
+  { href: '/broker-connections', label: 'Kết nối sàn' },
+  { href: '/billing', label: 'Thanh toán' },
+  { href: '/notifications', label: 'Thông báo' },
+  { href: '/settings', label: 'Cài đặt' },
 ];
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {

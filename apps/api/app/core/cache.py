@@ -5,19 +5,24 @@ import json
 import logging
 from typing import Any, Optional
 
-import redis.asyncio as aioredis
+try:
+    import redis.asyncio as aioredis
+except ImportError:  # pragma: no cover - fallback for minimal test environments
+    aioredis = None
 
 from .config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-_redis_client: Optional[aioredis.Redis] = None
+_redis_client: Optional[Any] = None
 
 
-async def get_redis() -> aioredis.Redis:
+async def get_redis() -> Any:
     global _redis_client
     if _redis_client is None:
+        if aioredis is None:
+            raise RuntimeError("redis package is not installed")
         _redis_client = aioredis.from_url(
             settings.redis_url,
             encoding="utf-8",

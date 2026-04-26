@@ -33,15 +33,15 @@ export default async function PerformancePage() {
 
   return (
     <div className="min-h-screen bg-surface py-20 px-4">
-      <h1 className="text-4xl font-bold text-white text-center mb-3">Performance Leaderboard</h1>
+      <h1 className="text-4xl font-bold text-white text-center mb-3">Bảng xếp hạng hiệu suất</h1>
       <p className="text-gray-400 text-center text-sm mb-12">
-        Top-performing public bots ranked by total realised PnL.
+        Các bot công khai hiệu quả nhất được xếp hạng theo tổng PnL đã chốt.
       </p>
 
       <div className="max-w-4xl mx-auto">
         {items.length === 0 ? (
           <div className="bg-surface-muted rounded-xl p-8 text-gray-400 text-center">
-            No public bots with closed trades yet. Check back soon.
+            Chưa có bot công khai nào có giao dịch đã đóng. Vui lòng quay lại sau.
           </div>
         ) : (
           <div className="bg-surface-muted rounded-xl overflow-hidden">
@@ -50,11 +50,11 @@ export default async function PerformancePage() {
                 <tr>
                   <th className="px-4 py-3">#</th>
                   <th className="px-4 py-3">Bot</th>
-                  <th className="px-4 py-3">Symbol</th>
-                  <th className="px-4 py-3">Mode</th>
-                  <th className="px-4 py-3 text-right">Trades</th>
-                  <th className="px-4 py-3 text-right">Win Rate</th>
-                  <th className="px-4 py-3 text-right">Total PnL</th>
+                  <th className="px-4 py-3">Cặp</th>
+                  <th className="px-4 py-3">Chế độ</th>
+                  <th className="px-4 py-3 text-right">Số lệnh</th>
+                  <th className="px-4 py-3 text-right">Tỷ lệ thắng</th>
+                  <th className="px-4 py-3 text-right">Tổng PnL</th>
                 </tr>
               </thead>
               <tbody>

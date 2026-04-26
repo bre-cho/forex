@@ -3,14 +3,161 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.credentials_crypto import decrypt_credentials
-from app.models import BotInstance, BotInstanceConfig, BrokerConnection
+from app.core.db import AsyncSessionLocal
+from app.events.publishers import publish_bot_event
+from app.models import (
+    BotInstance,
+    BotInstanceConfig,
+    BotRuntimeSnapshot,
+    BrokerConnection,
+    Order,
+    Signal,
+    Trade,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_upper(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value).upper()
+
+
+def _runtime_hooks(bot_id: str):
+    async def on_signal(payload: dict) -> None:
+        async with AsyncSessionLocal() as db:
+            db.add(
+                Signal(
+                    bot_instance_id=bot_id,
+                    symbol=str(payload.get("symbol", "EURUSD")),
+                    direction=_safe_upper(payload.get("direction", "HOLD"), "HOLD"),
+                    confidence=_safe_float(payload.get("confidence"), 0.0),
+                    wave_state=str(payload.get("wave_state", "")),
+                    entry_price=_safe_float(payload.get("entry_price"), 0.0),
+                    stop_loss=_safe_float(payload.get("stop_loss"), 0.0) or None,
+                    take_profit=_safe_float(payload.get("take_profit"), 0.0) or None,
+                    metadata_json=dict(payload),
+                )
+            )
+            await db.commit()
+        await _publish_bot_event_safe(bot_id, "signal_generated", payload)
+
+    async def on_order(payload: dict) -> None:
+        async with AsyncSessionLocal() as db:
+            db.add(
+                Order(
+                    bot_instance_id=bot_id,
+                    broker_order_id=str(payload.get("broker_order_id", "")),
+                    symbol=str(payload.get("symbol", "EURUSD")),
+                    side=_safe_upper(payload.get("side", "BUY"), "BUY"),
+                    order_type=str(payload.get("order_type", "market")),
+                    volume=_safe_float(payload.get("volume"), 0.0),
+                    price=_safe_float(payload.get("price"), 0.0) or None,
+                    status=str(payload.get("status", "pending")),
+                )
+            )
+            await db.commit()
+        await _publish_bot_event_safe(bot_id, "order_created", payload)
+
+    async def on_trade(payload: dict) -> None:
+        async with AsyncSessionLocal() as db:
+            db.add(
+                Trade(
+                    bot_instance_id=bot_id,
+                    broker_trade_id=str(payload.get("broker_trade_id", "")),
+                    symbol=str(payload.get("symbol", "EURUSD")),
+                    side=_safe_upper(payload.get("side", "BUY"), "BUY"),
+                    volume=_safe_float(payload.get("volume"), 0.0),
+                    entry_price=_safe_float(payload.get("entry_price"), 0.0),
+                    stop_loss=_safe_float(payload.get("stop_loss"), 0.0) or None,
+                    take_profit=_safe_float(payload.get("take_profit"), 0.0) or None,
+                    commission=_safe_float(payload.get("commission"), 0.0),
+                    status=str(payload.get("status", "open")),
+                    closed_volume=_safe_float(payload.get("closed_volume"), 0.0),
+                    remaining_volume=_safe_float(
+                        payload.get("remaining_volume"),
+                        _safe_float(payload.get("volume"), 0.0),
+                    ),
+                    opened_at=_now_utc(),
+                )
+            )
+            await db.commit()
+        await _publish_bot_event_safe(bot_id, "trade_opened", payload)
+
+    async def on_trade_update(payload: dict) -> None:
+        broker_trade_id = str(payload.get("broker_trade_id", ""))
+        if not broker_trade_id:
+            return
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Trade)
+                .where(
+                    Trade.bot_instance_id == bot_id,
+                    Trade.broker_trade_id == broker_trade_id,
+                )
+                .order_by(Trade.opened_at.desc())
+                .limit(1)
+            )
+            trade = result.scalar_one_or_none()
+            if trade is None:
+                return
+
+            status = str(payload.get("status", trade.status))
+            trade.status = status
+            if payload.get("exit_price") is not None:
+                trade.exit_price = _safe_float(payload.get("exit_price"), trade.exit_price or 0.0)
+            if payload.get("pnl") is not None:
+                trade.pnl = _safe_float(payload.get("pnl"), trade.pnl or 0.0)
+            if payload.get("closed_volume") is not None:
+                trade.closed_volume = _safe_float(payload.get("closed_volume"), trade.closed_volume)
+            if payload.get("remaining_volume") is not None:
+                trade.remaining_volume = _safe_float(payload.get("remaining_volume"), trade.remaining_volume)
+            if status == "closed":
+                trade.closed_at = _now_utc()
+            await db.commit()
+        await _publish_bot_event_safe(bot_id, f"trade_{status}", payload)
+
+    async def on_snapshot(payload: dict) -> None:
+        async with AsyncSessionLocal() as db:
+            db.add(BotRuntimeSnapshot(bot_instance_id=bot_id, snapshot=dict(payload)))
+            await db.commit()
+
+    async def on_event(event_type: str, payload: dict) -> None:
+        await _publish_bot_event_safe(bot_id, event_type, payload)
+
+    return {
+        "on_signal": on_signal,
+        "on_order": on_order,
+        "on_trade": on_trade,
+        "on_trade_update": on_trade_update,
+        "on_snapshot": on_snapshot,
+        "on_event": on_event,
+    }
+
+
+async def _publish_bot_event_safe(bot_id: str, event_type: str, payload: dict) -> None:
+    try:
+        await publish_bot_event(bot_id, event_type, payload)
+    except Exception as exc:
+        logger.warning("Bot event publish failed [%s] %s: %s", bot_id, event_type, exc)
 
 
 async def create_runtime_for_bot(
@@ -40,6 +187,7 @@ async def create_runtime_for_bot(
 
     # Load broker credentials (empty dict for paper mode)
     broker_credentials: dict = {}
+    broker_type = "paper"
     if bot.broker_connection_id:
         bc_result = await db.execute(
             select(BrokerConnection).where(
@@ -49,11 +197,12 @@ async def create_runtime_for_bot(
         bc = bc_result.scalar_one_or_none()
         if bc:
             broker_credentials = decrypt_credentials(bc.credentials_encrypted)
+            broker_type = bc.broker_type
 
     try:
         from trading_core.runtime import RuntimeFactory, RuntimeRegistry
 
-        provider_type = "ctrader" if bot.mode == "live" else "paper"
+        provider_type = "paper" if bot.mode == "paper" else broker_type
         provider = RuntimeFactory.create_provider(
             provider_type=provider_type,
             credentials=broker_credentials,
@@ -63,6 +212,8 @@ async def create_runtime_for_bot(
         if bot.mode == "live":
             await _assert_provider_usable(provider, bot.id)
 
+        hooks = _runtime_hooks(bot.id)
+
         # Use the public registry.create() API — never access _runtimes directly
         await registry.create(
             bot_instance_id=bot.id,
@@ -70,6 +221,12 @@ async def create_runtime_for_bot(
             broker_provider=provider,
             risk_config=risk_config,
             ai_config=ai_config,
+            on_signal=hooks["on_signal"],
+            on_order=hooks["on_order"],
+            on_trade=hooks["on_trade"],
+            on_trade_update=hooks["on_trade_update"],
+            on_snapshot=hooks["on_snapshot"],
+            on_event=hooks["on_event"],
         )
         logger.info("Runtime created for bot: %s (mode=%s)", bot.id, bot.mode)
 

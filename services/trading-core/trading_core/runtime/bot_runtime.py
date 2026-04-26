@@ -10,11 +10,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from .runtime_state import RuntimeState, RuntimeStatus
 
 logger = logging.getLogger(__name__)
+
+SignalHook = Callable[[Dict[str, Any]], Awaitable[None]]
+OrderHook = Callable[[Dict[str, Any]], Awaitable[None]]
+TradeHook = Callable[[Dict[str, Any]], Awaitable[None]]
+TradeUpdateHook = Callable[[Dict[str, Any]], Awaitable[None]]
+SnapshotHook = Callable[[Dict[str, Any]], Awaitable[None]]
+EventHook = Callable[[str, Dict[str, Any]], Awaitable[None]]
 
 
 class BotRuntime:
@@ -40,6 +47,12 @@ class BotRuntime:
         broker_provider: Any,
         risk_config: Dict[str, Any],
         ai_config: Optional[Dict[str, Any]] = None,
+        on_signal: Optional[SignalHook] = None,
+        on_order: Optional[OrderHook] = None,
+        on_trade: Optional[TradeHook] = None,
+        on_trade_update: Optional[TradeUpdateHook] = None,
+        on_snapshot: Optional[SnapshotHook] = None,
+        on_event: Optional[EventHook] = None,
     ) -> None:
         self.bot_instance_id = bot_instance_id
         self.strategy_config = strategy_config
@@ -50,6 +63,15 @@ class BotRuntime:
         self._engine_task: Optional[asyncio.Task] = None
         self._tick_interval: float = 5.0
         self._lifecycle_lock = asyncio.Lock()
+        self._on_signal = on_signal
+        self._on_order = on_order
+        self._on_trade = on_trade
+        self._on_trade_update = on_trade_update
+        self._on_snapshot = on_snapshot
+        self._on_event = on_event
+        self._known_trade_volumes: Dict[str, float] = {}
+        self._known_remaining_volumes: Dict[str, float] = {}
+        self._closed_trade_ids: set[str] = set()
 
         # Lazy-initialised engines (created on start)
         self._wave_detector = None
@@ -61,6 +83,8 @@ class BotRuntime:
         self._capital_manager = None
         self._llm = None
         self._auto_pilot = None
+        self._brain = None
+        self._execution_engine = None
 
         logger.info("BotRuntime created: %s", bot_instance_id)
 
@@ -77,6 +101,17 @@ class BotRuntime:
             from trading_core.engines.decision_engine import DecisionEngine
             from trading_core.engines.capital_manager import CapitalManager
             from trading_core.engines.auto_pilot import AutoPilot
+            from trading_core.engines.signal_coordinator import TradeSignal
+
+            try:
+                from execution_service.execution_engine import ExecutionEngine
+            except ImportError:
+                ExecutionEngine = None
+
+            try:
+                from ai_trading_brain.brain_runtime import ForexBrainRuntime
+            except ImportError:
+                ForexBrainRuntime = None
 
             self._wave_detector = WaveDetector()
             self._signal_coordinator = SignalCoordinator()
@@ -86,6 +121,24 @@ class BotRuntime:
             self._decision_engine = DecisionEngine()
             self._capital_manager = CapitalManager()
             self._auto_pilot = AutoPilot()
+            self._signal_coordinator.start()
+            self._signal_coordinator.set_execute_callback(self._execute_signal)
+
+            if ExecutionEngine is not None:
+                self._execution_engine = ExecutionEngine(
+                    provider=self.broker_provider,
+                    provider_name=self.bot_instance_id,
+                )
+
+            if ForexBrainRuntime is not None:
+                self._brain = ForexBrainRuntime(
+                    policy=self.ai_config.get("policy") if isinstance(self.ai_config, dict) else None,
+                    governance_config=(
+                        self.ai_config.get("governance")
+                        if isinstance(self.ai_config, dict)
+                        else None
+                    ),
+                )
 
             logger.info("Engines initialised for bot: %s", self.bot_instance_id)
         except Exception as exc:
@@ -102,6 +155,8 @@ class BotRuntime:
             self.state.status = RuntimeStatus.STARTING
             await self._ensure_provider_usable()
             self._init_engines()
+            if self._execution_engine is not None:
+                await self._execution_engine.start()
             self.state.started_at = time.time()
             self.state.status = RuntimeStatus.RUNNING
             self._engine_task = asyncio.create_task(self._run_loop())
@@ -120,6 +175,15 @@ class BotRuntime:
                 except asyncio.CancelledError:
                     pass
                 self._engine_task = None
+            if self._execution_engine is not None:
+                try:
+                    await self._execution_engine.stop()
+                except Exception as exc:
+                    logger.warning(
+                        "Execution engine stop failed for %s: %s",
+                        self.bot_instance_id,
+                        exc,
+                    )
             if hasattr(self.broker_provider, "disconnect"):
                 try:
                     await self.broker_provider.disconnect()
@@ -162,6 +226,14 @@ class BotRuntime:
                 return
             wave = self._analyse_market(df)
             signal = self._generate_signal(df, wave)
+            if signal and signal.get("direction") in {"BUY", "SELL"}:
+                await self._persist_signal(signal)
+                trade_signal = self._build_trade_signal(signal, df)
+                status = self._signal_coordinator.submit_signal(trade_signal)
+                self.state.metadata["last_submit_status"] = status
+                await self._signal_coordinator.process_all(
+                    lambda direction: self._wave_detector.can_trade(direction, wave)
+                )
             await self._manage_trades(signal)
             await self._persist_snapshot(df, wave, signal)
             await self._publish_realtime_event(wave, signal)
@@ -185,23 +257,325 @@ class BotRuntime:
         return self._wave_detector.analyse(df)
 
     def _generate_signal(self, df, wave):
-        return {"wave_state": str(getattr(wave, "main_wave", "")), "confidence": getattr(wave, "confidence", 0.0)}
+        wave_state = str(getattr(getattr(wave, "main_wave", ""), "value", getattr(wave, "main_wave", "")))
+        direction = "HOLD"
+        if wave_state == "BULL_MAIN":
+            direction = "BUY"
+        elif wave_state == "BEAR_MAIN":
+            direction = "SELL"
+
+        signal = {
+            "signal_id": f"{self.bot_instance_id}-{int(time.time() * 1000)}",
+            "symbol": getattr(self.broker_provider, "symbol", "EURUSD"),
+            "wave_state": wave_state,
+            "confidence": float(getattr(wave, "confidence", 0.0)),
+            "direction": direction,
+            "entry_price": float(df["close"].iloc[-1]),
+        }
+
+        if self._brain is not None and direction in {"BUY", "SELL"}:
+            context = {
+                "symbol": signal["symbol"],
+                "account_equity": self.state.equity,
+                "open_positions": self.state.open_trades,
+            }
+            try:
+                decision = self._brain.decide(signal, context)
+                action = str(getattr(decision, "action", "HOLD")).upper()
+                signal["brain_action"] = action
+                signal["brain_reason"] = str(getattr(decision, "reason", ""))
+                if action in {"BLOCK", "HOLD"}:
+                    signal["direction"] = "HOLD"
+                elif action in {"BUY", "SELL"}:
+                    signal["direction"] = action
+            except Exception as exc:
+                logger.warning("Brain decision failed [%s]: %s", self.bot_instance_id, exc)
+
+        return signal
+
+    def _build_trade_signal(self, signal: Dict[str, Any], df):
+        from trading_core.engines.signal_coordinator import TradeSignal
+
+        entry_price = float(signal.get("entry_price") or df["close"].iloc[-1])
+        atr = float((df["high"].tail(14) - df["low"].tail(14)).mean() or 0.0)
+        if atr <= 0:
+            atr = entry_price * 0.001
+
+        direction = str(signal.get("direction") or "HOLD").upper()
+        lot_size = float(self.risk_config.get("lot_size", 0.01)) if isinstance(self.risk_config, dict) else 0.01
+        rr = float(self.strategy_config.get("rr", 2.0)) if isinstance(self.strategy_config, dict) else 2.0
+        if direction == "BUY":
+            sl = entry_price - atr
+            tp = entry_price + atr * rr
+        else:
+            sl = entry_price + atr
+            tp = entry_price - atr * rr
+
+        return TradeSignal(
+            signal_id=str(signal.get("signal_id")),
+            symbol=str(signal.get("symbol", "EURUSD")),
+            direction=direction,
+            entry_price=entry_price,
+            sl=float(sl),
+            tp=float(tp),
+            lot_size=max(0.01, lot_size),
+            entry_mode="runtime_auto",
+            priority=5,
+            meta={"wave_state": signal.get("wave_state", "")},
+        )
+
+    async def _persist_signal(self, signal: Dict[str, Any]) -> None:
+        self.state.metadata["last_signal"] = signal
+        if self._on_signal:
+            await self._safe_hook(self._on_signal(signal), "on_signal")
+
+    async def _execute_signal(self, signal) -> None:
+        if self._execution_engine is None:
+            logger.warning("Execution engine unavailable for %s", self.bot_instance_id)
+            return
+
+        try:
+            from execution_service.providers.base import OrderRequest
+        except ImportError as exc:
+            logger.warning("OrderRequest import failed: %s", exc)
+            return
+
+        request = OrderRequest(
+            symbol=signal.symbol,
+            side=signal.direction.lower(),
+            volume=float(signal.lot_size),
+            order_type="market",
+            price=float(signal.entry_price),
+            stop_loss=float(signal.sl),
+            take_profit=float(signal.tp),
+            comment=str(signal.signal_id),
+        )
+
+        result = await self._execution_engine.place_order(request)
+        order_payload = {
+            "bot_instance_id": self.bot_instance_id,
+            "signal_id": signal.signal_id,
+            "broker_order_id": result.order_id,
+            "symbol": result.symbol,
+            "side": result.side.upper(),
+            "order_type": request.order_type,
+            "volume": result.volume,
+            "price": result.fill_price,
+            "status": "filled" if result.success else "rejected",
+            "error_message": result.error_message,
+        }
+        self.state.metadata["last_order"] = order_payload
+        if self._on_order:
+            await self._safe_hook(self._on_order(order_payload), "on_order")
+
+        if not result.success:
+            self.state.error_message = result.error_message
+            await self._emit_event("order_rejected", order_payload)
+            return
+
+        self.state.total_trades += 1
+        trade_payload = {
+            "bot_instance_id": self.bot_instance_id,
+            "broker_trade_id": result.order_id,
+            "symbol": result.symbol,
+            "side": result.side.upper(),
+            "volume": result.volume,
+            "entry_price": result.fill_price,
+            "stop_loss": request.stop_loss,
+            "take_profit": request.take_profit,
+            "commission": result.commission,
+            "status": "open",
+            "closed_volume": 0.0,
+            "remaining_volume": result.volume,
+        }
+        self.state.metadata["last_trade"] = trade_payload
+        self._known_trade_volumes[result.order_id] = float(result.volume)
+        self._known_remaining_volumes[result.order_id] = float(result.volume)
+        if self._on_trade:
+            await self._safe_hook(self._on_trade(trade_payload), "on_trade")
+        await self._emit_event("order_filled", order_payload)
+        await self._emit_event("trade_opened", trade_payload)
 
     async def _manage_trades(self, signal: Dict[str, Any]) -> None:
         self.state.metadata["last_signal"] = signal
+        if self._execution_engine is not None:
+            try:
+                positions = await self._execution_engine.get_open_positions()
+                self.state.open_trades = len(positions)
+                account_info = self._execution_engine.account_info
+                if account_info:
+                    self.state.balance = float(account_info.get("balance", self.state.balance))
+                    self.state.equity = float(account_info.get("equity", self.state.equity))
+                await self._sync_trade_lifecycle(positions)
+            except Exception as exc:
+                logger.warning("Trade management sync failed [%s]: %s", self.bot_instance_id, exc)
+
+    async def close_position(self, position_id: str) -> Dict[str, Any]:
+        if self._execution_engine is None:
+            raise RuntimeError("Execution engine unavailable")
+        result = await self._execution_engine.close_position(position_id)
+        if not result.success:
+            raise RuntimeError(result.error_message or "Close position failed")
+
+        original_volume = self._known_trade_volumes.get(position_id, float(result.volume))
+        close_payload = {
+            "bot_instance_id": self.bot_instance_id,
+            "broker_trade_id": position_id,
+            "symbol": result.symbol,
+            "status": "closed",
+            "exit_price": float(result.fill_price),
+            "pnl": None,
+            "closed_volume": float(result.volume),
+            "remaining_volume": max(0.0, original_volume - float(result.volume)),
+        }
+        self._known_remaining_volumes[position_id] = close_payload["remaining_volume"]
+        self._closed_trade_ids.add(position_id)
+        if self._on_trade_update:
+            await self._safe_hook(self._on_trade_update(close_payload), "on_trade_update")
+        await self._emit_event("trade_closed", close_payload)
+        return close_payload
+
+    async def submit_manual_signal(
+        self,
+        direction: str = "BUY",
+        confidence: float = 0.95,
+    ) -> Dict[str, Any]:
+        df = await self._fetch_market_data()
+        if df is None or df.empty:
+            raise RuntimeError("No market data available")
+
+        wave = self._analyse_market(df)
+        signal = {
+            "signal_id": f"manual-{self.bot_instance_id}-{int(time.time() * 1000)}",
+            "symbol": getattr(self.broker_provider, "symbol", "EURUSD"),
+            "wave_state": str(getattr(getattr(wave, "main_wave", ""), "value", "")),
+            "confidence": float(confidence),
+            "direction": str(direction).upper(),
+            "entry_price": float(df["close"].iloc[-1]),
+        }
+        if signal["direction"] not in {"BUY", "SELL"}:
+            raise RuntimeError("direction must be BUY or SELL")
+
+        await self._persist_signal(signal)
+        trade_signal = self._build_trade_signal(signal, df)
+        status = self._signal_coordinator.submit_signal(trade_signal)
+        await self._signal_coordinator.process_all(lambda _d: True)
+        self.state.metadata["last_submit_status"] = status
+        return signal
+
+    async def _sync_trade_lifecycle(self, positions: list[dict]) -> None:
+        open_map: Dict[str, dict] = {}
+        for pos in positions:
+            pid = self._extract_position_id(pos)
+            if not pid:
+                continue
+            open_map[pid] = pos
+
+        for pid, pos in open_map.items():
+            current_volume = self._extract_position_volume(pos)
+            self._known_remaining_volumes.setdefault(pid, current_volume)
+            if pid not in self._known_trade_volumes:
+                self._known_trade_volumes[pid] = current_volume
+            original_volume = self._known_trade_volumes.get(pid, current_volume)
+            previous_remaining = self._known_remaining_volumes.get(pid, original_volume)
+            if current_volume < previous_remaining and current_volume > 0:
+                update_payload = {
+                    "bot_instance_id": self.bot_instance_id,
+                    "broker_trade_id": pid,
+                    "status": "partial",
+                    "closed_volume": max(0.0, original_volume - current_volume),
+                    "remaining_volume": current_volume,
+                }
+                self._known_remaining_volumes[pid] = current_volume
+                if self._on_trade_update:
+                    await self._safe_hook(self._on_trade_update(update_payload), "on_trade_update")
+                await self._emit_event("trade_partial", update_payload)
+
+        history: list[dict] = []
+        try:
+            history = await self._execution_engine.get_trade_history(limit=200)
+        except Exception as exc:
+            logger.debug("History sync skipped [%s]: %s", self.bot_instance_id, exc)
+
+        for item in history:
+            pid = self._extract_position_id(item)
+            if not pid or pid in self._closed_trade_ids:
+                continue
+            if pid in open_map:
+                continue
+
+            original_volume = self._known_trade_volumes.get(pid, self._extract_position_volume(item))
+            close_volume = self._extract_position_volume(item)
+            update_payload = {
+                "bot_instance_id": self.bot_instance_id,
+                "broker_trade_id": pid,
+                "symbol": str(item.get("symbol", "")),
+                "status": "closed",
+                "exit_price": self._extract_exit_price(item),
+                "pnl": self._extract_pnl(item),
+                "closed_volume": close_volume or original_volume,
+                "remaining_volume": 0.0,
+            }
+            self._closed_trade_ids.add(pid)
+            self._known_remaining_volumes[pid] = 0.0
+            if self._on_trade_update:
+                await self._safe_hook(self._on_trade_update(update_payload), "on_trade_update")
+            await self._emit_event("trade_closed", update_payload)
+
+    def _extract_position_id(self, payload: Dict[str, Any]) -> str:
+        for key in ("position_id", "trade_id", "id", "order_id", "broker_trade_id"):
+            value = payload.get(key)
+            if value is not None:
+                return str(value)
+        return ""
+
+    def _extract_position_volume(self, payload: Dict[str, Any]) -> float:
+        for key in ("remaining_volume", "volume", "qty", "size"):
+            value = payload.get(key)
+            if value is not None:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return 0.0
+        return 0.0
+
+    def _extract_exit_price(self, payload: Dict[str, Any]) -> Optional[float]:
+        for key in ("close_price", "exit_price", "fill_price", "executionPrice"):
+            value = payload.get(key)
+            if value is not None:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def _extract_pnl(self, payload: Dict[str, Any]) -> Optional[float]:
+        for key in ("pnl", "profit"):
+            value = payload.get(key)
+            if value is not None:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+        return None
 
     async def _persist_snapshot(self, df, wave, signal: Dict[str, Any]) -> None:
         self.state.metadata["last_tick_at"] = time.time()
         self.state.metadata["last_candle_close"] = float(df["close"].iloc[-1])
         self.state.metadata["last_wave_confidence"] = float(getattr(wave, "confidence", 0.0))
         self.state.metadata["last_signal"] = signal
+        snapshot = self.state.to_dict()
+        if self._on_snapshot:
+            await self._safe_hook(self._on_snapshot(snapshot), "on_snapshot")
 
     async def _publish_realtime_event(self, wave, signal: Dict[str, Any]) -> None:
-        self.state.metadata["last_event"] = {
+        payload = {
             "bot_instance_id": self.bot_instance_id,
             "wave_state": str(getattr(wave, "main_wave", "")),
             "confidence": signal.get("confidence", 0.0),
         }
+        self.state.metadata["last_event"] = payload
+        await self._emit_event("tick", payload)
 
     async def _update_broker_health(self) -> None:
         connected = bool(getattr(self.broker_provider, "is_connected", False))
@@ -261,3 +635,13 @@ class BotRuntime:
             )
             snap["wave_confidence"] = wa.confidence
         return snap
+
+    async def _emit_event(self, event_type: str, payload: Dict[str, Any]) -> None:
+        if self._on_event:
+            await self._safe_hook(self._on_event(event_type, payload), "on_event")
+
+    async def _safe_hook(self, awaitable: Awaitable[None], hook_name: str) -> None:
+        try:
+            await awaitable
+        except Exception as exc:
+            logger.warning("Hook %s failed for %s: %s", hook_name, self.bot_instance_id, exc)

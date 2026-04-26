@@ -296,6 +296,69 @@ async def get_runtime(
     return await registry.get_snapshot(bot_id)
 
 
+@router.post("/{bot_id}/tick")
+async def trigger_tick(
+    workspace_id: str,
+    bot_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("trader")),
+):
+    await _get_bot_or_404(bot_id, workspace_id, db)
+    registry = _get_registry(request)
+    if registry is None or registry.get(bot_id) is None:
+        raise HTTPException(status_code=404, detail="Runtime not found")
+    runtime = registry.get(bot_id)
+    await runtime.tick()
+    return await runtime.get_snapshot()
+
+
+@router.post("/{bot_id}/positions/{position_id}/close")
+async def close_position(
+    workspace_id: str,
+    bot_id: str,
+    position_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("trader")),
+):
+    await _get_bot_or_404(bot_id, workspace_id, db)
+    registry = _get_registry(request)
+    if registry is None or registry.get(bot_id) is None:
+        raise HTTPException(status_code=404, detail="Runtime not found")
+    runtime = registry.get(bot_id)
+    try:
+        payload = await runtime.close_position(position_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return payload
+
+
+@router.post("/{bot_id}/manual-signal")
+async def submit_manual_signal(
+    workspace_id: str,
+    bot_id: str,
+    request: Request,
+    direction: str = "BUY",
+    confidence: float = 0.95,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("trader")),
+):
+    await _get_bot_or_404(bot_id, workspace_id, db)
+    registry = _get_registry(request)
+    if registry is None or registry.get(bot_id) is None:
+        raise HTTPException(status_code=404, detail="Runtime not found")
+    runtime = registry.get(bot_id)
+    try:
+        signal = await runtime.submit_manual_signal(direction=direction, confidence=confidence)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "queued", "signal": signal}
+
+
 @router.get("/{bot_id}/snapshots", response_model=list[BotRuntimeSnapshotOut])
 async def list_snapshots(
     workspace_id: str,

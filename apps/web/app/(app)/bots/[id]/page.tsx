@@ -4,6 +4,38 @@ import { useBot, useBotRuntime, useBotActions } from '@/hooks/useBots';
 import { useBotWebSocket } from '@/hooks/useWebSocket';
 import { workspaceApi } from '@/lib/api';
 
+function toVietnameseStatus(status?: string): string {
+  const map: Record<string, string> = {
+    running: 'đang_chạy',
+    stopped: 'đã_dừng',
+    paused: 'tạm_dừng',
+    error: 'lỗi',
+    starting: 'đang_khởi_động',
+    healthy: 'ổn_định',
+    degraded: 'suy_giảm',
+    disconnected: 'mất_kết_nối',
+    connected: 'đã_kết_nối',
+    not_running: 'chưa_chạy',
+  };
+  if (!status) return 'không_rõ';
+  return map[String(status).toLowerCase()] ?? String(status);
+}
+
+function toVietnameseRuntimeKey(key: string): string {
+  const map: Record<string, string> = {
+    status: 'trạng_thái',
+    started_at: 'thời_điểm_bắt_đầu',
+    stopped_at: 'thời_điểm_dừng',
+    error_message: 'thông_báo_lỗi',
+    open_trades: 'lệnh_mở',
+    total_trades: 'tổng_lệnh',
+    balance: 'số_dư',
+    equity: 'vốn_chủ_sở_hữu',
+    metadata: 'siêu_dữ_liệu',
+  };
+  return map[key] ?? key;
+}
+
 function StatusBadge({ status }: { status: string }) {
   const colors: Record<string, string> = {
     running: 'bg-green-900 text-green-300',
@@ -17,7 +49,7 @@ function StatusBadge({ status }: { status: string }) {
         colors[status] ?? 'bg-gray-700 text-gray-300'
       }`}
     >
-      {status}
+      {toVietnameseStatus(status)}
     </span>
   );
 }
@@ -59,7 +91,7 @@ export default function BotDetailPage({ params }: { params: { id: string } }) {
       <div>
         <h1 className="text-3xl font-bold mb-6">Bot: {botId}</h1>
         <div className="bg-red-900/40 border border-red-700 rounded-xl p-4 text-red-300">
-          Bot not found or you do not have access.
+          Không tìm thấy bot hoặc bạn không có quyền truy cập.
         </div>
       </div>
     );
@@ -87,7 +119,7 @@ export default function BotDetailPage({ params }: { params: { id: string } }) {
               disabled={startBot.isPending}
               className="px-4 py-2 bg-green-700 hover:bg-green-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
             >
-              {startBot.isPending ? 'Starting…' : '▶ Start'}
+              {startBot.isPending ? 'Đang khởi động…' : '▶ Bắt đầu'}
             </button>
           ) : (
             <button
@@ -95,7 +127,7 @@ export default function BotDetailPage({ params }: { params: { id: string } }) {
               disabled={stopBot.isPending}
               className="px-4 py-2 bg-red-700 hover:bg-red-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
             >
-              {stopBot.isPending ? 'Stopping…' : '■ Stop'}
+              {stopBot.isPending ? 'Đang dừng…' : '■ Dừng'}
             </button>
           )}
         </div>
@@ -105,57 +137,57 @@ export default function BotDetailPage({ params }: { params: { id: string } }) {
       <div className="flex items-center gap-2 mb-6">
         <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400' : 'bg-gray-500'}`} />
         <span className="text-xs text-gray-400">
-          {isConnected ? 'WebSocket connected — live updates active' : 'WebSocket disconnected'}
+          {isConnected ? 'WebSocket đã kết nối — đang nhận cập nhật trực tiếp' : 'WebSocket đã ngắt kết nối'}
         </span>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Runtime status */}
         <div className="bg-surface-muted rounded-xl p-4">
-          <h3 className="text-lg font-semibold mb-3">Runtime Status</h3>
+          <h3 className="text-lg font-semibold mb-3">Trạng thái runtime</h3>
           {runtimeLoading ? (
             <div className="animate-pulse h-16 bg-gray-800 rounded" />
           ) : runtime ? (
             <dl className="grid grid-cols-2 gap-2 text-sm">
               {Object.entries(runtime as Record<string, unknown>).map(([k, v]) => (
                 <div key={k}>
-                  <dt className="text-gray-500 text-xs uppercase">{k}</dt>
-                  <dd className="text-white">{String(v)}</dd>
+                  <dt className="text-gray-500 text-xs uppercase">{toVietnameseRuntimeKey(k)}</dt>
+                  <dd className="text-white">{k === 'status' ? toVietnameseStatus(String(v)) : String(v)}</dd>
                 </div>
               ))}
             </dl>
           ) : (
-            <p className="text-gray-500 text-sm">Bot not currently running.</p>
+            <p className="text-gray-500 text-sm">Bot hiện chưa chạy.</p>
           )}
         </div>
 
         {/* Live WS data */}
         <div className="bg-surface-muted rounded-xl p-4">
-          <h3 className="text-lg font-semibold mb-3">Live Feed</h3>
+          <h3 className="text-lg font-semibold mb-3">Dữ liệu trực tiếp</h3>
           {wsData ? (
             <pre className="text-xs text-gray-300 overflow-auto max-h-40">
               {JSON.stringify(wsData, null, 2)}
             </pre>
           ) : (
             <p className="text-gray-500 text-sm">
-              {isConnected ? 'Waiting for data…' : 'Start the bot to receive live updates.'}
+              {isConnected ? 'Đang chờ dữ liệu…' : 'Hãy khởi động bot để nhận cập nhật trực tiếp.'}
             </p>
           )}
         </div>
 
         {/* Bot config */}
         <div className="bg-surface-muted rounded-xl p-4 md:col-span-2">
-          <h3 className="text-lg font-semibold mb-3">Details</h3>
+          <h3 className="text-lg font-semibold mb-3">Chi tiết</h3>
           <dl className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
             {[
               ['ID', bot.id],
-              ['Symbol', bot.symbol],
-              ['Timeframe', bot.timeframe],
-              ['Mode', bot.mode],
-              ['Status', bot.status],
-              ['Strategy', bot.strategy_id ?? '—'],
-              ['Broker', bot.broker_connection_id ?? '—'],
-              ['Created', new Date(bot.created_at).toLocaleDateString()],
+              ['Cặp giao dịch', bot.symbol],
+              ['Khung thời gian', bot.timeframe],
+              ['Chế độ', bot.mode],
+              ['Trạng thái', bot.status],
+              ['Chiến lược', bot.strategy_id ?? '—'],
+              ['Kết nối sàn', bot.broker_connection_id ?? '—'],
+              ['Ngày tạo', new Date(bot.created_at).toLocaleDateString()],
             ].map(([label, value]) => (
               <div key={label}>
                 <dt className="text-xs text-gray-500 uppercase tracking-wide">{label}</dt>

@@ -44,7 +44,7 @@ export default function DashboardPage() {
           total_trades: summary.total_trades ?? 0,
         });
       } catch (err: unknown) {
-        setError('Failed to load dashboard data.');
+        setError('Không tải được dữ liệu tổng quan.');
       } finally {
         setLoading(false);
       }
@@ -54,26 +54,26 @@ export default function DashboardPage() {
 
   const statCards = stats
     ? [
-        { label: 'Active Bots', value: stats.active_bots.toString() },
+        { label: 'Bot đang chạy', value: stats.active_bots.toString() },
         {
-          label: 'Total PnL',
+          label: 'Tổng PnL',
           value: `$${stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(2)}`,
         },
-        { label: 'Win Rate', value: `${(stats.win_rate * 100).toFixed(1)}%` },
-        { label: 'Total Trades', value: stats.total_trades.toString() },
+        { label: 'Tỷ lệ thắng', value: `${(stats.win_rate * 100).toFixed(1)}%` },
+        { label: 'Tổng giao dịch', value: stats.total_trades.toString() },
       ]
     : [
-        { label: 'Active Bots', value: '—' },
-        { label: 'Total PnL', value: '—' },
-        { label: 'Win Rate', value: '—' },
-        { label: 'Total Trades', value: '—' },
+        { label: 'Bot đang chạy', value: '—' },
+        { label: 'Tổng PnL', value: '—' },
+        { label: 'Tỷ lệ thắng', value: '—' },
+        { label: 'Tổng giao dịch', value: '—' },
       ];
 
   return (
     <div>
-      <h1 className="text-3xl font-bold mb-2">Dashboard</h1>
+      <h1 className="text-3xl font-bold mb-2">Tổng quan</h1>
       {user && (
-        <p className="text-gray-400 mb-6 text-sm">Welcome back, {user.full_name || user.email}</p>
+        <p className="text-gray-400 mb-6 text-sm">Chào mừng quay lại, {user.full_name || user.email}</p>
       )}
 
       {error && (
@@ -95,9 +95,9 @@ export default function DashboardPage() {
 
       {!loading && stats?.active_bots === 0 && (
         <div className="bg-surface-muted rounded-xl p-6 text-center">
-          <p className="text-gray-400 mb-2">No bots running yet.</p>
+          <p className="text-gray-400 mb-2">Chưa có bot nào đang chạy.</p>
           <a href="/bots" className="text-brand underline text-sm">
-            Go to Bots →
+            Đi tới Bot →
           </a>
         </div>
       )}

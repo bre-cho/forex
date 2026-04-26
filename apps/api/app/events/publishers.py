@@ -29,6 +29,8 @@ async def publish_event(channel: str, event_type: str, payload: Dict[str, Any]) 
 
 async def publish_bot_event(bot_id: str, event_type: str, payload: Dict[str, Any]) -> None:
     await publish_event(f"bot:{bot_id}", event_type, payload)
+    # Legacy compatibility for clients still subscribed to signals:<bot_id>
+    await publish_event(f"signals:{bot_id}", event_type, payload)
 
 
 async def publish_workspace_event(

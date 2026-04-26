@@ -268,6 +268,9 @@ class TradeOut(BaseModel):
     take_profit: Optional[float] = None
     pnl: Optional[float] = None
     commission: float
+    status: str
+    closed_volume: float
+    remaining_volume: float
     opened_at: datetime
     closed_at: Optional[datetime] = None
 

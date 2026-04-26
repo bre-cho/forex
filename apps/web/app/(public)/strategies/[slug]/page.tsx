@@ -11,7 +11,7 @@ interface Strategy {
 
 async function fetchStrategy(slug: string): Promise<Strategy | null> {
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-  // The public strategies list uses ID as the slug (no vanity slug yet).
+  // Danh sách chiến lược công khai hiện dùng ID làm slug.
   try {
     const listRes = await fetch(`${apiUrl}/v1/public/strategies`, {
       next: { revalidate: 60 },
@@ -39,19 +39,19 @@ export default async function StrategyDetailPage({
       <div className="max-w-3xl mx-auto">
         {/* Back link */}
         <a href="/strategies" className="text-brand text-sm hover:underline mb-6 inline-block">
-          ← Back to Strategies
+          ← Quay lại danh sách chiến lược
         </a>
 
         {/* Header */}
         <h1 className="text-4xl font-bold text-white mb-3">{strategy.name}</h1>
         <p className="text-gray-400 mb-8">
-          {strategy.description || 'No description provided.'}
+          {strategy.description || 'Chưa có mô tả.'}
         </p>
 
         {/* Config card */}
         {configEntries.length > 0 && (
           <div className="bg-surface-muted rounded-xl p-6 mb-6">
-            <h2 className="text-lg font-semibold text-white mb-4">Configuration</h2>
+            <h2 className="text-lg font-semibold text-white mb-4">Cấu hình</h2>
             <dl className="grid grid-cols-2 gap-4">
               {configEntries.map(([key, val]) => (
                 <div key={key}>
@@ -67,10 +67,10 @@ export default async function StrategyDetailPage({
 
         {/* Metadata */}
         <div className="text-xs text-gray-600">
-          <span>Strategy ID: {strategy.id}</span>
+          <span>Mã chiến lược: {strategy.id}</span>
           {strategy.created_at && (
             <span className="ml-4">
-              Published: {new Date(strategy.created_at).toLocaleDateString()}
+              Ngày công bố: {new Date(strategy.created_at).toLocaleDateString()}
             </span>
           )}
         </div>
