@@ -118,7 +118,7 @@ with st.sidebar:
         if st.button("🔓 Dat lai khoa ngay", use_container_width=True, type="secondary"):
             result = api_post("/api/robot/reset_daily_lock")
             if result:
-            st.success("Da dat lai khoa ngay! Ban co the khoi dong lai robot.")
+                st.success("Da dat lai khoa ngay! Ban co the khoi dong lai robot.")
                 st.rerun()
 
     st.markdown("---")

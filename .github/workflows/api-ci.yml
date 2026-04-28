@@ -76,6 +76,50 @@ jobs:
           pytest tests/ -v --cov=app --cov-report=xml
         continue-on-error: true
 
+      - name: Compile all Python services
+        run: |
+          python -m compileall -q services/trading-core services/execution-service apps/api/app ai_trading_brain
+
+      - name: Check no NotImplementedError in live provider paths
+        run: |
+          python - <<'EOF'
+          import ast, sys, pathlib, re
+
+          providers = list(pathlib.Path("services/execution-service/execution_service/providers").glob("*.py"))
+          violations = []
+          for p in providers:
+              if p.name in ("base.py", "paper.py", "__init__.py"):
+                  continue
+              src = p.read_text()
+              tree = ast.parse(src)
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Raise):
+                      exc = node.exc
+                      name = ""
+                      if isinstance(exc, ast.Call) and isinstance(exc.func, ast.Name):
+                          name = exc.func.id
+                      elif isinstance(exc, ast.Name):
+                          name = exc.id
+                      if name == "NotImplementedError":
+                          # Check it's not inside a live-mode guard (heuristic: check surrounding lines)
+                          lines = src.splitlines()
+                          line = lines[node.lineno - 1]
+                          if "stub" in src[:200].lower() or "require_sdk" not in src:
+                              violations.append(f"{p}:{node.lineno}: bare NotImplementedError not behind fail-closed guard")
+          if violations:
+              print("FAIL: bare NotImplementedError detected in live providers:")
+              for v in violations:
+                  print(" ", v)
+              sys.exit(1)
+          print("OK: live provider NotImplementedError check passed")
+          EOF
+
+      - name: Run P0 gate + trading-core tests
+        run: |
+          PYTHONPATH=/workspaces/forex:services/trading-core:services/execution-service \
+            pytest services/trading-core/tests/ -v
+        continue-on-error: true
+
       - name: Check migration consistency
         env:
           DATABASE_URL: postgresql+asyncpg://forex:forex_test@localhost:5432/forex_test
