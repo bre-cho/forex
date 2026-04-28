@@ -77,6 +77,7 @@ from app.routers import (
     billing,
     broker_connections,
     bots,
+    incidents,
     legacy,
     notifications,
     public,
@@ -102,6 +103,7 @@ app.include_router(billing.router)
 app.include_router(public.router)
 app.include_router(admin.router)
 app.include_router(ws.router)
+app.include_router(incidents.router)
 app.include_router(legacy.router)
 
 

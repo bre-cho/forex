@@ -51,8 +51,14 @@ class CTraderProvider(BrokerProvider):
             self._connected = True
             logger.info("CTraderProvider connected: %s", self.symbol)
         except ImportError:
-            logger.warning("trading_core not available; CTraderProvider in stub mode")
-            self._connected = True
+            if self.live:
+                # P3: live mode must fail closed — stub is not acceptable
+                raise RuntimeError(
+                    "CTraderProvider live mode requires trading_core to be installed. "
+                    "Ensure trading_core.engines.ctrader_provider is available."
+                )
+            logger.warning("trading_core not available; CTraderProvider running in stub/paper mode only")
+            self._connected = False
 
     async def disconnect(self) -> None:
         self._connected = False
@@ -138,3 +144,11 @@ class CTraderProvider(BrokerProvider):
     @property
     def is_connected(self) -> bool:
         return self._connected
+
+    @property
+    def mode(self) -> str:
+        if not self._connected:
+            return "unavailable"
+        if self._provider is None:
+            return "stub"
+        return "live" if self.live else "demo"

@@ -19,11 +19,13 @@ class PreExecutionGate:
         self.policy = policy or {}
 
     def evaluate(self, context: Dict[str, Any]) -> GateResult:
-        if self.policy.get("kill_switch") is True:
+        # kill_switch can come from context (runtime signal) or policy (static config)
+        if context.get("kill_switch") is True or self.policy.get("kill_switch") is True:
             return GateResult("BLOCK", "kill_switch_enabled")
         if context.get("runtime_mode") == "live" and not context.get("broker_connected"):
             return GateResult("BLOCK", "broker_not_connected")
-        if context.get("provider_mode") in {"stub", "degraded", "unavailable"}:
+        # stub/degraded provider only blocks in live mode
+        if context.get("runtime_mode") == "live" and context.get("provider_mode") in {"stub", "degraded", "unavailable"}:
             return GateResult("BLOCK", "provider_not_live_capable")
         if context.get("market_data_ok") is False:
             return GateResult("BLOCK", "market_data_invalid")

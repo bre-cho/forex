@@ -87,6 +87,10 @@ class BotRuntime:
         self._auto_pilot = None
         self._brain = None
         self._execution_engine = None
+        self._gate = None
+        self._consecutive_losses: int = 0
+        self._daily_profit_amount: float = 0.0
+        self._daily_loss_pct: float = 0.0
 
         logger.info("BotRuntime created: %s", bot_instance_id)
 
@@ -141,6 +145,10 @@ class BotRuntime:
                         else None
                     ),
                 )
+
+            from trading_core.runtime.pre_execution_gate import PreExecutionGate
+            gate_policy = self.risk_config.get("gate_policy", {}) if isinstance(self.risk_config, dict) else {}
+            self._gate = PreExecutionGate(policy=gate_policy)
 
             logger.info("Engines initialised for bot: %s", self.bot_instance_id)
         except Exception as exc:
@@ -266,32 +274,62 @@ class BotRuntime:
         elif wave_state == "BEAR_MAIN":
             direction = "SELL"
 
+        entry_price = float(df["close"].iloc[-1])
         signal = {
             "signal_id": f"{self.bot_instance_id}-{int(time.time() * 1000)}",
             "symbol": getattr(self.broker_provider, "symbol", "EURUSD"),
             "wave_state": wave_state,
             "confidence": float(getattr(wave, "confidence", 0.0)),
             "direction": direction,
-            "entry_price": float(df["close"].iloc[-1]),
+            "entry_price": entry_price,
         }
 
         if self._brain is not None and direction in {"BUY", "SELL"}:
-            context = {
-                "symbol": signal["symbol"],
-                "account_equity": self.state.equity,
-                "open_positions": self.state.open_trades,
-            }
+            # P1: use closed-loop run_cycle instead of bare decide()
             try:
-                decision = self._brain.decide(signal, context)
-                action = str(getattr(decision, "action", "HOLD")).upper()
+                from ai_trading_brain.brain_contracts import BrainInput, BrainAction
+                brain_input = BrainInput(
+                    symbol=str(signal["symbol"]),
+                    timeframe=getattr(self.broker_provider, "timeframe", "M5"),
+                    broker=getattr(self.broker_provider, "provider_name", "stub"),
+                    market={
+                        "close": entry_price,
+                        "wave_state": wave_state,
+                        "confidence": signal["confidence"],
+                    },
+                    account={
+                        "equity": self.state.equity,
+                    },
+                    positions=list(self.state.open_trades) if isinstance(self.state.open_trades, list) else [],
+                    signals=[signal],
+                )
+                cycle_result = self._brain.run_cycle(brain_input)
+                action = str(cycle_result.action.value if hasattr(cycle_result.action, "value") else cycle_result.action).upper()
                 signal["brain_action"] = action
-                signal["brain_reason"] = str(getattr(decision, "reason", ""))
-                if action in {"BLOCK", "HOLD"}:
+                signal["brain_cycle_id"] = cycle_result.cycle_id
+                signal["brain_reason"] = cycle_result.reason
+                signal["brain_score"] = cycle_result.final_score
+                # Carry confidence from cycle result for gate evaluation
+                if cycle_result.execution_intent is not None:
+                    signal["confidence"] = float(cycle_result.final_score)
+                if action in {"BLOCK", "SKIP", "PAUSE"}:
                     signal["direction"] = "HOLD"
-                elif action in {"BUY", "SELL"}:
-                    signal["direction"] = action
+                elif cycle_result.execution_intent is not None:
+                    intent_side = str(cycle_result.execution_intent.side).upper()
+                    if intent_side in {"BUY", "SELL"}:
+                        signal["direction"] = intent_side
+                # Persist cycle result in state for downstream (decision ledger hook)
+                self.state.metadata["last_brain_cycle"] = cycle_result.to_dict()
+                if self._on_event:
+                    asyncio.get_event_loop().call_soon(
+                        lambda: asyncio.ensure_future(
+                            self._safe_hook(
+                                self._on_event("brain_cycle", cycle_result.to_dict()), "brain_cycle"
+                            )
+                        )
+                    )
             except Exception as exc:
-                logger.warning("Brain decision failed [%s]: %s", self.bot_instance_id, exc)
+                logger.warning("Brain run_cycle failed [%s]: %s", self.bot_instance_id, exc)
 
         return signal
 
@@ -353,6 +391,57 @@ class BotRuntime:
             comment=str(signal.signal_id),
         )
 
+        # ── P0: Pre-execution gate ─────────────────────────────────────
+        if self._gate is not None:
+            entry = float(signal.entry_price)
+            sl = float(signal.sl)
+            rr = abs((float(signal.tp) - entry) / (entry - sl)) if abs(entry - sl) > 0 else 0.0
+            spread_pips = float(getattr(self.broker_provider, "spread_pips", 0.0))
+            idempotency_key = str(signal.signal_id)
+            gate_ctx = {
+                "provider_mode": str(getattr(self.broker_provider, "mode", "stub")),
+                "runtime_mode": self.runtime_mode,
+                "broker_connected": bool(getattr(self.broker_provider, "is_connected", False)),
+                "market_data_ok": self.state.metadata.get("market_data_ok", True),
+                "data_age_seconds": float(self.state.metadata.get("data_age_seconds", 0.0)),
+                "daily_profit_amount": self._daily_profit_amount,
+                "daily_loss_pct": self._daily_loss_pct,
+                "consecutive_losses": self._consecutive_losses,
+                "spread_pips": spread_pips,
+                "confidence": float(signal.meta.get("confidence", 1.0) if hasattr(signal, "meta") else 1.0),
+                "rr": rr,
+                "open_positions": int(self.state.open_trades),
+                "idempotency_exists": idempotency_key in self.state.metadata.get("placed_orders", set()),
+                "kill_switch": bool(self.state.metadata.get("kill_switch", False)),
+            }
+            gate_result = self._gate.evaluate(gate_ctx)
+            gate_event = {
+                "bot_instance_id": self.bot_instance_id,
+                "signal_id": str(signal.signal_id),
+                "gate_action": gate_result.action,
+                "gate_reason": gate_result.reason,
+                "gate_details": gate_result.details,
+            }
+            if self._on_event:
+                await self._safe_hook(self._on_event("gate_evaluated", gate_event), "gate_event")
+            if gate_result.action != "ALLOW":
+                logger.info(
+                    "Gate %s for signal %s: %s",
+                    gate_result.action,
+                    signal.signal_id,
+                    gate_result.reason,
+                )
+                if gate_result.action == "BLOCK":
+                    self._consecutive_losses += 1
+                return
+            # Register idempotency key after gate ALLOW
+            placed = self.state.metadata.get("placed_orders")
+            if not isinstance(placed, set):
+                placed = set()
+            placed.add(idempotency_key)
+            self.state.metadata["placed_orders"] = placed
+        # ── end gate ───────────────────────────────────────────────────
+
         result = await self._execution_engine.place_order(request)
         order_payload = {
             "bot_instance_id": self.bot_instance_id,
@@ -372,9 +461,11 @@ class BotRuntime:
 
         if not result.success:
             self.state.error_message = result.error_message
+            self._consecutive_losses += 1
             await self._emit_event("order_rejected", order_payload)
             return
 
+        self._consecutive_losses = 0
         self.state.total_trades += 1
         trade_payload = {
             "bot_instance_id": self.bot_instance_id,
