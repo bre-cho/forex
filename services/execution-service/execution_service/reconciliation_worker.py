@@ -25,6 +25,8 @@ class ReconciliationResult:
     mismatches: List[Dict[str, Any]] = field(default_factory=list)
     repaired: int = 0
     error: Optional[str] = None
+    account_equity: float = 0.0
+    account_balance: float = 0.0
     started_at: float = field(default_factory=time.time)
     finished_at: float = 0.0
 
@@ -41,6 +43,8 @@ class ReconciliationResult:
             "mismatches": self.mismatches,
             "repaired": self.repaired,
             "error": self.error,
+            "account_equity": self.account_equity,
+            "account_balance": self.account_balance,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "latency_ms": self.latency_ms,
@@ -111,6 +115,15 @@ class ReconciliationWorker:
         try:
             broker_positions = await self.provider.get_open_positions()
             db_trades = await self._get_db_open_trades()
+            # Broker account sync snapshot for daily-state recompute
+            account_info_fn = getattr(self.provider, "get_account_info", None)
+            if callable(account_info_fn):
+                try:
+                    info = await account_info_fn()
+                    result.account_equity = float(getattr(info, "equity", 0.0) or 0.0)
+                    result.account_balance = float(getattr(info, "balance", 0.0) or 0.0)
+                except Exception as exc:
+                    logger.warning("Reconciliation account_info failed [%s]: %s", self.bot_instance_id, exc)
 
             result.open_positions_broker = len(broker_positions)
             result.open_positions_db = len(db_trades)
@@ -164,6 +177,7 @@ class ReconciliationWorker:
                         "severity": "critical",
                         "title": f"Reconciliation mismatch persists after {self._mismatch_rounds} rounds",
                         "detail": str(result.mismatches),
+                        "escalation_action": "kill_switch",
                     }
                     try:
                         await self._on_incident(incident)

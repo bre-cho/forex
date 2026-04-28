@@ -5,9 +5,11 @@ from typing import Any, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
 from app.models import (
     BrokerOrderEvent,
+    BrokerReconciliationRun,
     DailyTradingState,
     PreExecutionGateEvent,
     TradingDecisionLedger,
@@ -44,14 +46,6 @@ class SafetyLedgerService:
         signal_id: str,
         idempotency_key: str,
     ) -> bool:
-        existing = await self.db.execute(
-            select(PreExecutionGateEvent).where(
-                PreExecutionGateEvent.bot_instance_id == bot_instance_id,
-                PreExecutionGateEvent.idempotency_key == idempotency_key,
-            )
-        )
-        if existing.scalar_one_or_none() is not None:
-            return False
         row = PreExecutionGateEvent(
             bot_instance_id=bot_instance_id,
             signal_id=signal_id,
@@ -61,8 +55,12 @@ class SafetyLedgerService:
             gate_details={},
         )
         self.db.add(row)
-        await self.db.commit()
-        return True
+        try:
+            await self.db.commit()
+            return True
+        except IntegrityError:
+            await self.db.rollback()
+            return False
 
     async def record_gate_event(self, payload: dict[str, Any]) -> PreExecutionGateEvent:
         row = PreExecutionGateEvent(
@@ -88,6 +86,42 @@ class SafetyLedgerService:
             volume=float(payload.get("volume") or 0.0),
             price=float(payload.get("price") or 0.0),
             payload=payload,
+        )
+        self.db.add(row)
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
+
+
+    async def record_reconciliation_run(self, payload: dict[str, Any]) -> BrokerReconciliationRun:
+        row = BrokerReconciliationRun(
+            bot_instance_id=str(payload.get("bot_instance_id") or ""),
+            status=str(payload.get("status") or "error"),
+            open_positions_broker=payload.get("open_positions_broker"),
+            open_positions_db=payload.get("open_positions_db"),
+            mismatches=payload.get("mismatches") or [],
+            repaired=int(payload.get("repaired") or 0),
+        )
+        self.db.add(row)
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
+
+    async def create_incident(
+        self,
+        bot_instance_id: str,
+        incident_type: str,
+        severity: str,
+        title: str,
+        detail: str = "",
+    ) -> TradingIncident:
+        row = TradingIncident(
+            bot_instance_id=bot_instance_id,
+            incident_type=incident_type,
+            severity=severity,
+            title=title,
+            detail=detail,
+            status="open",
         )
         self.db.add(row)
         await self.db.commit()

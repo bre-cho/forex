@@ -56,6 +56,10 @@ class BotRuntime:
         on_event: Optional[EventHook] = None,
         reserve_idempotency: Optional[Callable[[str], Awaitable[bool]]] = None,
         get_daily_state: Optional[Callable[[], Awaitable[Dict[str, Any] | None]]] = None,
+        get_db_open_trades: Optional[Callable[[], Awaitable[list[Dict[str, Any]]]]] = None,
+        close_db_trade: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_reconciliation_result: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        on_reconciliation_incident: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> None:
         self.bot_instance_id = bot_instance_id
         self.strategy_config = strategy_config
@@ -75,6 +79,11 @@ class BotRuntime:
         self._on_event = on_event
         self._reserve_idempotency = reserve_idempotency
         self._get_daily_state = get_daily_state
+        self._get_db_open_trades = get_db_open_trades
+        self._close_db_trade = close_db_trade
+        self._on_reconciliation_result = on_reconciliation_result
+        self._on_reconciliation_incident = on_reconciliation_incident
+        self._reconciliation_worker = None
         self._known_trade_volumes: Dict[str, float] = {}
         self._known_remaining_volumes: Dict[str, float] = {}
         self._closed_trade_ids: set[str] = set()
@@ -135,9 +144,12 @@ class BotRuntime:
             self._signal_coordinator.set_execute_callback(self._execute_signal)
 
             if ExecutionEngine is not None:
+                gate_policy = self.risk_config.get("gate_policy", {}) if isinstance(self.risk_config, dict) else {}
                 self._execution_engine = ExecutionEngine(
                     provider=self.broker_provider,
                     provider_name=self.bot_instance_id,
+                    runtime_mode=self.runtime_mode,
+                    gate_policy=gate_policy,
                 )
 
             if ForexBrainRuntime is not None:
@@ -171,6 +183,8 @@ class BotRuntime:
             await self._ensure_provider_usable()
             if self._execution_engine is not None:
                 await self._execution_engine.start()
+            if self.runtime_mode == "live":
+                await self._start_reconciliation_worker()
             self.state.started_at = time.time()
             self.state.status = RuntimeStatus.RUNNING
             self._engine_task = asyncio.create_task(self._run_loop())
@@ -189,6 +203,16 @@ class BotRuntime:
                 except asyncio.CancelledError:
                     pass
                 self._engine_task = None
+            if self._reconciliation_worker is not None:
+                try:
+                    await self._reconciliation_worker.stop()
+                except Exception as exc:
+                    logger.warning(
+                        "Reconciliation worker stop failed for %s: %s",
+                        self.bot_instance_id,
+                        exc,
+                    )
+                self._reconciliation_worker = None
             if self._execution_engine is not None:
                 try:
                     await self._execution_engine.stop()
@@ -243,11 +267,15 @@ class BotRuntime:
             if signal and signal.get("direction") in {"BUY", "SELL"}:
                 await self._persist_signal(signal)
                 trade_signal = self._build_trade_signal(signal, df)
-                status = self._signal_coordinator.submit_signal(trade_signal)
-                self.state.metadata["last_submit_status"] = status
-                await self._signal_coordinator.process_all(
-                    lambda direction: self._wave_detector.can_trade(direction, wave)
-                )
+                if self.runtime_mode == "live":
+                    # P0: single brain/execution path in live mode (no legacy queue fallback)
+                    await self._execute_signal(trade_signal)
+                else:
+                    status = self._signal_coordinator.submit_signal(trade_signal)
+                    self.state.metadata["last_submit_status"] = status
+                    await self._signal_coordinator.process_all(
+                        lambda direction: self._wave_detector.can_trade(direction, wave)
+                    )
             await self._manage_trades(signal)
             await self._persist_snapshot(df, wave, signal)
             await self._publish_realtime_event(wave, signal)
@@ -777,6 +805,43 @@ class BotRuntime:
             if self.state.status != RuntimeStatus.ERROR:
                 self.state.status = RuntimeStatus.ERROR
             raise
+
+    async def _start_reconciliation_worker(self) -> None:
+        if self._reconciliation_worker is not None:
+            return
+        if not self._get_db_open_trades or not self._close_db_trade:
+            return
+        try:
+            from execution_service.reconciliation_worker import ReconciliationWorker
+        except ImportError as exc:
+            logger.warning("ReconciliationWorker unavailable for %s: %s", self.bot_instance_id, exc)
+            return
+
+        async def _on_result(payload: Dict[str, Any]) -> None:
+            if self._on_reconciliation_result:
+                await self._safe_hook(self._on_reconciliation_result(payload), "on_reconciliation_result")
+            await self._emit_event("reconciliation_result", payload)
+
+        async def _on_incident(payload: Dict[str, Any]) -> None:
+            if self._on_reconciliation_incident:
+                await self._safe_hook(self._on_reconciliation_incident(payload), "on_reconciliation_incident")
+            # escalation: fail-closed until operator resolves
+            self.state.metadata["kill_switch"] = True
+            self.state.status = RuntimeStatus.ERROR
+            self.state.error_message = str(payload.get("title") or "reconciliation_incident")
+            await self._emit_event("reconciliation_incident", payload)
+
+        self._reconciliation_worker = ReconciliationWorker(
+            bot_instance_id=self.bot_instance_id,
+            provider=self.broker_provider,
+            get_db_open_trades=self._get_db_open_trades,
+            on_close_trade=self._close_db_trade,
+            on_result=_on_result,
+            on_incident=_on_incident,
+            interval_seconds=float(self.risk_config.get("reconciliation_interval_seconds", 10.0)) if isinstance(self.risk_config, dict) else 10.0,
+            max_mismatch_rounds=int(self.risk_config.get("reconciliation_max_mismatch_rounds", 3)) if isinstance(self.risk_config, dict) else 3,
+        )
+        await self._reconciliation_worker.start()
 
     # ── Snapshot ───────────────────────────────────────────────────────── #
 

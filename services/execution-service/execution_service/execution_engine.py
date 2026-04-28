@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from .account_sync import AccountSync
 from .order_router import OrderRouter
 from .providers.base import BrokerProvider, OrderRequest, OrderResult
+from trading_core.runtime.pre_execution_gate import PreExecutionGate
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,8 @@ class ExecutionEngine:
         provider: BrokerProvider,
         provider_name: str = "default",
         sync_interval: float = 30.0,
+        runtime_mode: str = "paper",
+        gate_policy: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._provider = provider
         self._provider_name = provider_name
@@ -31,6 +34,8 @@ class ExecutionEngine:
         self._account_sync: Optional[AccountSync] = None
         self._last_account_info: Dict[str, Any] = {}
         self._sync_interval = sync_interval
+        self._runtime_mode = str(runtime_mode or "paper").lower()
+        self._gate = PreExecutionGate(gate_policy or {})
 
     async def start(self) -> None:
         await self._provider.connect()
@@ -53,6 +58,37 @@ class ExecutionEngine:
         self._last_account_info = info
 
     async def place_order(self, request: OrderRequest) -> OrderResult:
+        # P0: Execution-layer gate to prevent bypassing runtime-only checks.
+        provider_mode = str(getattr(self._provider, "mode", "stub"))
+        connected = bool(getattr(self._provider, "is_connected", False))
+        gate_ctx = {
+            "provider_mode": provider_mode,
+            "runtime_mode": self._runtime_mode,
+            "broker_connected": connected,
+            "market_data_ok": True,
+            "data_age_seconds": 0,
+            "daily_profit_amount": 0,
+            "daily_loss_pct": 0,
+            "consecutive_losses": 0,
+            "spread_pips": 0,
+            "confidence": 1,
+            "rr": 2,
+            "open_positions": 0,
+            "idempotency_exists": False,
+            "kill_switch": False,
+        }
+        gate_result = self._gate.evaluate(gate_ctx)
+        if gate_result.action != "ALLOW":
+            return OrderResult(
+                order_id="",
+                symbol=request.symbol,
+                side=request.side,
+                volume=request.volume,
+                fill_price=float(request.price or 0.0),
+                commission=0.0,
+                success=False,
+                error_message=f"execution_gate_blocked:{gate_result.reason}",
+            )
         return await self._router.route(self._provider_name, request)
 
     async def close_position(self, position_id: str) -> OrderResult:

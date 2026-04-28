@@ -23,6 +23,7 @@ from app.models import (
 )
 from app.services.daily_trading_state import DailyTradingStateService
 from app.services.safety_ledger import SafetyLedgerService
+from app.services.live_readiness_guard import LiveReadinessGuard
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +180,73 @@ def _runtime_hooks(bot_id: str):
                 "consecutive_losses": int(state.consecutive_losses or 0),
                 "locked": bool(state.locked),
                 "lock_reason": state.lock_reason or "",
+                "starting_equity": float(state.starting_equity or 0.0),
+                "current_equity": float(state.current_equity or 0.0),
             }
+
+
+    async def get_db_open_trades() -> list[dict]:
+        async with AsyncSessionLocal() as db:
+            rows = (
+                await db.execute(
+                    select(Trade).where(
+                        Trade.bot_instance_id == bot_id,
+                        Trade.status.in_(["open", "partial"]),
+                    )
+                )
+            ).scalars().all()
+            return [
+                {
+                    "id": r.id,
+                    "broker_trade_id": r.broker_trade_id,
+                    "symbol": r.symbol,
+                    "status": r.status,
+                }
+                for r in rows
+            ]
+
+    async def close_db_trade(trade_id: str) -> None:
+        async with AsyncSessionLocal() as db:
+            row = (
+                await db.execute(
+                    select(Trade).where(Trade.id == trade_id, Trade.bot_instance_id == bot_id).limit(1)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return
+            row.status = "closed"
+            row.closed_at = _now_utc()
+            await db.commit()
+
+    async def on_reconciliation_result(payload: dict) -> None:
+        async with AsyncSessionLocal() as db:
+            ledger = SafetyLedgerService(db)
+            await ledger.record_reconciliation_run(payload)
+            equity = float(payload.get("account_equity") or 0.0)
+            if equity > 0:
+                daily = DailyTradingStateService(db)
+                state = await daily.get_or_create(bot_id)
+                if float(state.starting_equity or 0.0) <= 0:
+                    state.starting_equity = equity
+                state.current_equity = equity
+                state.daily_profit_amount = float((state.current_equity or 0.0) - (state.starting_equity or 0.0))
+                if float(state.starting_equity or 0.0) > 0:
+                    state.daily_loss_pct = max(0.0, -state.daily_profit_amount / float(state.starting_equity) * 100.0)
+                await db.commit()
+
+    async def on_reconciliation_incident(payload: dict) -> None:
+        async with AsyncSessionLocal() as db:
+            ledger = SafetyLedgerService(db)
+            await ledger.create_incident(
+                bot_instance_id=bot_id,
+                incident_type=str(payload.get("incident_type") or "reconciliation_incident"),
+                severity=str(payload.get("severity") or "critical"),
+                title=str(payload.get("title") or "Reconciliation incident"),
+                detail=str(payload.get("detail") or ""),
+            )
+            # Escalation: lock day so pre-execution gate blocks new orders.
+            daily = DailyTradingStateService(db)
+            await daily.lock_day(bot_id, "reconciliation_incident")
 
     return {
         "on_signal": on_signal,
@@ -190,6 +257,10 @@ def _runtime_hooks(bot_id: str):
         "on_event": on_event,
         "reserve_idempotency": reserve_idempotency,
         "get_daily_state": get_daily_state,
+        "get_db_open_trades": get_db_open_trades,
+        "close_db_trade": close_db_trade,
+        "on_reconciliation_result": on_reconciliation_result,
+        "on_reconciliation_incident": on_reconciliation_incident,
     }
 
 
@@ -270,6 +341,10 @@ async def create_runtime_for_bot(
             on_event=hooks["on_event"],
             reserve_idempotency=hooks["reserve_idempotency"],
             get_daily_state=hooks["get_daily_state"],
+            get_db_open_trades=hooks["get_db_open_trades"],
+            close_db_trade=hooks["close_db_trade"],
+            on_reconciliation_result=hooks["on_reconciliation_result"],
+            on_reconciliation_incident=hooks["on_reconciliation_incident"],
         )
         logger.info("Runtime created for bot: %s (mode=%s)", bot.id, bot.mode)
 
@@ -328,18 +403,9 @@ async def _register_stub(bot_instance_id: str, registry: Any) -> None:
 
 
 async def _assert_provider_usable(provider: Any, bot_id: str) -> None:
-    if hasattr(provider, "connect") and not getattr(provider, "is_connected", False):
-        await provider.connect()
-    if not getattr(provider, "is_connected", False):
-        raise RuntimeError(f"Live broker provider unavailable for bot {bot_id}")
-    health_check = getattr(provider, "health_check", None)
-    if callable(health_check):
-        details = await health_check()
-        if isinstance(details, dict):
-            status = str(details.get("status", "healthy")).lower()
-            if status in _BAD_PROVIDER_STATUSES:
-                reason = str(details.get("reason") or "provider_not_usable")
-                raise RuntimeError(f"Live broker provider unusable for bot {bot_id}: {reason}")
+    result = await LiveReadinessGuard.check_provider(provider, require_live=True)
+    if not result.ok:
+        raise RuntimeError(f"Live broker provider unusable for bot {bot_id}: {result.reason}")
 
 
 def _detect_llm_mode() -> str:

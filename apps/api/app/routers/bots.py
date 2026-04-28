@@ -9,6 +9,7 @@ from app.core.db import get_db
 from app.dependencies.auth import get_current_user
 from app.dependencies.permissions import require_workspace_role
 from app.models import BotInstance, BotInstanceConfig, BotRuntimeSnapshot, BrokerConnection, Strategy, User
+from app.services.live_readiness_guard import LiveReadinessGuard
 from app.schemas import (
     BotConfigUpdate,
     BotCreate,
@@ -222,6 +223,12 @@ async def start_bot(
         from app.services.bot_service import create_runtime_for_bot
         await create_runtime_for_bot(bot, registry, db)
     try:
+        if bot.mode == "live":
+            runtime = registry.get(bot_id)
+            provider = getattr(runtime, "broker_provider", None) if runtime else None
+            readiness = await LiveReadinessGuard.check_provider(provider, require_live=True)
+            if not readiness.ok:
+                raise RuntimeError(readiness.reason)
         await registry.start(bot_id)
         if bot.mode == "live":
             from app.services.bot_service import assert_runtime_live_guard
