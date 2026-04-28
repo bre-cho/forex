@@ -100,8 +100,11 @@ Key design decisions:
 
 ## Legacy Compatibility
 
-The existing `backend/` and `frontend/` directories are preserved unchanged.
+The existing `backend/` and `frontend/` directories are preserved for backward compatibility.
 All existing `/api/*` endpoints continue to work through the legacy router in `apps/api/app/routers/legacy.py`.
+
+To reduce logic drift between legacy and monorepo backends, CI now enforces a drift guard:
+- If a PR changes `backend/`, it must also include a related update in `apps/api/`, `services/`, `docs/adr/`, `docs/architecture/`, or `tests/`.
 
 ## Development
 
