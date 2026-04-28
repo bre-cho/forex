@@ -1,4 +1,5 @@
 'use client';
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useAuthStore } from '@/lib/auth';
 import { workspaceApi, analyticsApi, botApi } from '@/lib/api';
@@ -24,7 +25,7 @@ export default function DashboardPage() {
         const wsRes = await workspaceApi.list();
         const workspaces = wsRes.data as { id: string; name: string }[];
         if (!workspaces || workspaces.length === 0) {
-          setStats({ active_bots: 0, total_pnl: 0, win_rate: 0, open_trades: 0 });
+          setStats({ active_bots: 0, total_pnl: 0, win_rate: 0, total_trades: 0 });
           return;
         }
         const wsId = workspaces[0].id;
@@ -36,6 +37,7 @@ export default function DashboardPage() {
         const summary = summaryRes.data as {
           total_pnl: number;
           win_rate: number;
+          total_trades?: number;
         };
         setStats({
           active_bots: bots.filter((b) => b.status === 'running').length,
@@ -96,9 +98,9 @@ export default function DashboardPage() {
       {!loading && stats?.active_bots === 0 && (
         <div className="bg-surface-muted rounded-xl p-6 text-center">
           <p className="text-gray-400 mb-2">Chưa có bot nào đang chạy.</p>
-          <a href="/bots" className="text-brand underline text-sm">
+          <Link href="/bots" className="text-brand underline text-sm">
             Đi tới Bot →
-          </a>
+          </Link>
         </div>
       )}
     </div>

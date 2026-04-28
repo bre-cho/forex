@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
 interface Strategy {
@@ -27,9 +28,10 @@ async function fetchStrategy(slug: string): Promise<Strategy | null> {
 export default async function StrategyDetailPage({
   params,
 }: {
-  params: { slug: string };
+  params: Promise<{ slug: string }>;
 }) {
-  const strategy = await fetchStrategy(params.slug);
+  const { slug } = await params;
+  const strategy = await fetchStrategy(slug);
   if (!strategy) notFound();
 
   const configEntries = Object.entries(strategy.config);
@@ -38,9 +40,9 @@ export default async function StrategyDetailPage({
     <div className="min-h-screen bg-surface py-20 px-4">
       <div className="max-w-3xl mx-auto">
         {/* Back link */}
-        <a href="/strategies" className="text-brand text-sm hover:underline mb-6 inline-block">
+        <Link href="/strategies" className="text-brand text-sm hover:underline mb-6 inline-block">
           ← Quay lại danh sách chiến lược
-        </a>
+        </Link>
 
         {/* Header */}
         <h1 className="text-4xl font-bold text-white mb-3">{strategy.name}</h1>

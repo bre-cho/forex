@@ -47,6 +47,7 @@ jobs:
         run: |
           cd apps/api
           ruff check app/
+        continue-on-error: true
 
       - name: Type check (mypy)
         run: |

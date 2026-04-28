@@ -1,5 +1,6 @@
 'use client';
 import Link from 'next/link';
+import type { Route } from 'next';
 import { usePathname } from 'next/navigation';
 
 const navItems = [
@@ -25,7 +26,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         <nav className="flex flex-col gap-1">
           {navItems.map((item) => (
             <Link
-              key={item.href} href={item.href}
+              key={item.href} href={item.href as Route}
               className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
                 pathname?.startsWith(item.href)
                   ? 'bg-brand text-white'
