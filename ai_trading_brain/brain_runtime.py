@@ -1,21 +1,54 @@
 from __future__ import annotations
-from typing import Any, Dict
-from .decision_engine import DecisionInput, ForexDecisionEngine, DecisionResult
+
+from typing import Any, Dict, Optional
+
+from .brain_contracts import BrainCycleResult, BrainInput
+from .decision_engine import DecisionInput, DecisionResult, ForexDecisionEngine
+from .engine_registry import TradingEngineRegistry
+from .evolution_engine import PolicyEvolutionEngine
 from .governance import TradingBrainGovernance
 from .memory_engine import TradeMemoryEngine, TradeOutcome
-from .evolution_engine import PolicyEvolutionEngine
+from .unified_trade_pipeline import UnifiedTradePipeline
 
 
 class ForexBrainRuntime:
-    """Single facade used by BotRuntime: governance -> decision -> memory -> evolution."""
+    """
+    Production facade for the trading brain.
 
-    def __init__(self, policy: Dict[str, Any] | None = None, governance_config: Dict[str, Any] | None = None) -> None:
+    v2 upgrade:
+    - keeps backward-compatible `decide(signal, context)`
+    - adds `run_cycle(BrainInput)` as the only closed-loop trading path
+    - registers all advanced engines into one registry so they cooperate instead of running separately
+    - execution output is an intent, not a direct order, so broker adapters remain safely isolated
+    """
+
+    def __init__(
+        self,
+        policy: Dict[str, Any] | None = None,
+        governance_config: Dict[str, Any] | None = None,
+        registry: Optional[TradingEngineRegistry] = None,
+    ) -> None:
         self.decision = ForexDecisionEngine(policy)
         self.governance = TradingBrainGovernance(governance_config)
         self.memory = TradeMemoryEngine()
         self.evolution = PolicyEvolutionEngine(self.memory)
+        self.registry = registry or TradingEngineRegistry()
+        self.pipeline = UnifiedTradePipeline(
+            decision_engine=self.decision,
+            governance=self.governance,
+            memory=self.memory,
+            evolution=self.evolution,
+            registry=self.registry,
+        )
+
+    def register_engine(self, name: str, engine: Any, *, critical: bool = False) -> None:
+        self.registry.register(name, engine, critical=critical)
+
+    def run_cycle(self, item: BrainInput) -> BrainCycleResult:
+        return self.pipeline.run_cycle(item)
 
     def decide(self, signal: Dict[str, Any], context: Dict[str, Any]) -> DecisionResult:
+        """Backward-compatible single-signal decision API."""
         ok, reason = self.governance.preflight(context)
         if not ok:
             return DecisionResult(action="BLOCK", reason=reason, score=0.0, policy_snapshot=self.decision.policy.copy())
@@ -42,4 +75,14 @@ class ForexBrainRuntime:
         payload = self.evolution.evolve(self.decision.policy)
         if payload.get("changed"):
             self.decision = ForexDecisionEngine(payload["policy"])
+            self.pipeline.decision_engine = self.decision
         return payload
+
+    def health(self) -> Dict[str, Any]:
+        return {
+            "brain": "ForexBrainRuntime",
+            "mode": "closed_loop_v2",
+            "registry": self.registry.health(),
+            "memory": self.memory.summary(limit=50),
+            "policy": self.decision.policy,
+        }
