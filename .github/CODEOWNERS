@@ -1,0 +1,23 @@
+# CODEOWNERS — enforces mandatory reviews for sensitive areas.
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default: all changes require review from a core team member
+*                               @bre-cho
+
+# ── Legacy backend (backward-compat monolith) ──────────────────────────────
+# Any change here may silently diverge from the monorepo backend.
+# Requires explicit sign-off from a backend owner.
+/backend/                       @bre-cho
+
+# ── Monorepo API + services ────────────────────────────────────────────────
+/apps/api/                      @bre-cho
+/services/                      @bre-cho
+
+# ── Infrastructure & CI ───────────────────────────────────────────────────
+/.github/                       @bre-cho
+/infra/                         @bre-cho
+
+# ── Frontend apps ─────────────────────────────────────────────────────────
+/apps/web/                      @bre-cho
+/apps/admin/                    @bre-cho
+/frontend/                      @bre-cho

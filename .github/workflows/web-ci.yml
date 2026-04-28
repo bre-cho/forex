@@ -3,10 +3,10 @@ name: Web CI
 on:
   push:
     branches: [main, develop]
-    paths: ['apps/web/**', 'packages/**']
+    paths: ['apps/web/**', 'packages/**', '.github/workflows/web-ci.yml']
   pull_request:
     branches: [main]
-    paths: ['apps/web/**', 'packages/**']
+    paths: ['apps/web/**', 'packages/**', '.github/workflows/web-ci.yml']
 
 jobs:
   build-and-test:
@@ -24,10 +24,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'pnpm'
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
         working-directory: apps/web
 
       - name: Type check

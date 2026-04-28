@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
+import { useParams } from 'next/navigation';
 import { useBot, useBotRuntime, useBotActions } from '@/hooks/useBots';
 import { useBotWebSocket } from '@/hooks/useWebSocket';
 import { workspaceApi } from '@/lib/api';
@@ -54,7 +55,8 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-export default function BotDetailPage({ params }: { params: { id: string } }) {
+export default function BotDetailPage() {
+  const params = useParams<{ id: string }>();
   const botId = params.id;
   const [workspaceId, setWorkspaceId] = useState<string>('');
   const [wsLoading, setWsLoading] = useState(true);

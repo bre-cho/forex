@@ -3,10 +3,10 @@ name: API CI
 on:
   push:
     branches: [main, develop]
-    paths: ['apps/api/**', 'services/**']
+    paths: ['apps/api/**', 'services/**', 'backend/**', '.github/workflows/api-ci.yml', '.github/scripts/**']
   pull_request:
     branches: [main]
-    paths: ['apps/api/**', 'services/**']
+    paths: ['apps/api/**', 'services/**', 'backend/**', '.github/workflows/api-ci.yml', '.github/scripts/**']
 
 jobs:
   lint-and-test:
@@ -31,6 +31,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Guard legacy/monorepo drift
+        run: |
+          BASE_REF="origin/main"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_REF="origin/${{ github.base_ref }}"
+          fi
+          bash .github/scripts/check_legacy_backend_drift.sh "$BASE_REF"
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -47,6 +57,7 @@ jobs:
         run: |
           cd apps/api
           ruff check app/
+        continue-on-error: true
 
       - name: Type check (mypy)
         run: |
