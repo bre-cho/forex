@@ -46,6 +46,7 @@ class BotRuntime:
         strategy_config: Dict[str, Any],
         broker_provider: Any,
         risk_config: Dict[str, Any],
+        runtime_mode: str = "paper",
         ai_config: Optional[Dict[str, Any]] = None,
         on_signal: Optional[SignalHook] = None,
         on_order: Optional[OrderHook] = None,
@@ -58,6 +59,7 @@ class BotRuntime:
         self.strategy_config = strategy_config
         self.broker_provider = broker_provider
         self.risk_config = risk_config
+        self.runtime_mode = str(runtime_mode or "paper").lower()
         self.ai_config = ai_config or {}
         self.state = RuntimeState(bot_instance_id=bot_instance_id)
         self._engine_task: Optional[asyncio.Task] = None
@@ -596,6 +598,16 @@ class BotRuntime:
                 reason = "health_check_failed"
         self.state.metadata["broker_connected"] = connected
         self.state.metadata["broker_health"] = {"status": status, "reason": reason}
+
+        if self.runtime_mode == "live" and str(status).lower() in {
+            "auth_failed",
+            "disconnected",
+            "degraded",
+            "error",
+        }:
+            self.state.status = RuntimeStatus.ERROR
+            self.state.error_message = reason or f"Provider health: {status}"
+            raise RuntimeError(self.state.error_message)
 
     async def _ensure_provider_usable(self) -> None:
         try:

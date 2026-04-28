@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 from datetime import datetime, timezone
 
@@ -22,6 +23,9 @@ from app.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+_BAD_PROVIDER_STATUSES = {"auth_failed", "disconnected", "degraded", "error"}
+_STUB_PROVIDER_NAMES = {"paperprovider", "_asyncpaperadapter", "mt5provider", "bybitprovider"}
 
 
 def _now_utc() -> datetime:
@@ -220,6 +224,7 @@ async def create_runtime_for_bot(
             strategy_config=strategy_config,
             broker_provider=provider,
             risk_config=risk_config,
+            runtime_mode=bot.mode,
             ai_config=ai_config,
             on_signal=hooks["on_signal"],
             on_order=hooks["on_order"],
@@ -231,6 +236,10 @@ async def create_runtime_for_bot(
         logger.info("Runtime created for bot: %s (mode=%s)", bot.id, bot.mode)
 
     except ImportError:
+        if str(bot.mode).lower() == "live":
+            raise RuntimeError(
+                f"Live mode requires trading_core runtime components for bot {bot.id}"
+            )
         logger.warning("trading_core not available, creating stub runtime for bot: %s", bot.id)
         await _register_stub(bot.id, registry)
     except ValueError as exc:
@@ -290,6 +299,143 @@ async def _assert_provider_usable(provider: Any, bot_id: str) -> None:
         details = await health_check()
         if isinstance(details, dict):
             status = str(details.get("status", "healthy")).lower()
-            if status in {"auth_failed", "disconnected", "degraded", "error"}:
+            if status in _BAD_PROVIDER_STATUSES:
                 reason = str(details.get("reason") or "provider_not_usable")
                 raise RuntimeError(f"Live broker provider unusable for bot {bot_id}: {reason}")
+
+
+def _detect_llm_mode() -> str:
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    if os.environ.get("GEMINI_API_KEY"):
+        return "gemini"
+    return "stub"
+
+
+def _derive_provider_mode(
+    bot_mode: str,
+    provider_name: str,
+    provider_health_status: str,
+    runtime_mode: str,
+) -> str:
+    if runtime_mode in {"stub", "not_running"} and bot_mode == "live":
+        return "unavailable"
+    if provider_health_status in _BAD_PROVIDER_STATUSES:
+        return "degraded"
+    if provider_name in _STUB_PROVIDER_NAMES and bot_mode == "live":
+        return "stub"
+    if bot_mode == "paper":
+        return "paper"
+    if bot_mode == "live":
+        return "live"
+    return "unknown"
+
+
+async def get_runtime_readiness(bot: BotInstance, registry: Any) -> dict[str, Any]:
+    bot_mode = str(bot.mode or "paper").lower()
+    runtime = registry.get(bot.id) if registry is not None and hasattr(registry, "get") else None
+
+    runtime_mode = "not_running"
+    runtime_error: str | None = None
+    provider_name = "unknown"
+    provider_health_status = "unknown"
+    provider_health_reason = ""
+
+    if runtime is not None:
+        provider = getattr(runtime, "broker_provider", None)
+        if provider is not None:
+            provider_name = provider.__class__.__name__.lower()
+            health_check = getattr(provider, "health_check", None)
+            if callable(health_check):
+                try:
+                    details = await health_check()
+                    if isinstance(details, dict):
+                        provider_health_status = str(details.get("status", "unknown")).lower()
+                        provider_health_reason = str(details.get("reason") or "")
+                except Exception as exc:
+                    provider_health_status = "error"
+                    provider_health_reason = str(exc)
+            elif bool(getattr(provider, "is_connected", False)):
+                provider_health_status = "healthy"
+            else:
+                provider_health_status = "disconnected"
+                provider_health_reason = "provider_not_connected"
+
+        snapshot_getter = getattr(runtime, "get_snapshot", None)
+        if callable(snapshot_getter):
+            try:
+                snapshot = await snapshot_getter()
+            except Exception as exc:
+                snapshot = {"status": "error", "error_message": str(exc)}
+            runtime_mode = str(snapshot.get("status", "unknown")).lower()
+            runtime_error = snapshot.get("error_message")
+            meta = snapshot.get("metadata") if isinstance(snapshot, dict) else None
+            if isinstance(meta, dict):
+                broker_health = meta.get("broker_health")
+                if isinstance(broker_health, dict):
+                    provider_health_status = str(
+                        broker_health.get("status") or provider_health_status
+                    ).lower()
+                    provider_health_reason = str(
+                        broker_health.get("reason") or provider_health_reason
+                    )
+
+    llm_mode = _detect_llm_mode()
+    provider_mode = _derive_provider_mode(
+        bot_mode=bot_mode,
+        provider_name=provider_name,
+        provider_health_status=provider_health_status,
+        runtime_mode=runtime_mode,
+    )
+
+    hard_fail_guard_active = bot_mode == "live"
+    ready_for_live_trading = (
+        bot_mode == "live"
+        and runtime_mode == "running"
+        and provider_mode == "live"
+    )
+
+    return {
+        "bot_id": bot.id,
+        "bot_mode": bot_mode,
+        "runtime_mode": runtime_mode,
+        "runtime_error": runtime_error,
+        "provider_mode": provider_mode,
+        "provider_name": provider_name,
+        "provider_health": {
+            "status": provider_health_status,
+            "reason": provider_health_reason,
+        },
+        "llm_mode": llm_mode,
+        "hard_fail_guard_active": hard_fail_guard_active,
+        "ready_for_live_trading": ready_for_live_trading,
+    }
+
+
+async def assert_runtime_live_guard(bot: BotInstance, registry: Any) -> None:
+    if str(bot.mode).lower() != "live":
+        return
+    readiness = await get_runtime_readiness(bot, registry)
+    runtime_mode = str(readiness.get("runtime_mode", "unknown")).lower()
+    provider_mode = str(readiness.get("provider_mode", "unknown")).lower()
+
+    runtime_bad = runtime_mode in {"stub", "error", "not_running", "degraded"}
+    provider_bad = provider_mode in {"stub", "degraded", "unavailable"}
+    if not runtime_bad and not provider_bad:
+        return
+
+    if registry is not None and hasattr(registry, "stop"):
+        try:
+            await registry.stop(bot.id)
+        except Exception:
+            pass
+
+    reason = (
+        readiness.get("provider_health", {}).get("reason")
+        if isinstance(readiness.get("provider_health"), dict)
+        else ""
+    ) or readiness.get("runtime_error") or "live_guard_blocked"
+    raise RuntimeError(
+        f"Live runtime guard blocked bot {bot.id}: runtime_mode={runtime_mode}, "
+        f"provider_mode={provider_mode}, reason={reason}"
+    )

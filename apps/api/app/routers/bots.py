@@ -221,7 +221,15 @@ async def start_bot(
     if registry.get(bot_id) is None:
         from app.services.bot_service import create_runtime_for_bot
         await create_runtime_for_bot(bot, registry, db)
-    await registry.start(bot_id)
+    try:
+        await registry.start(bot_id)
+        if bot.mode == "live":
+            from app.services.bot_service import assert_runtime_live_guard
+
+            await assert_runtime_live_guard(bot, registry)
+    except RuntimeError as exc:
+        bot.status = "error"
+        raise HTTPException(status_code=503, detail=str(exc))
     bot.status = "running"
     return _lifecycle_response("running", bot_id, already_running)
 
@@ -305,13 +313,37 @@ async def trigger_tick(
     db: AsyncSession = Depends(get_db),
     _member=Depends(require_workspace_role("trader")),
 ):
-    await _get_bot_or_404(bot_id, workspace_id, db)
+    bot = await _get_bot_or_404(bot_id, workspace_id, db)
     registry = _get_registry(request)
     if registry is None or registry.get(bot_id) is None:
         raise HTTPException(status_code=404, detail="Runtime not found")
     runtime = registry.get(bot_id)
     await runtime.tick()
+    if bot.mode == "live":
+        from app.services.bot_service import assert_runtime_live_guard
+
+        try:
+            await assert_runtime_live_guard(bot, registry)
+        except RuntimeError as exc:
+            bot.status = "error"
+            raise HTTPException(status_code=503, detail=str(exc))
     return await runtime.get_snapshot()
+
+
+@router.get("/{bot_id}/readiness")
+async def get_readiness(
+    workspace_id: str,
+    bot_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("viewer")),
+):
+    bot = await _get_bot_or_404(bot_id, workspace_id, db)
+    registry = _get_registry(request)
+    from app.services.bot_service import get_runtime_readiness
+
+    return await get_runtime_readiness(bot, registry)
 
 
 @router.post("/{bot_id}/positions/{position_id}/close")

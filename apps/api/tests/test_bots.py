@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core import token_revocation
 from app.core.db import Base, get_db
-from app.routers import auth, bots, workspaces
+from app.routers import auth, bots, broker_connections, workspaces
 from app.services import bot_service
 
 
@@ -15,6 +15,10 @@ class _Runtime:
     def __init__(self) -> None:
         self.running = False
         self.paused = False
+
+    async def get_snapshot(self) -> dict:
+        status = "running" if self.running else "stopped"
+        return {"status": status, "metadata": {}}
 
 
 class _FakeRegistry:
@@ -75,6 +79,7 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
     app = FastAPI()
     app.include_router(auth.router)
     app.include_router(workspaces.router)
+    app.include_router(broker_connections.router)
     app.include_router(bots.router)
     app.state.registry = _FakeRegistry()
 
@@ -216,3 +221,163 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
             headers=user1_headers,
         )
         assert list_other_workspace.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_live_start_hard_fails_when_guard_blocks_runtime(monkeypatch: pytest.MonkeyPatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    app = FastAPI()
+    app.include_router(auth.router)
+    app.include_router(workspaces.router)
+    app.include_router(broker_connections.router)
+    app.include_router(bots.router)
+    app.state.registry = _FakeRegistry()
+
+    async def _override_get_db():
+        async with session_maker() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    async def _fake_create_runtime_for_bot(bot, registry, db):
+        registry._runtimes.setdefault(bot.id, _Runtime())
+
+    async def _force_guard_failure(bot, registry):
+        raise RuntimeError("Live runtime guard blocked")
+
+    monkeypatch.setattr(bot_service, "create_runtime_for_bot", _fake_create_runtime_for_bot)
+    monkeypatch.setattr(bot_service, "assert_runtime_live_guard", _force_guard_failure)
+
+    fake_redis = _FakeRedis()
+
+    async def _get_fake_redis():
+        return fake_redis
+
+    monkeypatch.setattr(token_revocation, "get_redis", _get_fake_redis)
+    app.dependency_overrides[get_db] = _override_get_db
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        tokens = await _register_and_login(client, "live-guard@example.com")
+        headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+        ws_resp = await client.post(
+            "/v1/workspaces",
+            headers=headers,
+            json={"name": "Live Guard", "slug": "ws-live-guard"},
+        )
+        workspace_id = ws_resp.json()["id"]
+
+        conn_resp = await client.post(
+            f"/v1/workspaces/{workspace_id}/broker-connections",
+            headers=headers,
+            json={
+                "name": "cTrader Demo",
+                "broker_type": "ctrader",
+                "credentials": {
+                    "client_id": "demo",
+                    "client_secret": "demo",
+                    "access_token": "demo",
+                    "refresh_token": "demo",
+                    "account_id": 1,
+                },
+            },
+        )
+        assert conn_resp.status_code == 201
+        broker_connection_id = conn_resp.json()["id"]
+
+        bot_resp = await client.post(
+            f"/v1/workspaces/{workspace_id}/bots",
+            headers=headers,
+            json={
+                "name": "Live Bot",
+                "symbol": "EURUSD",
+                "timeframe": "M5",
+                "mode": "live",
+                "broker_connection_id": broker_connection_id,
+            },
+        )
+        assert bot_resp.status_code == 201
+        bot_id = bot_resp.json()["id"]
+
+        start_resp = await client.post(
+            f"/v1/workspaces/{workspace_id}/bots/{bot_id}/start",
+            headers=headers,
+        )
+        assert start_resp.status_code == 503
+        assert "guard blocked" in start_resp.json()["detail"].lower()
+
+        bot_state = await client.get(
+            f"/v1/workspaces/{workspace_id}/bots/{bot_id}",
+            headers=headers,
+        )
+        assert bot_state.status_code == 200
+        assert bot_state.json()["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_bot_readiness_endpoint_returns_modes(monkeypatch: pytest.MonkeyPatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    app = FastAPI()
+    app.include_router(auth.router)
+    app.include_router(workspaces.router)
+    app.include_router(bots.router)
+    app.state.registry = _FakeRegistry()
+
+    async def _override_get_db():
+        async with session_maker() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    fake_redis = _FakeRedis()
+
+    async def _get_fake_redis():
+        return fake_redis
+
+    monkeypatch.setattr(token_revocation, "get_redis", _get_fake_redis)
+    app.dependency_overrides[get_db] = _override_get_db
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        tokens = await _register_and_login(client, "readiness@example.com")
+        headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+        ws_resp = await client.post(
+            "/v1/workspaces",
+            headers=headers,
+            json={"name": "Readiness", "slug": "ws-readiness"},
+        )
+        workspace_id = ws_resp.json()["id"]
+
+        bot_resp = await client.post(
+            f"/v1/workspaces/{workspace_id}/bots",
+            headers=headers,
+            json={"name": "Paper Bot", "symbol": "EURUSD", "timeframe": "M5", "mode": "paper"},
+        )
+        assert bot_resp.status_code == 201
+        bot_id = bot_resp.json()["id"]
+
+        readiness_resp = await client.get(
+            f"/v1/workspaces/{workspace_id}/bots/{bot_id}/readiness",
+            headers=headers,
+        )
+        assert readiness_resp.status_code == 200
+        payload = readiness_resp.json()
+        assert payload["bot_mode"] == "paper"
+        assert payload["runtime_mode"] == "not_running"
+        assert payload["provider_mode"] in {"paper", "unknown"}
+        assert payload["llm_mode"] in {"openai", "gemini", "stub"}
+        assert payload["ready_for_live_trading"] is False
