@@ -87,6 +87,11 @@ from models.schemas import (
     LLMStatusSchema,
 )
 
+try:
+    from backend.api.trading_brain_routes import build_trading_brain_router
+except Exception:  # noqa: BLE001
+    from api.trading_brain_routes import build_trading_brain_router
+
 import os
 from collections import deque as _deque
 from functools import wraps
@@ -559,6 +564,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Robot Forex API", version="1.0.0", lifespan=lifespan)
+
+app.include_router(build_trading_brain_router(app_state))
 
 app.add_middleware(
     CORSMiddleware,
