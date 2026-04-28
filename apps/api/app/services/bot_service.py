@@ -21,6 +21,8 @@ from app.models import (
     Signal,
     Trade,
 )
+from app.services.daily_trading_state import DailyTradingStateService
+from app.services.safety_ledger import SafetyLedgerService
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +147,39 @@ def _runtime_hooks(bot_id: str):
             await db.commit()
 
     async def on_event(event_type: str, payload: dict) -> None:
+        async with AsyncSessionLocal() as db:
+            ledger = SafetyLedgerService(db)
+            if event_type == "brain_cycle":
+                try:
+                    await ledger.record_brain_cycle(bot_id, dict(payload))
+                except Exception as exc:
+                    logger.warning("record_brain_cycle failed [%s]: %s", bot_id, exc)
+            elif event_type == "gate_evaluated":
+                try:
+                    await ledger.record_gate_event(dict(payload))
+                except Exception as exc:
+                    logger.warning("record_gate_event failed [%s]: %s", bot_id, exc)
         await _publish_bot_event_safe(bot_id, event_type, payload)
+
+    async def reserve_idempotency(idempotency_key: str) -> bool:
+        async with AsyncSessionLocal() as db:
+            ledger = SafetyLedgerService(db)
+            # signal_id is not always available here; key serves as signal surrogate
+            return await ledger.reserve_idempotency(bot_id, idempotency_key, idempotency_key)
+
+    async def get_daily_state() -> dict | None:
+        async with AsyncSessionLocal() as db:
+            svc = DailyTradingStateService(db)
+            state = await svc.get_or_create(bot_id)
+            if state is None:
+                return None
+            return {
+                "daily_profit_amount": float(state.daily_profit_amount or 0.0),
+                "daily_loss_pct": float(state.daily_loss_pct or 0.0),
+                "consecutive_losses": int(state.consecutive_losses or 0),
+                "locked": bool(state.locked),
+                "lock_reason": state.lock_reason or "",
+            }
 
     return {
         "on_signal": on_signal,
@@ -154,6 +188,8 @@ def _runtime_hooks(bot_id: str):
         "on_trade_update": on_trade_update,
         "on_snapshot": on_snapshot,
         "on_event": on_event,
+        "reserve_idempotency": reserve_idempotency,
+        "get_daily_state": get_daily_state,
     }
 
 
@@ -232,6 +268,8 @@ async def create_runtime_for_bot(
             on_trade_update=hooks["on_trade_update"],
             on_snapshot=hooks["on_snapshot"],
             on_event=hooks["on_event"],
+            reserve_idempotency=hooks["reserve_idempotency"],
+            get_daily_state=hooks["get_daily_state"],
         )
         logger.info("Runtime created for bot: %s (mode=%s)", bot.id, bot.mode)
 

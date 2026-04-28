@@ -46,6 +46,7 @@ class BybitProvider(BrokerProvider):
         self.mode = "demo" if testnet else "live"
         self._session: Optional[Any] = None
         self._connected = False
+        self._instrument_info: dict[str, Any] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -56,6 +57,14 @@ class BybitProvider(BrokerProvider):
             raise RuntimeError(
                 "BybitProvider requires the pybit package. Install: pip install pybit"
             )
+
+    def _normalize_qty(self, qty: float) -> float:
+        info = self._instrument_info or {}
+        lot = info.get("lotSizeFilter", {}) if isinstance(info, dict) else {}
+        min_qty = float(lot.get("minOrderQty", 0.001) or 0.001)
+        step = float(lot.get("qtyStep", min_qty) or min_qty)
+        normalized = round(round(qty / step) * step, 8)
+        return max(min_qty, normalized)
 
     async def connect(self) -> None:
         if not self.testnet:
@@ -72,6 +81,9 @@ class BybitProvider(BrokerProvider):
         resp = self._session.get_wallet_balance(accountType="UNIFIED")
         if resp.get("retCode") != 0:
             raise ConnectionError(f"Bybit connect failed: {resp.get('retMsg')}")
+        info_resp = self._session.get_instruments_info(category="linear", symbol=self.symbol)
+        if info_resp.get("retCode") == 0 and info_resp.get("result", {}).get("list"):
+            self._instrument_info = info_resp["result"]["list"][0]
         self._connected = True
         logger.info("BybitProvider connected: symbol=%s testnet=%s", self.symbol, self.testnet)
 
@@ -113,26 +125,32 @@ class BybitProvider(BrokerProvider):
 
     async def place_order(self, request: OrderRequest) -> OrderResult:
         self._require_sdk()
+        qty = self._normalize_qty(float(request.volume))
+        link_id = str(request.comment or f"{request.symbol}-{int(__import__('time').time()*1000)}")[:36]
         resp = self._session.place_order(
             category="linear",
             symbol=request.symbol,
             side="Buy" if request.side.lower() == "buy" else "Sell",
             orderType="Market",
-            qty=str(request.volume),
+            qty=str(qty),
             stopLoss=str(request.stop_loss) if request.stop_loss else None,
             takeProfit=str(request.take_profit) if request.take_profit else None,
-            orderLinkId=str(request.comment or "")[:36],
+            orderLinkId=link_id,
         )
         if resp.get("retCode") != 0:
             return OrderResult(success=False, error_message=f"Bybit order failed: {resp.get('retMsg')}")
-        order_id = resp["result"]["orderId"]
+        order_id = str(resp["result"].get("orderId", ""))
+        fill_price = request.price or 0.0
+        exec_resp = self._session.get_executions(category="linear", orderId=order_id, limit=1)
+        if exec_resp.get("retCode") == 0 and exec_resp.get("result", {}).get("list"):
+            fill_price = float(exec_resp["result"]["list"][0].get("execPrice", fill_price))
         return OrderResult(
             success=True,
-            order_id=str(order_id),
+            order_id=order_id,
             symbol=request.symbol,
             side=request.side,
-            volume=request.volume,
-            fill_price=request.price or 0.0,
+            volume=qty,
+            fill_price=fill_price,
         )
 
     async def close_position(self, position_id: str) -> OrderResult:

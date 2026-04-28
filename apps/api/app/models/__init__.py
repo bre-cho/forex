@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -15,9 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.sql import func
 
 from app.core.db import Base
 
@@ -28,9 +27,6 @@ def now_utc():
 
 def new_uuid() -> str:
     return str(uuid.uuid4())
-
-
-# ── Users ─────────────────────────────────────────────────────────────────────
 
 
 class User(Base):
@@ -51,9 +47,6 @@ class User(Base):
 
     workspaces: Mapped[list["WorkspaceMember"]] = relationship(back_populates="user")
     subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="user")
-
-
-# ── Workspaces ────────────────────────────────────────────────────────────────
 
 
 class Workspace(Base):
@@ -87,14 +80,11 @@ class WorkspaceMember(Base):
         String(36), ForeignKey("workspaces.id"), nullable=False
     )
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
-    role: Mapped[str] = mapped_column(String(50), default="viewer")  # owner|admin|trader|viewer
+    role: Mapped[str] = mapped_column(String(50), default="viewer")
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
     workspace: Mapped["Workspace"] = relationship(back_populates="members")
     user: Mapped["User"] = relationship(back_populates="workspaces")
-
-
-# ── Broker Connections ────────────────────────────────────────────────────────
 
 
 class BrokerConnection(Base):
@@ -105,7 +95,7 @@ class BrokerConnection(Base):
         String(36), ForeignKey("workspaces.id"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    broker_type: Mapped[str] = mapped_column(String(50), nullable=False)  # ctrader|paper|mt5
+    broker_type: Mapped[str] = mapped_column(String(50), nullable=False)
     credentials_encrypted: Mapped[str] = mapped_column(Text, default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(
@@ -117,9 +107,6 @@ class BrokerConnection(Base):
     )
 
     workspace: Mapped["Workspace"] = relationship(back_populates="broker_connections")
-
-
-# ── Strategies ────────────────────────────────────────────────────────────────
 
 
 class Strategy(Base):
@@ -158,9 +145,6 @@ class StrategyVersion(Base):
     strategy: Mapped["Strategy"] = relationship(back_populates="versions")
 
 
-# ── Bot Instances ─────────────────────────────────────────────────────────────
-
-
 class BotInstance(Base):
     __tablename__ = "bot_instances"
 
@@ -177,7 +161,7 @@ class BotInstance(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     symbol: Mapped[str] = mapped_column(String(20), default="EURUSD")
     timeframe: Mapped[str] = mapped_column(String(10), default="M5")
-    mode: Mapped[str] = mapped_column(String(20), default="paper")  # paper|live
+    mode: Mapped[str] = mapped_column(String(20), default="paper")
     status: Mapped[str] = mapped_column(String(20), default="stopped")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(
@@ -227,9 +211,6 @@ class BotRuntimeSnapshot(Base):
     bot_instance: Mapped["BotInstance"] = relationship(back_populates="runtime_snapshots")
 
 
-# ── Signals ───────────────────────────────────────────────────────────────────
-
-
 class Signal(Base):
     __tablename__ = "signals"
 
@@ -248,9 +229,6 @@ class Signal(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
     bot_instance: Mapped["BotInstance"] = relationship(back_populates="signals")
-
-
-# ── Orders / Trades ───────────────────────────────────────────────────────────
 
 
 class Order(Base):
@@ -301,9 +279,6 @@ class Trade(Base):
     bot_instance: Mapped["BotInstance"] = relationship(back_populates="trades")
 
 
-# ── Subscriptions ─────────────────────────────────────────────────────────────
-
-
 class Subscription(Base):
     __tablename__ = "subscriptions"
 
@@ -327,9 +302,6 @@ class Subscription(Base):
     user: Mapped["User"] = relationship(back_populates="subscriptions")
 
 
-# ── Notifications ─────────────────────────────────────────────────────────────
-
-
 class Notification(Base):
     __tablename__ = "notifications"
 
@@ -343,9 +315,6 @@ class Notification(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
-# ── Audit Logs ────────────────────────────────────────────────────────────────
-
-
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 
@@ -356,4 +325,107 @@ class AuditLog(Base):
     resource_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class TradingDecisionLedger(Base):
+    __tablename__ = "trading_decision_ledger"
+    __table_args__ = (UniqueConstraint("bot_instance_id", "signal_id", name="uq_decision_ledger_bot_signal"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    signal_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    cycle_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    brain_action: Mapped[str] = mapped_column(String(16), nullable=False)
+    brain_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    brain_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stage_decisions: Mapped[dict] = mapped_column(JSON, default=dict)
+    policy_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class PreExecutionGateEvent(Base):
+    __tablename__ = "pre_execution_gate_events"
+    __table_args__ = (UniqueConstraint("bot_instance_id", "idempotency_key", name="uq_gate_event_idempotency"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    signal_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    gate_action: Mapped[str] = mapped_column(String(16), nullable=False)
+    gate_reason: Mapped[str] = mapped_column(String(128), nullable=False)
+    gate_details: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class DailyTradingState(Base):
+    __tablename__ = "daily_trading_state"
+    __table_args__ = (UniqueConstraint("bot_instance_id", "trading_day", name="uq_daily_state_bot_day"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    trading_day: Mapped[date] = mapped_column(Date, nullable=False)
+    starting_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    daily_profit_amount: Mapped[float] = mapped_column(Float, default=0.0)
+    daily_loss_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    trades_count: Mapped[int] = mapped_column(Integer, default=0)
+    consecutive_losses: Mapped[int] = mapped_column(Integer, default=0)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    lock_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class BrokerOrderEvent(Base):
+    __tablename__ = "broker_order_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    broker_order_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    side: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class BrokerReconciliationRun(Base):
+    __tablename__ = "broker_reconciliation_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    open_positions_broker: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    open_positions_db: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mismatches: Mapped[dict] = mapped_column(JSON, default=dict)
+    repaired: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TradingIncident(Base):
+    __tablename__ = "trading_incidents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    incident_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), default="warning")
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="open")
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class PolicyVersion(Base):
+    __tablename__ = "policy_versions"
+    __table_args__ = (UniqueConstraint("bot_instance_id", "version", name="uq_policy_version_bot"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    policy_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    change_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)

@@ -55,6 +55,8 @@ class RuntimeRegistry:
         on_trade_update=None,
         on_snapshot=None,
         on_event=None,
+        reserve_idempotency=None,
+        get_daily_state=None,
     ) -> BotRuntime:
         """Register a new BotRuntime.  Raises ValueError if one already exists."""
         async with self._lock:
@@ -73,6 +75,8 @@ class RuntimeRegistry:
                 on_trade_update=on_trade_update,
                 on_snapshot=on_snapshot,
                 on_event=on_event,
+                reserve_idempotency=reserve_idempotency,
+                get_daily_state=get_daily_state,
             )
             self._runtimes[bot_instance_id] = runtime
         logger.info(

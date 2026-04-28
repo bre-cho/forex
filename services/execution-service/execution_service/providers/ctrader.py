@@ -48,6 +48,13 @@ class CTraderProvider(BrokerProvider):
                 symbol=self.symbol,
                 timeframe=self.timeframe,
             )
+            # Live mode must verify account + initial market stream readiness before connected=true
+            if self.live:
+                if not self._account_id:
+                    raise RuntimeError("CTrader live account_id missing")
+                candles = self._provider.get_candles(limit=1)
+                if candles is None or candles.empty:
+                    raise RuntimeError("CTrader live stream not ready")
             self._connected = True
             logger.info("CTraderProvider connected: %s", self.symbol)
         except ImportError:

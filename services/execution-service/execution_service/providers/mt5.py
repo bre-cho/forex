@@ -61,6 +61,17 @@ class MT5Provider(BrokerProvider):
                 "Install it on a Windows host or use PaperProvider."
             )
 
+    def _ensure_symbol(self, symbol: str) -> None:
+        if not _mt5_sdk.symbol_select(symbol, True):
+            raise RuntimeError(f"MT5 symbol_select failed: {symbol}")
+
+    def _normalize_volume(self, symbol_info: Any, volume: float) -> float:
+        step = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
+        vmin = float(getattr(symbol_info, "volume_min", step) or step)
+        vmax = float(getattr(symbol_info, "volume_max", max(vmin, step)) or max(vmin, step))
+        normalized = round(round(volume / step) * step, 8)
+        return max(vmin, min(vmax, normalized))
+
     async def connect(self) -> None:
         if self.live:
             self._require_sdk()
@@ -98,6 +109,7 @@ class MT5Provider(BrokerProvider):
 
     async def get_candles(self, symbol: str, timeframe: str, limit: int = 200) -> pd.DataFrame:
         self._require_sdk()
+        self._ensure_symbol(symbol)
         tf = _TF_MAP.get(timeframe, 5)
         rates = _mt5_sdk.copy_rates_from_pos(symbol, tf, 0, limit)
         if rates is None or len(rates) == 0:
@@ -111,20 +123,26 @@ class MT5Provider(BrokerProvider):
     async def place_order(self, request: OrderRequest) -> OrderResult:
         self._require_sdk()
         mt5_order_type = _mt5_sdk.ORDER_TYPE_BUY if request.side.lower() == "buy" else _mt5_sdk.ORDER_TYPE_SELL
+        self._ensure_symbol(request.symbol)
         symbol_info = _mt5_sdk.symbol_info(request.symbol)
-        if symbol_info is None:
-            return OrderResult(success=False, error_message=f"Symbol not found: {request.symbol}")
-        volume_step = symbol_info.volume_step or 0.01
-        volume = round(round(request.volume / volume_step) * volume_step, 8)
-        volume = max(symbol_info.volume_min, min(symbol_info.volume_max, volume))
+        tick = _mt5_sdk.symbol_info_tick(request.symbol)
+        if symbol_info is None or tick is None:
+            return OrderResult(success=False, error_message=f"Symbol/tick unavailable: {request.symbol}")
+        volume = self._normalize_volume(symbol_info, request.volume)
+        spread = abs(float(tick.ask) - float(tick.bid))
+        max_spread = float(getattr(symbol_info, "point", 0.0001) or 0.0001) * 30
+        if spread > max_spread:
+            return OrderResult(success=False, error_message=f"Spread too high: {spread}")
         req = {
             "action": _mt5_sdk.TRADE_ACTION_DEAL,
             "symbol": request.symbol,
             "volume": volume,
             "type": mt5_order_type,
-            "price": _mt5_sdk.symbol_info_tick(request.symbol).ask if request.side.lower() == "buy" else _mt5_sdk.symbol_info_tick(request.symbol).bid,
+            "price": float(tick.ask) if request.side.lower() == "buy" else float(tick.bid),
             "sl": request.stop_loss or 0.0,
             "tp": request.take_profit or 0.0,
+            "deviation": 20,
+            "magic": 20260428,
             "comment": str(request.comment or "")[:31],
             "type_filling": _mt5_sdk.ORDER_FILLING_IOC,
         }
@@ -132,6 +150,10 @@ class MT5Provider(BrokerProvider):
         if result is None or result.retcode != _mt5_sdk.TRADE_RETCODE_DONE:
             code = getattr(result, "retcode", -1)
             return OrderResult(success=False, error_message=f"MT5 order failed retcode={code}")
+        # Verify fill/deal exists for stronger live safety
+        deals = _mt5_sdk.history_deals_get(position=result.order) or []
+        if deals is None:
+            deals = []
         return OrderResult(
             success=True,
             order_id=str(result.order),

@@ -54,6 +54,8 @@ class BotRuntime:
         on_trade_update: Optional[TradeUpdateHook] = None,
         on_snapshot: Optional[SnapshotHook] = None,
         on_event: Optional[EventHook] = None,
+        reserve_idempotency: Optional[Callable[[str], Awaitable[bool]]] = None,
+        get_daily_state: Optional[Callable[[], Awaitable[Dict[str, Any] | None]]] = None,
     ) -> None:
         self.bot_instance_id = bot_instance_id
         self.strategy_config = strategy_config
@@ -71,6 +73,8 @@ class BotRuntime:
         self._on_trade_update = on_trade_update
         self._on_snapshot = on_snapshot
         self._on_event = on_event
+        self._reserve_idempotency = reserve_idempotency
+        self._get_daily_state = get_daily_state
         self._known_trade_volumes: Dict[str, float] = {}
         self._known_remaining_volumes: Dict[str, float] = {}
         self._closed_trade_ids: set[str] = set()
@@ -163,8 +167,8 @@ class BotRuntime:
                 logger.warning("BotRuntime %s already running or starting", self.bot_instance_id)
                 return
             self.state.status = RuntimeStatus.STARTING
-            await self._ensure_provider_usable()
             self._init_engines()
+            await self._ensure_provider_usable()
             if self._execution_engine is not None:
                 await self._execution_engine.start()
             self.state.started_at = time.time()
@@ -257,11 +261,21 @@ class BotRuntime:
             await self.broker_provider.connect()
         symbol = getattr(self.broker_provider, "symbol", "EURUSD")
         timeframe = getattr(self.broker_provider, "timeframe", "M5")
-        return await self.broker_provider.get_candles(
+        df = await self.broker_provider.get_candles(
             symbol=symbol,
             timeframe=timeframe,
             limit=200,
         )
+        self.state.metadata["market_data_ok"] = bool(df is not None and not df.empty)
+        if df is not None and not df.empty:
+            last_idx = df.index[-1]
+            try:
+                ts = float(last_idx.timestamp())
+            except Exception:
+                ts = time.time()
+            self.state.metadata["last_market_data_ts"] = ts
+            self.state.metadata["data_age_seconds"] = max(0.0, time.time() - ts)
+        return df
 
     def _analyse_market(self, df):
         return self._wave_detector.analyse(df)
@@ -284,10 +298,18 @@ class BotRuntime:
             "entry_price": entry_price,
         }
 
-        if self._brain is not None and direction in {"BUY", "SELL"}:
-            # P1: use closed-loop run_cycle instead of bare decide()
+        if direction in {"BUY", "SELL"}:
+            if self._brain is None:
+                if self.runtime_mode == "live":
+                    self.state.error_message = "brain_unavailable_in_live_mode"
+                    signal["direction"] = "HOLD"
+                    signal["brain_action"] = "BLOCK"
+                    signal["brain_reason"] = self.state.error_message
+                    return signal
+                return signal
             try:
-                from ai_trading_brain.brain_contracts import BrainInput, BrainAction
+                from ai_trading_brain.brain_contracts import BrainInput
+
                 brain_input = BrainInput(
                     symbol=str(signal["symbol"]),
                     timeframe=getattr(self.broker_provider, "timeframe", "M5"),
@@ -297,39 +319,33 @@ class BotRuntime:
                         "wave_state": wave_state,
                         "confidence": signal["confidence"],
                     },
-                    account={
-                        "equity": self.state.equity,
-                    },
-                    positions=list(self.state.open_trades) if isinstance(self.state.open_trades, list) else [],
+                    account={"equity": self.state.equity},
+                    positions=[],
                     signals=[signal],
                 )
                 cycle_result = self._brain.run_cycle(brain_input)
-                action = str(cycle_result.action.value if hasattr(cycle_result.action, "value") else cycle_result.action).upper()
+                action = str(getattr(cycle_result.action, "value", cycle_result.action)).upper()
+                if not getattr(cycle_result, "cycle_id", None):
+                    raise RuntimeError("brain_cycle_missing_cycle_id")
                 signal["brain_action"] = action
                 signal["brain_cycle_id"] = cycle_result.cycle_id
                 signal["brain_reason"] = cycle_result.reason
-                signal["brain_score"] = cycle_result.final_score
-                # Carry confidence from cycle result for gate evaluation
-                if cycle_result.execution_intent is not None:
-                    signal["confidence"] = float(cycle_result.final_score)
-                if action in {"BLOCK", "SKIP", "PAUSE"}:
+                signal["brain_score"] = float(cycle_result.final_score)
+                if action in {"BLOCK", "SKIP", "PAUSE", "HOLD"}:
                     signal["direction"] = "HOLD"
                 elif cycle_result.execution_intent is not None:
                     intent_side = str(cycle_result.execution_intent.side).upper()
-                    if intent_side in {"BUY", "SELL"}:
-                        signal["direction"] = intent_side
-                # Persist cycle result in state for downstream (decision ledger hook)
+                    signal["direction"] = intent_side if intent_side in {"BUY", "SELL"} else "HOLD"
                 self.state.metadata["last_brain_cycle"] = cycle_result.to_dict()
                 if self._on_event:
-                    asyncio.get_event_loop().call_soon(
-                        lambda: asyncio.ensure_future(
-                            self._safe_hook(
-                                self._on_event("brain_cycle", cycle_result.to_dict()), "brain_cycle"
-                            )
-                        )
-                    )
+                    asyncio.create_task(self._safe_hook(self._on_event("brain_cycle", cycle_result.to_dict()), "brain_cycle"))
             except Exception as exc:
                 logger.warning("Brain run_cycle failed [%s]: %s", self.bot_instance_id, exc)
+                if self.runtime_mode == "live":
+                    self.state.error_message = f"brain_run_cycle_failed: {exc}"
+                    signal["direction"] = "HOLD"
+                    signal["brain_action"] = "BLOCK"
+                    signal["brain_reason"] = self.state.error_message
 
         return signal
 
@@ -398,26 +414,31 @@ class BotRuntime:
             rr = abs((float(signal.tp) - entry) / (entry - sl)) if abs(entry - sl) > 0 else 0.0
             spread_pips = float(getattr(self.broker_provider, "spread_pips", 0.0))
             idempotency_key = str(signal.signal_id)
+            daily_state = await self._get_daily_state() if self._get_daily_state else None
+            if self.runtime_mode == "live" and daily_state is None:
+                self.state.error_message = "daily_state_unavailable"
+                return
             gate_ctx = {
                 "provider_mode": str(getattr(self.broker_provider, "mode", "stub")),
                 "runtime_mode": self.runtime_mode,
                 "broker_connected": bool(getattr(self.broker_provider, "is_connected", False)),
-                "market_data_ok": self.state.metadata.get("market_data_ok", True),
-                "data_age_seconds": float(self.state.metadata.get("data_age_seconds", 0.0)),
-                "daily_profit_amount": self._daily_profit_amount,
-                "daily_loss_pct": self._daily_loss_pct,
-                "consecutive_losses": self._consecutive_losses,
+                "market_data_ok": bool(self.state.metadata.get("market_data_ok", False)),
+                "data_age_seconds": float(self.state.metadata.get("data_age_seconds", 10**9)),
+                "daily_profit_amount": float((daily_state or {}).get("daily_profit_amount", self._daily_profit_amount)),
+                "daily_loss_pct": float((daily_state or {}).get("daily_loss_pct", self._daily_loss_pct)),
+                "consecutive_losses": int((daily_state or {}).get("consecutive_losses", self._consecutive_losses)),
                 "spread_pips": spread_pips,
-                "confidence": float(signal.meta.get("confidence", 1.0) if hasattr(signal, "meta") else 1.0),
+                "confidence": float(getattr(signal, "meta", {}).get("confidence", 1.0)),
                 "rr": rr,
                 "open_positions": int(self.state.open_trades),
-                "idempotency_exists": idempotency_key in self.state.metadata.get("placed_orders", set()),
-                "kill_switch": bool(self.state.metadata.get("kill_switch", False)),
+                "idempotency_exists": False,
+                "kill_switch": bool(self.state.metadata.get("kill_switch", False)) or bool((daily_state or {}).get("locked", False)),
             }
             gate_result = self._gate.evaluate(gate_ctx)
             gate_event = {
                 "bot_instance_id": self.bot_instance_id,
                 "signal_id": str(signal.signal_id),
+                "idempotency_key": idempotency_key,
                 "gate_action": gate_result.action,
                 "gate_reason": gate_result.reason,
                 "gate_details": gate_result.details,
@@ -425,21 +446,29 @@ class BotRuntime:
             if self._on_event:
                 await self._safe_hook(self._on_event("gate_evaluated", gate_event), "gate_event")
             if gate_result.action != "ALLOW":
-                logger.info(
-                    "Gate %s for signal %s: %s",
-                    gate_result.action,
-                    signal.signal_id,
-                    gate_result.reason,
-                )
+                logger.info("Gate %s for signal %s: %s", gate_result.action, signal.signal_id, gate_result.reason)
                 if gate_result.action == "BLOCK":
                     self._consecutive_losses += 1
                 return
-            # Register idempotency key after gate ALLOW
-            placed = self.state.metadata.get("placed_orders")
-            if not isinstance(placed, set):
-                placed = set()
-            placed.add(idempotency_key)
-            self.state.metadata["placed_orders"] = placed
+
+            # Reserve idempotency in DB before broker call (fail-closed in live)
+            if self._reserve_idempotency is not None:
+                reserved = await self._reserve_idempotency(idempotency_key)
+                if not reserved:
+                    dup_event = {
+                        "bot_instance_id": self.bot_instance_id,
+                        "signal_id": str(signal.signal_id),
+                        "idempotency_key": idempotency_key,
+                        "gate_action": "BLOCK",
+                        "gate_reason": "duplicate_order_blocked",
+                        "gate_details": {"source": "db_reservation"},
+                    }
+                    if self._on_event:
+                        await self._safe_hook(self._on_event("gate_evaluated", dup_event), "gate_event")
+                    return
+            elif self.runtime_mode == "live":
+                self.state.error_message = "idempotency_service_unavailable"
+                return
         # ── end gate ───────────────────────────────────────────────────
 
         result = await self._execution_engine.place_order(request)
@@ -702,14 +731,39 @@ class BotRuntime:
 
     async def _ensure_provider_usable(self) -> None:
         try:
-            if hasattr(self.broker_provider, "connect") and not getattr(
-                self.broker_provider, "is_connected", False
-            ):
+            if hasattr(self.broker_provider, "connect") and not getattr(self.broker_provider, "is_connected", False):
                 await self.broker_provider.connect()
             if not getattr(self.broker_provider, "is_connected", False):
                 self.state.status = RuntimeStatus.ERROR
                 self.state.error_message = "Broker provider unavailable"
                 raise RuntimeError("Broker provider is not connected")
+
+            provider_mode = str(getattr(self.broker_provider, "mode", "unknown")).lower()
+            if self.runtime_mode == "live" and provider_mode in {"stub", "unavailable", "degraded", "paper"}:
+                self.state.status = RuntimeStatus.ERROR
+                self.state.error_message = f"provider_mode_not_allowed:{provider_mode}"
+                raise RuntimeError(self.state.error_message)
+
+            account_info_fn = getattr(self.broker_provider, "get_account_info", None)
+            if self.runtime_mode == "live" and callable(account_info_fn):
+                info = await account_info_fn()
+                if info is None or float(getattr(info, "equity", 0.0)) <= 0:
+                    self.state.status = RuntimeStatus.ERROR
+                    self.state.error_message = "invalid_account_info"
+                    raise RuntimeError(self.state.error_message)
+
+            # live startup sanity: verify candles are available
+            if self.runtime_mode == "live":
+                sample = await self._fetch_market_data()
+                if sample is None or sample.empty:
+                    self.state.status = RuntimeStatus.ERROR
+                    self.state.error_message = "market_data_unavailable"
+                    raise RuntimeError(self.state.error_message)
+                if self._brain is None:
+                    self.state.status = RuntimeStatus.ERROR
+                    self.state.error_message = "brain_unavailable_in_live_mode"
+                    raise RuntimeError(self.state.error_message)
+
             health_check = getattr(self.broker_provider, "health_check", None)
             if callable(health_check):
                 details = await health_check()
@@ -717,9 +771,7 @@ class BotRuntime:
                     status = str(details.get("status", "healthy")).lower()
                     if status in {"auth_failed", "disconnected", "degraded", "error"}:
                         self.state.status = RuntimeStatus.ERROR
-                        self.state.error_message = str(
-                            details.get("reason") or f"Provider health: {status}"
-                        )
+                        self.state.error_message = str(details.get("reason") or f"Provider health: {status}")
                         raise RuntimeError(self.state.error_message)
         except Exception:
             if self.state.status != RuntimeStatus.ERROR:

@@ -79,6 +79,7 @@ from app.routers import (
     bots,
     incidents,
     legacy,
+    live_trading,
     notifications,
     public,
     signals,
@@ -104,6 +105,7 @@ app.include_router(public.router)
 app.include_router(admin.router)
 app.include_router(ws.router)
 app.include_router(incidents.router)
+app.include_router(live_trading.router)
 app.include_router(legacy.router)
 
 

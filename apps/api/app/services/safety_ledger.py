@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+from datetime import date
+from typing import Any, Optional
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import (
+    BrokerOrderEvent,
+    DailyTradingState,
+    PreExecutionGateEvent,
+    TradingDecisionLedger,
+    TradingIncident,
+)
+
+
+class SafetyLedgerService:
+    """Persists decision/gate/order events for live trading safety."""
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+
+    async def record_brain_cycle(self, bot_instance_id: str, payload: dict[str, Any]) -> TradingDecisionLedger:
+        signal_id = str(payload.get("selected_signal", {}).get("signal_id") or payload.get("cycle_id") or "")
+        row = TradingDecisionLedger(
+            bot_instance_id=bot_instance_id,
+            signal_id=signal_id,
+            cycle_id=str(payload.get("cycle_id") or ""),
+            brain_action=str(payload.get("action") or "BLOCK"),
+            brain_reason=str(payload.get("reason") or ""),
+            brain_score=float(payload.get("final_score") or 0.0),
+            stage_decisions=payload.get("stage_decisions") or [],
+            policy_snapshot=payload.get("policy_snapshot") or {},
+        )
+        self.db.add(row)
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
+
+    async def reserve_idempotency(
+        self,
+        bot_instance_id: str,
+        signal_id: str,
+        idempotency_key: str,
+    ) -> bool:
+        existing = await self.db.execute(
+            select(PreExecutionGateEvent).where(
+                PreExecutionGateEvent.bot_instance_id == bot_instance_id,
+                PreExecutionGateEvent.idempotency_key == idempotency_key,
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            return False
+        row = PreExecutionGateEvent(
+            bot_instance_id=bot_instance_id,
+            signal_id=signal_id,
+            idempotency_key=idempotency_key,
+            gate_action="RESERVED",
+            gate_reason="idempotency_reserved",
+            gate_details={},
+        )
+        self.db.add(row)
+        await self.db.commit()
+        return True
+
+    async def record_gate_event(self, payload: dict[str, Any]) -> PreExecutionGateEvent:
+        row = PreExecutionGateEvent(
+            bot_instance_id=str(payload.get("bot_instance_id") or ""),
+            signal_id=str(payload.get("signal_id") or ""),
+            idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
+            gate_action=str(payload.get("gate_action") or "BLOCK"),
+            gate_reason=str(payload.get("gate_reason") or "unknown"),
+            gate_details=payload.get("gate_details") or {},
+        )
+        self.db.add(row)
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
+
+    async def record_broker_order_event(self, payload: dict[str, Any], event_type: str) -> BrokerOrderEvent:
+        row = BrokerOrderEvent(
+            bot_instance_id=str(payload.get("bot_instance_id") or ""),
+            broker_order_id=str(payload.get("broker_order_id") or ""),
+            event_type=event_type,
+            symbol=str(payload.get("symbol") or ""),
+            side=str(payload.get("side") or ""),
+            volume=float(payload.get("volume") or 0.0),
+            price=float(payload.get("price") or 0.0),
+            payload=payload,
+        )
+        self.db.add(row)
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
+
+    async def get_daily_state(self, bot_instance_id: str, trading_day: Optional[date] = None) -> Optional[DailyTradingState]:
+        trading_day = trading_day or date.today()
+        result = await self.db.execute(
+            select(DailyTradingState).where(
+                DailyTradingState.bot_instance_id == bot_instance_id,
+                DailyTradingState.trading_day == trading_day,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def timeline(self, bot_instance_id: str, limit: int = 100) -> dict[str, Any]:
+        decisions = (
+            await self.db.execute(
+                select(TradingDecisionLedger)
+                .where(TradingDecisionLedger.bot_instance_id == bot_instance_id)
+                .order_by(TradingDecisionLedger.created_at.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+        gates = (
+            await self.db.execute(
+                select(PreExecutionGateEvent)
+                .where(PreExecutionGateEvent.bot_instance_id == bot_instance_id)
+                .order_by(PreExecutionGateEvent.created_at.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+        orders = (
+            await self.db.execute(
+                select(BrokerOrderEvent)
+                .where(BrokerOrderEvent.bot_instance_id == bot_instance_id)
+                .order_by(BrokerOrderEvent.created_at.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+        incidents = (
+            await self.db.execute(
+                select(TradingIncident)
+                .where(TradingIncident.bot_instance_id == bot_instance_id)
+                .order_by(TradingIncident.created_at.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+        return {
+            "decisions": decisions,
+            "gate_events": gates,
+            "order_events": orders,
+            "incidents": incidents,
+        }
