@@ -12,6 +12,12 @@ if ! grep -Eq 'provider_mode_not_allowed|BAD_PROVIDER_MODES|runtime_mode == "liv
   errors=$((errors+1))
 fi
 
+# 1.1) MT5/Bybit providers must not be hardcoded as stub names in readiness classification.
+if grep -E 'mt5provider|bybitprovider' -n apps/api/app/services/bot_service.py >/dev/null; then
+  echo "[verify_live_no_stub] bot_service still classifies MT5/Bybit provider class names as stub"
+  errors=$((errors+1))
+fi
+
 # 2) RuntimeFactory should not silently downgrade live to paper.
 if grep -E 'provider_type\s*=\s*"paper"\s*if\s*bot\.mode\s*==\s*"paper"\s*else' -n apps/api/app/services/bot_service.py >/dev/null; then
   : # acceptable branching, validated by readiness guard
@@ -23,6 +29,12 @@ fi
 # 3) BotRuntime live startup must require brain and provider readiness.
 if ! grep -Eq 'brain_unavailable_in_live_mode|provider_mode_not_allowed|market_data_unavailable' services/trading-core/trading_core/runtime/bot_runtime.py; then
   echo "[verify_live_no_stub] missing live startup hard checks in BotRuntime"
+  errors=$((errors+1))
+fi
+
+# 4) Reconciliation import failure in live path must block startup, not warning-only fallback.
+if ! grep -Eq 'reconciliation_worker_unavailable' services/trading-core/trading_core/runtime/bot_runtime.py; then
+  echo "[verify_live_no_stub] missing hard-fail on reconciliation import failure"
   errors=$((errors+1))
 fi
 

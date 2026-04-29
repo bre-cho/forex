@@ -8,6 +8,7 @@ true multi-user / multi-bot operation.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import logging
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional
@@ -54,8 +55,9 @@ class BotRuntime:
         on_trade_update: Optional[TradeUpdateHook] = None,
         on_snapshot: Optional[SnapshotHook] = None,
         on_event: Optional[EventHook] = None,
-        reserve_idempotency: Optional[Callable[[str], Awaitable[bool]]] = None,
+        reserve_idempotency: Optional[Callable[..., Awaitable[bool]]] = None,
         verify_idempotency_reservation: Optional[Callable[[str, str, str | None], Awaitable[bool]]] = None,
+        set_idempotency_status: Optional[Callable[[str, str, str | None], Awaitable[bool]]] = None,
         get_daily_state: Optional[Callable[[], Awaitable[Dict[str, Any] | None]]] = None,
         get_db_open_trades: Optional[Callable[[], Awaitable[list[Dict[str, Any]]]]] = None,
         close_db_trade: Optional[Callable[[str], Awaitable[None]]] = None,
@@ -80,6 +82,7 @@ class BotRuntime:
         self._on_event = on_event
         self._reserve_idempotency = reserve_idempotency
         self._verify_idempotency_reservation = verify_idempotency_reservation
+        self._set_idempotency_status = set_idempotency_status
         self._get_daily_state = get_daily_state
         self._get_db_open_trades = get_db_open_trades
         self._close_db_trade = close_db_trade
@@ -498,6 +501,22 @@ class BotRuntime:
             if self.runtime_mode == "live" and daily_state is None:
                 self.state.error_message = "daily_state_unavailable"
                 return
+            if self.runtime_mode == "live":
+                max_age = float(self.risk_config.get("max_daily_state_age_seconds", 10.0)) if isinstance(self.risk_config, dict) else 10.0
+                updated_raw = (daily_state or {}).get("updated_at")
+                updated_ts = None
+                if isinstance(updated_raw, str):
+                    try:
+                        updated_ts = float(datetime.fromisoformat(updated_raw).timestamp())
+                    except Exception:
+                        updated_ts = None
+                if updated_ts is None:
+                    self.state.error_message = "daily_state_stale_or_missing_timestamp"
+                    return
+                age_seconds = max(0.0, time.time() - updated_ts)
+                if age_seconds > max_age:
+                    self.state.error_message = "daily_state_stale"
+                    return
             gate_ctx = {
                 "provider_mode": str(getattr(self.broker_provider, "mode", "stub")),
                 "runtime_mode": self.runtime_mode,
@@ -554,6 +573,9 @@ class BotRuntime:
                     if self._on_event:
                         await self._safe_hook(self._on_event("gate_evaluated", dup_event), "gate_event")
                     return
+                if self._set_idempotency_status is not None:
+                    brain_cycle_id = str(getattr(signal, "meta", {}).get("brain_cycle_id", "") or "")
+                    await self._set_idempotency_status(idempotency_key, "reserved", brain_cycle_id or None)
             elif self.runtime_mode == "live":
                 self.state.error_message = "idempotency_service_unavailable"
                 return
@@ -591,10 +613,19 @@ class BotRuntime:
             idempotency_key=str(signal.signal_id),
             brain_cycle_id=str(getattr(signal, "meta", {}).get("brain_cycle_id", "")),
         )
-        result = await self._execution_engine.place_order(command)
+        if self._set_idempotency_status is not None:
+            await self._set_idempotency_status(command.idempotency_key, "broker_submitted", command.brain_cycle_id or None)
+        try:
+            result = await self._execution_engine.place_order(command)
+        except Exception:
+            if self._set_idempotency_status is not None:
+                await self._set_idempotency_status(command.idempotency_key, "broker_unknown", command.brain_cycle_id or None)
+            raise
         order_payload = {
             "bot_instance_id": self.bot_instance_id,
             "signal_id": signal.signal_id,
+            "idempotency_key": command.idempotency_key,
+            "brain_cycle_id": command.brain_cycle_id,
             "broker_order_id": result.order_id,
             "symbol": result.symbol,
             "side": result.side.upper(),
@@ -609,10 +640,15 @@ class BotRuntime:
             await self._safe_hook(self._on_order(order_payload), "on_order")
 
         if not result.success:
+            if self._set_idempotency_status is not None:
+                await self._set_idempotency_status(command.idempotency_key, "rejected", command.brain_cycle_id or None)
             self.state.error_message = result.error_message
             self._consecutive_losses += 1
             await self._emit_event("order_rejected", order_payload)
             return
+
+        if self._set_idempotency_status is not None:
+            await self._set_idempotency_status(command.idempotency_key, "filled", command.brain_cycle_id or None)
 
         self._consecutive_losses = 0
         self.state.total_trades += 1
@@ -915,8 +951,7 @@ class BotRuntime:
         try:
             from execution_service.reconciliation_worker import ReconciliationWorker
         except ImportError as exc:
-            logger.warning("ReconciliationWorker unavailable for %s: %s", self.bot_instance_id, exc)
-            return
+            raise RuntimeError(f"reconciliation_worker_unavailable:{exc}") from exc
 
         async def _on_result(payload: Dict[str, Any]) -> None:
             if self._on_reconciliation_result:
@@ -943,6 +978,11 @@ class BotRuntime:
             max_mismatch_rounds=int(self.risk_config.get("reconciliation_max_mismatch_rounds", 3)) if isinstance(self.risk_config, dict) else 3,
         )
         await self._reconciliation_worker.start()
+        first_result = await self._reconciliation_worker.run_once()
+        if str(first_result.status).lower() not in {"ok", "repaired"}:
+            await self._reconciliation_worker.stop()
+            self._reconciliation_worker = None
+            raise RuntimeError(f"reconciliation_first_pass_failed:{first_result.status}")
 
     # ── Snapshot ───────────────────────────────────────────────────────── #
 

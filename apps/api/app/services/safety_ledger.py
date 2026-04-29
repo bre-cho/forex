@@ -78,6 +78,28 @@ class SafetyLedgerService:
         result = await self.db.execute(stmt.limit(1))
         return result.scalar_one_or_none() is not None
 
+    async def mark_idempotency_status(
+        self,
+        bot_instance_id: str,
+        idempotency_key: str,
+        status: str,
+        brain_cycle_id: str | None = None,
+    ) -> bool:
+        stmt = select(OrderIdempotencyReservation).where(
+            OrderIdempotencyReservation.bot_instance_id == bot_instance_id,
+            OrderIdempotencyReservation.idempotency_key == idempotency_key,
+        )
+        if brain_cycle_id:
+            stmt = stmt.where(OrderIdempotencyReservation.brain_cycle_id == brain_cycle_id)
+        result = await self.db.execute(stmt.limit(1))
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False
+        row.status = str(status or row.status)
+        row.updated_at = datetime.now(timezone.utc)
+        await self.db.commit()
+        return True
+
     async def record_gate_event(self, payload: dict[str, Any]) -> PreExecutionGateEvent:
         row = PreExecutionGateEvent(
             bot_instance_id=str(payload.get("bot_instance_id") or ""),

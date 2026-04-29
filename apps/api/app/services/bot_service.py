@@ -28,7 +28,7 @@ from app.services.live_readiness_guard import LiveReadinessGuard
 logger = logging.getLogger(__name__)
 
 _BAD_PROVIDER_STATUSES = {"auth_failed", "disconnected", "degraded", "error"}
-_STUB_PROVIDER_NAMES = {"paperprovider", "_asyncpaperadapter", "mt5provider", "bybitprovider"}
+_STUB_PROVIDER_NAMES = {"paperprovider", "_asyncpaperadapter", "_stubruntime"}
 
 
 def _now_utc() -> datetime:
@@ -48,7 +48,7 @@ def _safe_upper(value: Any, default: str = "") -> str:
     return str(value).upper()
 
 
-def _runtime_hooks(bot_id: str):
+def _runtime_hooks(bot_id: str, bot_mode: str):
     async def on_signal(payload: dict) -> None:
         async with AsyncSessionLocal() as db:
             db.add(
@@ -154,6 +154,8 @@ def _runtime_hooks(bot_id: str):
                 try:
                     await ledger.record_brain_cycle(bot_id, dict(payload))
                 except Exception as exc:
+                    if bot_mode == "live":
+                        raise RuntimeError(f"record_brain_cycle_failed:{exc}") from exc
                     logger.warning("record_brain_cycle failed [%s]: %s", bot_id, exc)
             elif event_type == "gate_evaluated":
                 try:
@@ -189,6 +191,20 @@ def _runtime_hooks(bot_id: str):
                 brain_cycle_id,
             )
 
+    async def set_idempotency_status(
+        idempotency_key: str,
+        status: str,
+        brain_cycle_id: str | None = None,
+    ) -> bool:
+        async with AsyncSessionLocal() as db:
+            ledger = SafetyLedgerService(db)
+            return await ledger.mark_idempotency_status(
+                bot_id,
+                idempotency_key,
+                status,
+                brain_cycle_id,
+            )
+
     async def get_daily_state() -> dict | None:
         async with AsyncSessionLocal() as db:
             svc = DailyTradingStateService(db)
@@ -203,6 +219,7 @@ def _runtime_hooks(bot_id: str):
                 "lock_reason": state.lock_reason or "",
                 "starting_equity": float(state.starting_equity or 0.0),
                 "current_equity": float(state.current_equity or 0.0),
+                "updated_at": state.updated_at.isoformat() if state.updated_at else None,
             }
 
 
@@ -272,6 +289,7 @@ def _runtime_hooks(bot_id: str):
         "on_event": on_event,
         "reserve_idempotency": reserve_idempotency,
         "verify_idempotency_reservation": verify_idempotency_reservation,
+        "set_idempotency_status": set_idempotency_status,
         "get_daily_state": get_daily_state,
         "get_db_open_trades": get_db_open_trades,
         "close_db_trade": close_db_trade,
@@ -340,7 +358,7 @@ async def create_runtime_for_bot(
         if bot.mode == "live":
             await _assert_provider_usable(provider, bot.id)
 
-        hooks = _runtime_hooks(bot.id)
+        hooks = _runtime_hooks(bot.id, str(bot.mode or "paper").lower())
 
         # Use the public registry.create() API — never access _runtimes directly
         await registry.create(
@@ -358,6 +376,7 @@ async def create_runtime_for_bot(
             on_event=hooks["on_event"],
             reserve_idempotency=hooks["reserve_idempotency"],
             verify_idempotency_reservation=hooks["verify_idempotency_reservation"],
+            set_idempotency_status=hooks["set_idempotency_status"],
             get_daily_state=hooks["get_daily_state"],
             get_db_open_trades=hooks["get_db_open_trades"],
             close_db_trade=hooks["close_db_trade"],
@@ -436,6 +455,7 @@ def _detect_llm_mode() -> str:
 
 def _derive_provider_mode(
     bot_mode: str,
+    provider_runtime_mode: str,
     provider_name: str,
     provider_health_status: str,
     runtime_mode: str,
@@ -444,6 +464,11 @@ def _derive_provider_mode(
         return "unavailable"
     if provider_health_status in _BAD_PROVIDER_STATUSES:
         return "degraded"
+    prm = str(provider_runtime_mode or "unknown").lower()
+    if bot_mode == "live" and prm in {"stub", "paper", "unavailable", "degraded", "error"}:
+        return prm if prm in {"stub", "unavailable", "degraded"} else "unavailable"
+    if bot_mode == "live" and prm in {"live", "demo"}:
+        return "live"
     if provider_name in _STUB_PROVIDER_NAMES and bot_mode == "live":
         return "stub"
     if bot_mode == "paper":
@@ -460,13 +485,18 @@ async def get_runtime_readiness(bot: BotInstance, registry: Any) -> dict[str, An
     runtime_mode = "not_running"
     runtime_error: str | None = None
     provider_name = "unknown"
+    provider_runtime_mode = "unknown"
     provider_health_status = "unknown"
     provider_health_reason = ""
 
     if runtime is not None:
         provider = getattr(runtime, "broker_provider", None)
         if provider is not None:
-            provider_name = provider.__class__.__name__.lower()
+            provider_name = str(
+                getattr(provider, "provider_name", "")
+                or provider.__class__.__name__.replace("Provider", "").lower()
+            ).lower()
+            provider_runtime_mode = str(getattr(provider, "mode", "unknown")).lower()
             health_check = getattr(provider, "health_check", None)
             if callable(health_check):
                 try:
@@ -505,6 +535,7 @@ async def get_runtime_readiness(bot: BotInstance, registry: Any) -> dict[str, An
     llm_mode = _detect_llm_mode()
     provider_mode = _derive_provider_mode(
         bot_mode=bot_mode,
+        provider_runtime_mode=provider_runtime_mode,
         provider_name=provider_name,
         provider_health_status=provider_health_status,
         runtime_mode=runtime_mode,

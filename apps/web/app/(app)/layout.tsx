@@ -10,6 +10,7 @@ const navItems = [
   { href: '/live-orders', label: 'Lệnh trực tiếp' },
   { href: '/trades', label: 'Giao dịch' },
   { href: '/runtime-control', label: 'Điều khiển runtime' },
+  { href: '/live-control-center', label: 'Live Control Center' },
   { href: '/analytics', label: 'Phân tích' },
   { href: '/broker-connections', label: 'Kết nối sàn' },
   { href: '/billing', label: 'Thanh toán' },
