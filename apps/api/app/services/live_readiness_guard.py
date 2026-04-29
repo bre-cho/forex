@@ -51,6 +51,39 @@ class LiveReadinessGuard:
         return ReadinessResult(True, "ok")
 
     @classmethod
+    async def assert_live_provider_contract(cls, provider: Any, *, symbol: str = "") -> ReadinessResult:
+        """P0.4: Verify all live-required methods are implemented (not base NotImplemented)."""
+        required_methods = [
+            "get_instrument_spec",
+            "estimate_margin",
+            "get_order_by_client_id",
+            "get_executions_by_client_id",
+            "close_all_positions",
+            "get_quote",
+        ]
+        for name in required_methods:
+            fn = getattr(provider, name, None)
+            if not callable(fn):
+                return ReadinessResult(False, f"live_provider_missing_method:{name}")
+        if not getattr(provider, "supports_client_order_id", False):
+            return ReadinessResult(False, "live_provider_client_order_id_not_supported")
+        # Dry-run: test instrument spec and margin estimate
+        if symbol:
+            try:
+                spec = await provider.get_instrument_spec(symbol)
+                if not spec:
+                    return ReadinessResult(False, f"live_provider_instrument_spec_empty:{symbol}")
+            except Exception as exc:
+                return ReadinessResult(False, f"live_provider_instrument_spec_failed:{exc}")
+            try:
+                quote = await provider.get_quote(symbol)
+                if not quote:
+                    return ReadinessResult(False, f"live_provider_quote_empty:{symbol}")
+            except Exception as exc:
+                return ReadinessResult(False, f"live_provider_quote_failed:{exc}")
+        return ReadinessResult(True, "ok")
+
+    @classmethod
     async def check_runtime_dependencies(
         cls,
         *,

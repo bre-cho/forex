@@ -531,6 +531,9 @@ class BotRuntime:
             logger.warning("OrderRequest import failed: %s", exc)
             return
 
+        # P0.2: idempotency_key is the canonical binding key — must be set FIRST
+        idempotency_key = str(signal.signal_id)
+
         request = OrderRequest(
             symbol=signal.symbol,
             side=signal.direction.lower(),
@@ -539,7 +542,9 @@ class BotRuntime:
             price=float(signal.entry_price),
             stop_loss=float(signal.sl),
             take_profit=float(signal.tp),
-            comment=str(signal.signal_id),
+            comment=idempotency_key,
+            client_order_id=idempotency_key,
+            idempotency_key=idempotency_key,
         )
 
         try:
@@ -553,7 +558,6 @@ class BotRuntime:
             sl = float(signal.sl)
             rr = abs((float(signal.tp) - entry) / (entry - sl)) if abs(entry - sl) > 0 else 0.0
             spread_pips = float(getattr(self.broker_provider, "spread_pips", 0.0))
-            idempotency_key = str(signal.signal_id)
             if self.runtime_mode == "live":
                 # P0.2: Fetch live quote for real spread; fail closed if missing
                 get_quote_fn = getattr(self.broker_provider, "get_quote", None)
@@ -732,6 +736,13 @@ class BotRuntime:
                 "new_orders_paused": bool(self.state.metadata.get("new_orders_paused", False)),
                 "stop_loss": float(signal.sl or 0.0),
                 "requested_volume": float(signal.lot_size or 0.0),
+                # P0.3: bind symbol/side/account/policy/slippage/starting_equity to hash
+                "account_id": str(getattr(account if self.runtime_mode == "live" else None, "account_id", "") or ""),
+                "broker_name": str(getattr(self.broker_provider, "provider_name", "")),
+                "starting_equity": float(getattr(account if self.runtime_mode == "live" else None, "equity", 0.0) or 0.0),
+                "slippage_pips": 0.0,  # updated after live quote if available
+                "policy_version": str((getattr(signal, "meta", {}) or {}).get("policy_version") or (getattr(signal, "meta", {}) or {}).get("policy_version_id") or ""),
+                "idempotency_key": idempotency_key,
             }
             if self.runtime_mode == "live" and self._get_policy_approval_status is not None:
                 gate_ctx["policy_version_approved"] = bool(await self._get_policy_approval_status())
@@ -886,7 +897,7 @@ class BotRuntime:
             consecutive_losses=int((daily_state or {}).get("consecutive_losses", self._consecutive_losses)),
             daily_locked=bool((daily_state or {}).get("locked", False)),
             kill_switch=bool(self.state.metadata.get("kill_switch", False)),
-            idempotency_key=str(signal.signal_id),
+            idempotency_key=str(idempotency_key),
             brain_cycle_id=str(getattr(signal, "meta", {}).get("brain_cycle_id", "")),
             account_id=str(getattr(locals().get("account", None), "account_id", "") or "") or None,
             order_type=str(request.order_type or "market"),
@@ -914,7 +925,7 @@ class BotRuntime:
                 "lot_size": float(signal.lot_size),
             },
             pre_execution_context=pre_ctx,
-            idempotency_key=str(signal.signal_id),
+            idempotency_key=str(idempotency_key),
             brain_cycle_id=str(getattr(signal, "meta", {}).get("brain_cycle_id", "")),
         )
         if validate_order_contract is not None:

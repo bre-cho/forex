@@ -118,6 +118,20 @@ class CTraderProvider(BrokerProvider):
         return self._market_data_adapter.get_candles(limit=limit)
 
     async def place_order(self, request: OrderRequest) -> OrderResult:
+        # P0.4: live mode requires client_order_id
+        if self.live and not str(getattr(request, "client_order_id", "") or ""):
+            return OrderResult(
+                order_id="",
+                symbol=request.symbol,
+                side=request.side,
+                volume=request.volume,
+                fill_price=0.0,
+                commission=0.0,
+                success=False,
+                error_message="ctrader_live_requires_client_order_id",
+                submit_status="REJECTED",
+                fill_status="UNKNOWN",
+            )
         if self._execution_adapter.available:
             try:
                 result = await self._execution_adapter.place_market_order(
@@ -379,7 +393,10 @@ class CTraderProvider(BrokerProvider):
                 except Exception as exc:
                     if self.live:
                         raise RuntimeError(f"ctrader_get_quote_failed:{exc}") from exc
-            # Fallback: derive from candles
+            # P0.4: In live mode, candle-derived quote is not acceptable — fail closed
+            if self.live:
+                raise RuntimeError("ctrader_live_quote_unavailable: broker quote required in live mode")
+            # Fallback for demo/paper only: derive from candles
             try:
                 candles = self._market_data_adapter.get_candles(limit=1)
                 if candles is not None and not candles.empty:
@@ -387,7 +404,6 @@ class CTraderProvider(BrokerProvider):
                     close = float(last.get("close") if hasattr(last, "get") else last["close"])
                     return {"symbol": symbol, "bid": close, "ask": close, "spread_pips": 0.0}
             except Exception as exc:
-                if self.live:
-                    raise RuntimeError(f"ctrader_quote_fallback_failed:{exc}") from exc
+                pass
         return None
 

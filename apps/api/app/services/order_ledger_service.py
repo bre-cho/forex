@@ -142,3 +142,56 @@ class OrderLedgerService:
             signal_id=signal_id,
             payload=payload,
         )
+
+    async def record_lifecycle_event(
+        self,
+        *,
+        bot_instance_id: str,
+        event_type: str,
+        idempotency_key: str,
+        broker: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """P0.5: Atomic lifecycle event — persist receipt, update attempt, projection, and
+        enqueue reconciliation (for UNKNOWN) in a single coordination call.
+
+        event_type: order_submitted | order_unknown | order_rejected | order_filled
+        """
+        import hashlib, json as _json
+        # Server-side hash of raw_response if not provided
+        if payload.get("raw_response") and not payload.get("raw_response_hash"):
+            raw = payload["raw_response"]
+            payload["raw_response_hash"] = hashlib.sha256(
+                _json.dumps(raw, sort_keys=True, default=str).encode()
+            ).hexdigest()
+
+        if event_type == "order_submitted":
+            await self.persist_intent(
+                bot_instance_id=bot_instance_id,
+                signal_id=str(payload.get("signal_id") or idempotency_key),
+                brain_cycle_id=str(payload.get("brain_cycle_id") or "") or None,
+                idempotency_key=idempotency_key,
+                broker=broker,
+                symbol=str(payload.get("symbol") or ""),
+                side=str(payload.get("side") or ""),
+                volume=float(payload.get("volume") or 0.0),
+                request_payload=payload,
+                gate_context_hash=str(payload.get("gate_context_hash") or "") or None,
+            )
+        elif event_type in {"order_filled", "order_rejected", "order_unknown"}:
+            await self.persist_execution_receipt_and_projection(
+                bot_instance_id=bot_instance_id,
+                idempotency_key=idempotency_key,
+                broker=broker,
+                event_type=event_type,
+                payload=payload,
+            )
+            if event_type == "order_unknown":
+                await self.enqueue_unknown_order(
+                    bot_instance_id=bot_instance_id,
+                    idempotency_key=idempotency_key,
+                    signal_id=str(payload.get("signal_id") or "") or None,
+                    payload=payload,
+                )
+        else:
+            raise ValueError(f"Unknown order lifecycle event_type: {event_type}")

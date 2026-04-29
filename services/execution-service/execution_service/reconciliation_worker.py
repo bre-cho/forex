@@ -163,13 +163,34 @@ class ReconciliationWorker:
                             "error": str(exc),
                         })
 
-            # Broker has positions DB doesn't know about (informational)
+            # Broker has positions DB doesn't know about — P0.6: this is NOT informational
+            # In live mode: pause new orders immediately + critical incident
             ghost_at_broker = broker_ids - db_ids - {""}
             for broker_id in ghost_at_broker:
                 result.mismatches.append({
-                    "type": "broker_position_not_in_db",
+                    "type": "broker_ghost_position",
                     "broker_id": broker_id,
+                    "severity": "critical",
+                    "action": "pause_new_orders",
                 })
+                logger.error(
+                    "Ghost broker position detected [%s]: broker_id=%s — pausing new orders",
+                    self.bot_instance_id, broker_id,
+                )
+                if self._on_incident:
+                    ghost_incident = {
+                        "bot_instance_id": self.bot_instance_id,
+                        "incident_type": "broker_ghost_position",
+                        "severity": "critical",
+                        "title": f"Broker ghost position not in DB: {broker_id}",
+                        "detail": f"broker_id={broker_id}; DB has no matching trade",
+                        "escalation_action": "pause_new_orders",
+                        "broker_position_id": broker_id,
+                    }
+                    try:
+                        await self._on_incident(ghost_incident)
+                    except Exception as exc:
+                        logger.error("on_incident(ghost_position) failed: %s", exc)
 
             if result.mismatches:
                 self._mismatch_rounds += 1

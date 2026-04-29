@@ -50,6 +50,15 @@ class GateContext:
     stop_loss: float = 0.0
     max_loss_amount_if_sl_hit: float = 0.0
     requested_volume: float = 0.0
+    # P0.3: bind symbol/side/account/policy/slippage/starting_equity to hash
+    symbol: str = ""
+    side: str = ""
+    account_id: str = ""
+    broker_name: str = ""
+    starting_equity: float = 0.0
+    slippage_pips: float = 0.0
+    policy_version: str = ""
+    idempotency_key: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -86,6 +95,14 @@ class GateContext:
             stop_loss=float(context.get("stop_loss", 0.0) or 0.0),
             max_loss_amount_if_sl_hit=float(context.get("max_loss_amount_if_sl_hit", 0.0) or 0.0),
             requested_volume=float(context.get("requested_volume", 0.0) or 0.0),
+            symbol=str(context.get("symbol", "") or ""),
+            side=str(context.get("side", "") or ""),
+            account_id=str(context.get("account_id", "") or ""),
+            broker_name=str(context.get("broker_name", "") or ""),
+            starting_equity=float(context.get("starting_equity", 0.0) or 0.0),
+            slippage_pips=float(context.get("slippage_pips", 0.0) or 0.0),
+            policy_version=str(context.get("policy_version", "") or ""),
+            idempotency_key=str(context.get("idempotency_key", "") or ""),
         )
 
 

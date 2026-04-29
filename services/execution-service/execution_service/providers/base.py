@@ -18,6 +18,8 @@ class OrderRequest:
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     comment: str = ""
+    client_order_id: str = ""
+    idempotency_key: str = ""
 
 
 @dataclass
