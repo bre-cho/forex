@@ -54,6 +54,7 @@ class _LiveProvider:
 
 def _command() -> ExecutionCommand:
     gate_context = {
+        "schema_version": "gate_context_v1",
         "provider_mode": "live",
         "runtime_mode": "live",
         "broker_connected": True,
@@ -75,7 +76,9 @@ def _command() -> ExecutionCommand:
         "account_id": "acc-1",
         "broker_name": "ctrader",
         "policy_version": "v1",
+        "policy_hash": "policy_hash_1",
         "idempotency_key": "idem-1",
+        "approved_volume": 0.01,
     }
     ctx = PreExecutionContext(
         bot_instance_id="bot-1",

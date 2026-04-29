@@ -38,13 +38,15 @@ class BybitProvider(BrokerProvider):
         timeframe: str = "M5",
         testnet: bool = True,
     ) -> None:
+        if bool(testnet) is False:
+            raise ValueError("BybitProvider is demo-only; use BybitLiveProvider for live mode")
         self.api_key = api_key
         self.api_secret = api_secret
         self.symbol = symbol
         self.timeframe = timeframe
-        self.testnet = testnet
+        self.testnet = True
         self.provider_name = "bybit"
-        self.mode = "demo" if testnet else "live"
+        self.mode = "demo"
         self._session: Optional[Any] = None
         self._connected = False
         self._instrument_info: dict[str, Any] = {}

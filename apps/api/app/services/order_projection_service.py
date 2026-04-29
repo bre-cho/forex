@@ -38,6 +38,7 @@ class OrderProjectionService:
         self,
         bot_instance_id: str,
         attempt: BrokerOrderAttempt,
+        auto_commit: bool = True,
     ) -> Order:
         """Create or update an Order row based on an order attempt."""
         idempotency_key = str(attempt.idempotency_key or "")
@@ -54,8 +55,11 @@ class OrderProjectionService:
             existing.last_transition_at = _now_utc()
             existing.reconciliation_status = "reconciling" if str(attempt.current_state or "").upper() in {"UNKNOWN", "RECONCILING"} else "ok"
             existing.updated_at = _now_utc()
-            await self.db.commit()
-            await self.db.refresh(existing)
+            if auto_commit:
+                await self.db.commit()
+                await self.db.refresh(existing)
+            else:
+                await self.db.flush()
             return existing
 
         row = Order(
@@ -76,14 +80,18 @@ class OrderProjectionService:
             updated_at=_now_utc(),
         )
         self.db.add(row)
-        await self.db.commit()
-        await self.db.refresh(row)
+        if auto_commit:
+            await self.db.commit()
+            await self.db.refresh(row)
+        else:
+            await self.db.flush()
         return row
 
     async def upsert_from_execution_receipt(
         self,
         bot_instance_id: str,
         receipt: BrokerExecutionReceipt,
+        auto_commit: bool = True,
     ) -> Order | None:
         """Update order status from an execution receipt."""
         idempotency_key = str(receipt.idempotency_key or "")
@@ -118,8 +126,11 @@ class OrderProjectionService:
         existing.reconciliation_status = "reconciling" if str(receipt.fill_status or "").upper() == "UNKNOWN" else "ok"
         existing.last_transition_at = _now_utc()
         existing.updated_at = _now_utc()
-        await self.db.commit()
-        await self.db.refresh(existing)
+        if auto_commit:
+            await self.db.commit()
+            await self.db.refresh(existing)
+        else:
+            await self.db.flush()
         return existing
 
     async def sync_order_status_from_state_transition(

@@ -69,6 +69,8 @@ class BotRuntime:
         on_reconciliation_result: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
         on_reconciliation_incident: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
         on_unknown_order_resolved: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        mark_submitting_hook: Optional[Callable[[str, str], Awaitable[None]]] = None,
+        enqueue_unknown_hook: Optional[Callable[[str, str, str | None, Dict[str, Any]], Awaitable[None]]] = None,
     ) -> None:
         self.bot_instance_id = bot_instance_id
         self.strategy_config = strategy_config
@@ -100,6 +102,8 @@ class BotRuntime:
         self._on_reconciliation_result = on_reconciliation_result
         self._on_reconciliation_incident = on_reconciliation_incident
         self._on_unknown_order_resolved = on_unknown_order_resolved
+        self._mark_submitting_hook = mark_submitting_hook
+        self._enqueue_unknown_hook = enqueue_unknown_hook
         self._reconciliation_worker = None
         self._known_trade_volumes: Dict[str, float] = {}
         self._known_remaining_volumes: Dict[str, float] = {}
@@ -169,6 +173,8 @@ class BotRuntime:
                     runtime_mode=self.runtime_mode,
                     gate_policy=gate_policy,
                     verify_idempotency_reservation=self._verify_idempotency_reservation,
+                    mark_submitting_hook=self._mark_submitting_hook,
+                    enqueue_unknown_hook=self._enqueue_unknown_hook,
                 )
 
             if ForexBrainRuntime is not None:
@@ -740,6 +746,7 @@ class BotRuntime:
                     self.state.error_message = "daily_state_stale"
                     return
             gate_ctx = {
+                "schema_version": "gate_context_v1",
                 "provider_mode": str(getattr(self.broker_provider, "mode", "stub")),
                 "runtime_mode": self.runtime_mode,
                 "broker_connected": bool(getattr(self.broker_provider, "is_connected", False)),
@@ -769,6 +776,13 @@ class BotRuntime:
                 "slippage_pips": 0.0,  # updated after live quote if available
                 "policy_version": policy_version,
                 "idempotency_key": idempotency_key,
+                "quote_id": "",
+                "quote_timestamp": 0.0,
+                "instrument_spec_hash": str(self.state.metadata.get("instrument_spec_hash") or ""),
+                "policy_hash": str(self.state.metadata.get("policy_hash") or "policy_hash_unknown"),
+                "approved_volume": float(signal.lot_size or 0.0),
+                "margin_required": 0.0,
+                "portfolio_exposure_after_trade": 0.0,
             }
             if self.runtime_mode == "live" and self._get_policy_approval_status is not None:
                 gate_ctx["policy_version_approved"] = bool(await self._get_policy_approval_status())
@@ -826,6 +840,9 @@ class BotRuntime:
                         "symbol_exposure_pct": float(risk_ctx.symbol_exposure_pct),
                         "correlated_usd_exposure_pct": float(risk_ctx.correlated_usd_exposure_pct),
                         "max_loss_amount_if_sl_hit": float(risk_ctx.max_loss_amount_if_sl_hit),
+                        "approved_volume": float(signal.lot_size or 0.0),
+                        "margin_required": float(locals().get("margin_required", 0.0) or 0.0),
+                        "portfolio_exposure_after_trade": float(risk_ctx.account_exposure_pct),
                     }
                 )
             gate_result = self._gate.evaluate(gate_ctx)

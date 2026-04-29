@@ -72,10 +72,15 @@ class RuntimeFactory:
             kwargs = dict(credentials or {})
             kwargs.setdefault("symbol", symbol)
             kwargs.setdefault("timeframe", timeframe)
-            if provider_type in {"ctrader", "mt5"}:
-                kwargs.setdefault("live", str(runtime_mode).lower() == "live")
+            if provider_type == "ctrader":
+                ctrader_provider_type = "ctrader_live" if str(runtime_mode).lower() == "live" else "ctrader_demo"
+                return get_provider(ctrader_provider_type, **kwargs)
+            if provider_type == "mt5":
+                mt5_provider_type = "mt5_live" if str(runtime_mode).lower() == "live" else "mt5_demo"
+                return get_provider(mt5_provider_type, **kwargs)
             if provider_type == "bybit":
-                kwargs.setdefault("testnet", str(runtime_mode).lower() != "live")
+                bybit_provider_type = "bybit_live" if str(runtime_mode).lower() == "live" else "bybit_demo"
+                return get_provider(bybit_provider_type, **kwargs)
             return get_provider(provider_type, **kwargs)
         raise ValueError(f"Unsupported provider_type: {provider_type!r}")
 

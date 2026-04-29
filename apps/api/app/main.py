@@ -8,8 +8,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.core.config import get_settings
+from app.core.db import AsyncSessionLocal
 from app.core.middleware import RequestIDMiddleware
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,9 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Forex API (env=%s)", settings.app_env)
+
+    if settings.is_production and settings.enable_legacy_routes:
+        raise RuntimeError("enable_legacy_routes must be false in production")
 
     # Boot RuntimeRegistry
     try:
@@ -41,16 +46,23 @@ async def lifespan(app: FastAPI):
         import sentry_sdk
         sentry_sdk.init(dsn=settings.sentry_dsn, environment=settings.app_env)
 
-    # Start Unknown Order Daemon (P0.5)
     import asyncio as _asyncio
-    from app.workers.reconciliation_daemon import run_reconciliation_daemon
-    _daemon_stop = _asyncio.Event()
-    _daemon_task = _asyncio.create_task(
-        run_reconciliation_daemon(stop_event=_daemon_stop),
-        name="reconciliation_daemon",
-    )
-    app.state.daemon_stop = _daemon_stop
-    app.state.daemon_task = _daemon_task
+    app.state.daemon_enabled = bool(settings.enable_reconciliation_daemon)
+    if app.state.daemon_enabled:
+        # Start Unknown Order Daemon (P0.5)
+        from app.workers.reconciliation_daemon import run_reconciliation_daemon
+
+        _daemon_stop = _asyncio.Event()
+        _daemon_task = _asyncio.create_task(
+            run_reconciliation_daemon(stop_event=_daemon_stop),
+            name="reconciliation_daemon",
+        )
+        app.state.daemon_stop = _daemon_stop
+        app.state.daemon_task = _daemon_task
+    else:
+        app.state.daemon_stop = None
+        app.state.daemon_task = None
+        logger.info("Reconciliation daemon disabled by config")
 
     yield
 
@@ -101,7 +113,6 @@ from app.routers import (
     bots,
     experiments,
     incidents,
-    legacy,
     live_trading,
     notifications,
     public,
@@ -134,11 +145,19 @@ app.include_router(live_trading.router)
 app.include_router(risk_policy.router)
 app.include_router(experiments.router)
 app.include_router(qa_parity.router)
-app.include_router(legacy.router)
+if settings.enable_legacy_routes:
+    from app.routers import legacy
+
+    app.include_router(legacy.router)
 
 
 @app.get("/health")
 async def health():
+    return await health_ready()
+
+
+@app.get("/health/ready")
+async def health_ready():
     registry = getattr(app.state, "registry", None)
     runtime_health = {"total": 0, "running": 0, "paused": 0, "error": 0}
     if registry is not None and hasattr(registry, "list_all"):
@@ -153,4 +172,56 @@ async def health():
         "version": "1.0.0",
         "env": settings.app_env,
         "runtime_health": runtime_health,
+    }
+
+
+@app.get("/health/live")
+async def health_live():
+    daemon_task = getattr(app.state, "daemon_task", None)
+    daemon_enabled = bool(getattr(app.state, "daemon_enabled", False))
+    daemon_running = bool(daemon_task is not None and not daemon_task.done())
+    return {
+        "status": "ok",
+        "env": settings.app_env,
+        "daemon_enabled": daemon_enabled,
+        "daemon_running": daemon_running,
+        "legacy_routes_enabled": bool(settings.enable_legacy_routes),
+    }
+
+
+@app.get("/health/deep")
+async def health_deep():
+    db_ok = False
+    redis_ok = False
+
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception as exc:
+        logger.warning("health/deep db check failed: %s", exc)
+
+    try:
+        from app.core.cache import get_redis
+
+        redis = await get_redis()
+        await redis.ping()
+        redis_ok = True
+    except Exception as exc:
+        logger.warning("health/deep redis check failed: %s", exc)
+
+    daemon_task = getattr(app.state, "daemon_task", None)
+    daemon_enabled = bool(getattr(app.state, "daemon_enabled", False))
+    daemon_running = bool(daemon_task is not None and not daemon_task.done())
+
+    checks = {
+        "db": db_ok,
+        "redis": redis_ok,
+        "reconciliation_daemon": (daemon_running if daemon_enabled else True),
+        "legacy_routes_disabled": not bool(settings.enable_legacy_routes),
+    }
+    return {
+        "status": "ok" if all(checks.values()) else "degraded",
+        "env": settings.app_env,
+        "checks": checks,
     }

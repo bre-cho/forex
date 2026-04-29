@@ -10,12 +10,8 @@ from app.services.order_ledger_service import OrderLedgerService
 @pytest.mark.asyncio
 async def test_persist_intent_creates_attempt_and_projection() -> None:
     svc = OrderLedgerService(MagicMock())
-    attempt = MagicMock()
-    svc.ledger = MagicMock()
-    svc.projection = MagicMock()
-    svc.recon_queue = MagicMock()
-    svc.ledger.create_or_get_order_attempt = AsyncMock(return_value=attempt)
-    svc.projection.upsert_from_order_attempt = AsyncMock()
+    svc.uow = MagicMock()
+    svc.uow.reserve_intent = AsyncMock()
 
     await svc.persist_intent(
         bot_instance_id="bot-1",
@@ -29,28 +25,15 @@ async def test_persist_intent_creates_attempt_and_projection() -> None:
         request_payload={"order_type": "market"},
     )
 
-    svc.ledger.create_or_get_order_attempt.assert_awaited_once()
-    svc.projection.upsert_from_order_attempt.assert_awaited_once_with("bot-1", attempt)
+    svc.uow.reserve_intent.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_persist_execution_receipt_unknown_enqueues_reconciliation() -> None:
     svc = OrderLedgerService(MagicMock())
-    svc.ledger = MagicMock()
-    svc.projection = MagicMock()
-    svc.recon_queue = MagicMock()
-
-    svc.ledger.record_execution_receipt = AsyncMock()
-    svc.ledger.update_order_attempt = AsyncMock()
-    svc.ledger.record_order_state_transition = AsyncMock()
-    svc.ledger.get_order_attempt = AsyncMock(return_value=MagicMock())
-    mock_receipt = MagicMock()
-    mock_receipt.idempotency_key = "idem-2"
-    svc.ledger.list_execution_receipts = AsyncMock(return_value=[mock_receipt])
-
-    svc.projection.upsert_from_order_attempt = AsyncMock()
-    svc.projection.upsert_from_execution_receipt = AsyncMock()
-    svc.recon_queue.enqueue_unknown_order = AsyncMock()
+    svc.uow = MagicMock()
+    svc.uow.persist_broker_result_atomic = AsyncMock()
+    svc.uow.enqueue_unknown_atomic = AsyncMock()
 
     payload = {
         "broker_order_id": "ord-1",
@@ -66,8 +49,7 @@ async def test_persist_execution_receipt_unknown_enqueues_reconciliation() -> No
         payload=payload,
     )
 
-    svc.ledger.record_execution_receipt.assert_awaited_once()
-    svc.recon_queue.enqueue_unknown_order.assert_not_awaited()
+    svc.uow.persist_broker_result_atomic.assert_awaited_once()
 
     await svc.enqueue_unknown_order(
         bot_instance_id="bot-2",
@@ -75,4 +57,4 @@ async def test_persist_execution_receipt_unknown_enqueues_reconciliation() -> No
         signal_id="sig-2",
         payload=payload,
     )
-    svc.recon_queue.enqueue_unknown_order.assert_awaited_once()
+    svc.uow.enqueue_unknown_atomic.assert_awaited_once()

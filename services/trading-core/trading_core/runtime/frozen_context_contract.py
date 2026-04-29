@@ -26,7 +26,13 @@ def validate_frozen_context_bindings(*, request: Any, context: Any, provider_nam
         return FrozenContextValidationResult(False, "missing_policy_version")
 
     gate_ctx = getattr(context, "gate_context", {}) or {}
+    if str(gate_ctx.get("schema_version", "") or "") != "gate_context_v1":
+        return FrozenContextValidationResult(False, "invalid_gate_context_schema_version")
     for key in ("symbol", "side", "requested_volume", "idempotency_key"):
+        if str(gate_ctx.get(key, "") or "") == "":
+            return FrozenContextValidationResult(False, f"missing_gate_context_{key}")
+
+    for key in ("account_id", "broker_name", "policy_version"):
         if str(gate_ctx.get(key, "") or "") == "":
             return FrozenContextValidationResult(False, f"missing_gate_context_{key}")
 
@@ -46,9 +52,25 @@ def validate_frozen_context_bindings(*, request: Any, context: Any, provider_nam
         return FrozenContextValidationResult(False, "side_mismatch")
 
     req_volume = float(getattr(request, "volume", 0.0) or 0.0)
-    frozen_volume = float(gate_ctx.get("requested_volume", 0.0) or 0.0)
+    frozen_volume = float(gate_ctx.get("approved_volume", gate_ctx.get("requested_volume", 0.0)) or 0.0)
     if abs(req_volume - frozen_volume) > 1e-9:
         return FrozenContextValidationResult(False, "requested_volume_mismatch")
+
+    gate_account_id = str(gate_ctx.get("account_id", "") or "")
+    if str(getattr(context, "account_id", "") or "") != gate_account_id:
+        return FrozenContextValidationResult(False, "account_id_mismatch_in_gate")
+
+    gate_broker = str(gate_ctx.get("broker_name", "") or "")
+    if gate_broker.lower() != str(provider_name or "").lower():
+        return FrozenContextValidationResult(False, "broker_name_mismatch_in_gate")
+
+    gate_policy_version = str(gate_ctx.get("policy_version", "") or "")
+    if gate_policy_version != str(getattr(context, "policy_version", "") or ""):
+        return FrozenContextValidationResult(False, "policy_version_mismatch_in_gate")
+
+    # In GateContextV1, a non-empty policy_hash indicates an approved immutable policy snapshot.
+    if str(gate_ctx.get("policy_hash", "") or "") == "":
+        return FrozenContextValidationResult(False, "missing_gate_context_policy_hash")
 
     req_type = str(getattr(request, "order_type", "") or "market").lower()
     if str(getattr(context, "order_type", "market") or "market").lower() != req_type:

@@ -8,10 +8,16 @@ from trading_core.runtime.frozen_context_contract import validate_frozen_context
 
 def _base_ctx(**overrides):
     gate_context = {
+        "schema_version": "gate_context_v1",
         "symbol": "EURUSD",
         "side": "buy",
         "requested_volume": 0.1,
+        "approved_volume": 0.1,
         "idempotency_key": "idem-abc",
+        "account_id": "acc-123",
+        "broker_name": "ctrader",
+        "policy_version": "v1.0",
+        "policy_hash": "policy_hash_abc",
     }
     d = dict(
         bot_instance_id="bot-1",
@@ -60,7 +66,18 @@ def test_broker_name_case_insensitive():
 
 
 def test_symbol_mismatch():
-    gate_context = {"symbol": "GBPUSD", "side": "buy", "requested_volume": 0.1, "idempotency_key": "idem-abc"}
+    gate_context = {
+        "schema_version": "gate_context_v1",
+        "symbol": "GBPUSD",
+        "side": "buy",
+        "requested_volume": 0.1,
+        "approved_volume": 0.1,
+        "idempotency_key": "idem-abc",
+        "account_id": "acc-123",
+        "broker_name": "ctrader",
+        "policy_version": "v1.0",
+        "policy_hash": "policy_hash_abc",
+    }
     ctx = _base_ctx(gate_context=gate_context, context_hash=hash_gate_context(gate_context))
     r = validate_frozen_context_bindings(request=_base_req(), context=ctx, provider_name="ctrader")
     assert not r.ok
@@ -105,8 +122,36 @@ def test_missing_policy_version():
 
 
 def test_missing_gate_context_field_blocks_live() -> None:
-    gate_context = {"symbol": "EURUSD", "requested_volume": 0.1, "idempotency_key": "idem-abc"}
+    gate_context = {
+        "schema_version": "gate_context_v1",
+        "symbol": "EURUSD",
+        "requested_volume": 0.1,
+        "approved_volume": 0.1,
+        "idempotency_key": "idem-abc",
+        "account_id": "acc-123",
+        "broker_name": "ctrader",
+        "policy_version": "v1.0",
+        "policy_hash": "policy_hash_abc",
+    }
     ctx = _base_ctx(gate_context=gate_context, context_hash=hash_gate_context(gate_context))
     r = validate_frozen_context_bindings(request=_base_req(), context=ctx, provider_name="ctrader")
     assert r.ok is False
     assert "missing_gate_context_side" in r.reason
+
+
+def test_missing_policy_hash_blocks_live() -> None:
+    gate_context = {
+        "schema_version": "gate_context_v1",
+        "symbol": "EURUSD",
+        "side": "buy",
+        "requested_volume": 0.1,
+        "approved_volume": 0.1,
+        "idempotency_key": "idem-abc",
+        "account_id": "acc-123",
+        "broker_name": "ctrader",
+        "policy_version": "v1.0",
+    }
+    ctx = _base_ctx(gate_context=gate_context, context_hash=hash_gate_context(gate_context))
+    r = validate_frozen_context_bindings(request=_base_req(), context=ctx, provider_name="ctrader")
+    assert r.ok is False
+    assert "policy_hash" in r.reason

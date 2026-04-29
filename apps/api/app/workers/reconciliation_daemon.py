@@ -19,10 +19,12 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import AsyncSessionLocal
 from app.models import ReconciliationQueueItem, TradingIncident
+from app.services.daily_trading_state import DailyTradingStateService
 from app.services.reconciliation_lease_service import ReconciliationLeaseService
 from app.services.reconciliation_queue_service import ReconciliationQueueService
 from app.services.incident_notifier import notify_incident
@@ -42,26 +44,15 @@ def _worker_id() -> str:
 
 
 async def _lock_bot_daily_state(db: AsyncSession, bot_instance_id: str) -> None:
-    """Set daily trading state locked=True for bot if a record exists."""
-    from sqlalchemy import select, update
-    from app.models import DailyTradingState  # type: ignore[attr-defined]
-
+    """Set daily trading state locked=True for bot, creating row if needed."""
     try:
-        result = await db.execute(
-            select(DailyTradingState).where(
-                DailyTradingState.bot_instance_id == bot_instance_id,
-            ).limit(1)
+        state_service = DailyTradingStateService(db)
+        state = await state_service.lock_day(bot_instance_id, reason="unknown_order_escalation")
+        logger.warning(
+            "reconciliation_daemon: daily lock set bot=%s day=%s reason=unknown_order_escalation",
+            bot_instance_id,
+            getattr(state, "trading_day", None),
         )
-        row = result.scalar_one_or_none()
-        if row is not None and not getattr(row, "locked", False):
-            row.locked = True
-            row.lock_reason = "unknown_order_escalation"
-            row.updated_at = datetime.now(timezone.utc)
-            await db.commit()
-            logger.warning(
-                "reconciliation_daemon: daily lock set bot=%s reason=unknown_order_escalation",
-                bot_instance_id,
-            )
     except Exception as exc:
         logger.error("reconciliation_daemon: failed to lock bot %s: %s", bot_instance_id, exc)
         await db.rollback()
@@ -73,6 +64,25 @@ async def _create_critical_incident(
     reason: str,
 ) -> None:
     """Insert a critical TradingIncident for escalated unknown order."""
+    dedupe_key = f"unknown_order_escalated:{item.bot_instance_id}:{item.idempotency_key}:{reason}"
+    existing = (
+        (
+            await db.execute(
+                select(TradingIncident)
+                .where(
+                    TradingIncident.bot_instance_id == item.bot_instance_id,
+                    TradingIncident.incident_type == "unknown_order_escalated",
+                    TradingIncident.status == "open",
+                    TradingIncident.detail.contains(dedupe_key),
+                )
+                .limit(1)
+            )
+        )
+        .scalar_one_or_none()
+    )
+    if existing is not None:
+        return
+
     incident = TradingIncident(
         bot_instance_id=item.bot_instance_id,
         incident_type="unknown_order_escalated",
@@ -80,7 +90,7 @@ async def _create_critical_incident(
         title=f"Unknown order unresolved: {item.idempotency_key}",
         detail=(
             f"bot={item.bot_instance_id} idem={item.idempotency_key} "
-            f"attempts={item.attempts} reason={reason}"
+            f"attempts={item.attempts} reason={reason} dedupe_key={dedupe_key}"
         ),
         status="open",
     )

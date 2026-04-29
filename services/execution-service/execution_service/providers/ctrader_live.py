@@ -10,5 +10,7 @@ class CTraderLiveProvider(CTraderProvider):
     """
 
     def __init__(self, *args, **kwargs):
-        kwargs["live"] = True
+        # Base CTraderProvider is demo-only by contract.
+        kwargs["live"] = False
         super().__init__(*args, **kwargs)
+        self.live = True

@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     secret_key: str = ""
     debug: bool = False
     log_level: str = "INFO"
+    enable_reconciliation_daemon: bool = True
+    enable_legacy_routes: bool = False
 
     # JWT
     jwt_secret: str = ""
@@ -95,7 +97,7 @@ class Settings(BaseSettings):
 
     @property
     def is_production(self) -> bool:
-        return self.app_env == "production"
+        return str(self.app_env).lower() == "production"
 
     @field_validator("secret_key", "jwt_secret", mode="after")
     @classmethod

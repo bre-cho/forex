@@ -441,6 +441,29 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                 brain_cycle_id,
             )
 
+    async def mark_submitting_hook(bot_instance_id: str, idempotency_key: str) -> None:
+        async with AsyncSessionLocal() as db:
+            order_ledger = OrderLedgerService(db)
+            await order_ledger.persist_submit_requested(
+                bot_instance_id=str(bot_instance_id or bot_id),
+                idempotency_key=str(idempotency_key),
+            )
+
+    async def enqueue_unknown_hook(
+        bot_instance_id: str,
+        idempotency_key: str,
+        signal_id: str | None,
+        payload: dict,
+    ) -> None:
+        async with AsyncSessionLocal() as db:
+            order_ledger = OrderLedgerService(db)
+            await order_ledger.enqueue_unknown_order(
+                bot_instance_id=str(bot_instance_id or bot_id),
+                idempotency_key=str(idempotency_key),
+                signal_id=str(signal_id or "") or None,
+                payload=dict(payload or {}),
+            )
+
     async def get_daily_state() -> dict | None:
         async with AsyncSessionLocal() as db:
             svc = DailyTradingStateService(db)
@@ -736,6 +759,8 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
         "on_reconciliation_result": on_reconciliation_result,
         "on_reconciliation_incident": on_reconciliation_incident,
         "on_unknown_order_resolved": on_unknown_order_resolved,
+        "mark_submitting_hook": mark_submitting_hook,
+        "enqueue_unknown_hook": enqueue_unknown_hook,
     }
 
 
@@ -829,6 +854,8 @@ async def create_runtime_for_bot(
             on_reconciliation_result=hooks["on_reconciliation_result"],
             on_reconciliation_incident=hooks["on_reconciliation_incident"],
             on_unknown_order_resolved=hooks["on_unknown_order_resolved"],
+            mark_submitting_hook=hooks["mark_submitting_hook"],
+            enqueue_unknown_hook=hooks["enqueue_unknown_hook"],
         )
         logger.info("Runtime created for bot: %s (mode=%s)", bot.id, bot.mode)
 

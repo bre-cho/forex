@@ -33,6 +33,7 @@ class ReconciliationQueueService:
         idempotency_key: str,
         signal_id: str | None = None,
         payload: dict[str, Any] | None = None,
+        auto_commit: bool = True,
     ) -> ReconciliationQueueItem:
         stmt = select(ReconciliationQueueItem).where(
             ReconciliationQueueItem.bot_instance_id == bot_instance_id,
@@ -44,8 +45,11 @@ class ReconciliationQueueService:
                 existing.status = "pending"
             existing.payload = payload or existing.payload or {}
             existing.updated_at = datetime.now(timezone.utc)
-            await self.db.commit()
-            await self.db.refresh(existing)
+            if auto_commit:
+                await self.db.commit()
+                await self.db.refresh(existing)
+            else:
+                await self.db.flush()
             return existing
 
         row = ReconciliationQueueItem(
@@ -59,8 +63,11 @@ class ReconciliationQueueService:
             payload=payload or {},
         )
         self.db.add(row)
-        await self.db.commit()
-        await self.db.refresh(row)
+        if auto_commit:
+            await self.db.commit()
+            await self.db.refresh(row)
+        else:
+            await self.db.flush()
         return row
 
     async def list_pending(self, bot_instance_id: str, limit: int = 100) -> list[ReconciliationQueueItem]:

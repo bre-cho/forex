@@ -40,14 +40,16 @@ class MT5Provider(BrokerProvider):
         timeframe: str = "M5",
         live: bool = False,
     ) -> None:
+        if bool(live):
+            raise ValueError("MT5Provider is demo-only; use MT5LiveProvider for live mode")
         self.login = login
         self.password = password
         self.server = server
         self.symbol = symbol
         self.timeframe = timeframe
         self.provider_name = "mt5"
-        self.live = live
-        self.mode = "live" if live else "demo"
+        self.live = False
+        self.mode = "demo"
         self._connected = False
         self._account_id: Optional[int] = None
 

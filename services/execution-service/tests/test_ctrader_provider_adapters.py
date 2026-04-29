@@ -8,6 +8,7 @@ import pytest
 
 from execution_service.providers.base import OrderRequest
 from execution_service.providers.ctrader import CTraderProvider
+from execution_service.providers.ctrader_live import CTraderLiveProvider
 
 
 @pytest.mark.asyncio
@@ -27,13 +28,12 @@ async def test_live_connect_fails_when_execution_adapter_unavailable(monkeypatch
     monkeypatch.setitem(sys.modules, "trading_core.engines", types.ModuleType("trading_core.engines"))
     monkeypatch.setitem(sys.modules, "trading_core.engines.ctrader_provider", module)
 
-    provider = CTraderProvider(
+    provider = CTraderLiveProvider(
         client_id="id",
         client_secret="secret",
         access_token="token",
         refresh_token="refresh",
         account_id=123,
-        live=True,
     )
 
     with pytest.raises(RuntimeError, match="execution adapter unavailable"):

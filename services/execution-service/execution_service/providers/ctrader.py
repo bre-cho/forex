@@ -34,6 +34,8 @@ class CTraderProvider(BrokerProvider):
         timeframe: str = "M5",
         live: bool = False,
     ) -> None:
+        if bool(live):
+            raise ValueError("CTraderProvider is demo-only; use CTraderLiveProvider for live mode")
         self._client_id = client_id
         self._client_secret = client_secret
         self._access_token = access_token
@@ -42,7 +44,7 @@ class CTraderProvider(BrokerProvider):
         self.symbol = symbol
         self.timeframe = timeframe
         self.provider_name = "ctrader"
-        self.live = live
+        self.live = False
         self._provider = None
         self._execution_adapter = CTraderUnavailableExecutionAdapter("execution_adapter_not_initialized")
         self._market_data_adapter = CTraderMarketDataAdapter(None)

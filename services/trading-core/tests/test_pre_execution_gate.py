@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from trading_core.runtime.pre_execution_gate import GateResult, PreExecutionGate
+from trading_core.runtime.pre_execution_gate import GateResult, PreExecutionGate, hash_gate_context
 
 DEFAULT_POLICY: dict = {
     "max_daily_loss_pct": 5.0,
@@ -163,3 +163,32 @@ def test_portfolio_daily_loss_blocks():
     result = gate.evaluate(_ctx(portfolio_daily_loss_pct=8.0))
     assert result.action == "BLOCK"
     assert result.reason == "portfolio_daily_loss_limit_hit"
+
+
+def test_gate_context_hash_is_canonical_for_key_order() -> None:
+    ctx_a = {
+        "schema_version": "gate_context_v1",
+        "symbol": "EURUSD",
+        "side": "buy",
+        "requested_volume": 0.1,
+        "approved_volume": 0.1,
+        "account_id": "acc-1",
+        "broker_name": "ctrader",
+        "policy_version": "v1",
+        "policy_hash": "policy_hash_1",
+        "idempotency_key": "idem-1",
+        "runtime_mode": "live",
+        "provider_mode": "live",
+        "broker_connected": True,
+        "market_data_ok": True,
+        "data_age_seconds": 1.0,
+        "spread_pips": 0.2,
+        "confidence": 0.9,
+        "rr": 2.0,
+        "open_positions": 0,
+        "daily_profit_amount": 0.0,
+        "daily_loss_pct": 0.0,
+        "consecutive_losses": 0,
+    }
+    ctx_b = dict(reversed(list(ctx_a.items())))
+    assert hash_gate_context(ctx_a) == hash_gate_context(ctx_b)

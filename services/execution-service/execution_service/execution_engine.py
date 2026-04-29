@@ -346,12 +346,30 @@ class ExecutionEngine:
         # and the unknown-order daemon will catch it during next poll.
         _bot_id = str(getattr(ctx, "bot_instance_id", "") or "") if ctx else ""
         _idem_key = str(getattr(request, "idempotency_key", "") or getattr(request, "client_order_id", "") or "")
-        _signal_id = str(getattr(getattr(payload, "intent", None) or {}, "signal_id", "") or "") if isinstance(payload, ExecutionCommand) else ""
+        _signal_id = ""
+        if isinstance(payload, ExecutionCommand):
+            _intent = getattr(payload, "intent", None)
+            if isinstance(_intent, dict):
+                _signal_id = str(_intent.get("signal_id") or "")
+            else:
+                _signal_id = str(getattr(_intent, "signal_id", "") or "")
         if self._runtime_mode == "live" and _bot_id and _idem_key and callable(self._mark_submitting_hook):
             try:
                 await self._mark_submitting_hook(_bot_id, _idem_key)
             except Exception as _hook_exc:
-                logger.warning("mark_submitting_hook failed idem=%s: %s", _idem_key, _hook_exc)
+                logger.error("mark_submitting_hook failed idem=%s: %s", _idem_key, _hook_exc)
+                return OrderResult(
+                    order_id="",
+                    symbol=request.symbol,
+                    side=request.side,
+                    volume=request.volume,
+                    fill_price=float(request.price or 0.0),
+                    commission=0.0,
+                    success=False,
+                    error_message=f"execution_gate_blocked:mark_submitting_failed:{_hook_exc}",
+                    submit_status="UNKNOWN",
+                    fill_status="UNKNOWN",
+                )
 
         started = time.perf_counter()
         try:
@@ -374,14 +392,18 @@ class ExecutionEngine:
                 raw_response={"latency_ms": round((time.perf_counter() - started) * 1000.0, 2)},
             )
             # P0.4 — Enqueue for reconciliation after timeout
-            if self._runtime_mode == "live" and _bot_id and _idem_key and callable(self._enqueue_unknown_hook):
+            if self._runtime_mode == "live" and _bot_id and _idem_key:
+                if not callable(self._enqueue_unknown_hook):
+                    _result.error_message = "critical_unknown_enqueue_failed:missing_enqueue_unknown_hook"
+                    return _result
                 try:
                     await self._enqueue_unknown_hook(
                         _bot_id, _idem_key, _signal_id,
                         {"reason": "broker_submit_timeout", "symbol": request.symbol, "idempotency_key": _idem_key},
                     )
                 except Exception as _q_exc:
-                    logger.warning("enqueue_unknown_hook failed idem=%s: %s", _idem_key, _q_exc)
+                    logger.error("enqueue_unknown_hook failed idem=%s: %s", _idem_key, _q_exc)
+                    _result.error_message = f"critical_unknown_enqueue_failed:broker_submit_timeout:{_q_exc}"
             return _result
         except Exception as exc:
             _result = OrderResult(
@@ -398,14 +420,18 @@ class ExecutionEngine:
                 raw_response={"latency_ms": round((time.perf_counter() - started) * 1000.0, 2)},
             )
             # P0.4 — Enqueue for reconciliation after broker error
-            if self._runtime_mode == "live" and _bot_id and _idem_key and callable(self._enqueue_unknown_hook):
+            if self._runtime_mode == "live" and _bot_id and _idem_key:
+                if not callable(self._enqueue_unknown_hook):
+                    _result.error_message = "critical_unknown_enqueue_failed:missing_enqueue_unknown_hook"
+                    return _result
                 try:
                     await self._enqueue_unknown_hook(
                         _bot_id, _idem_key, _signal_id,
                         {"reason": f"broker_submit_error:{exc}", "symbol": request.symbol, "idempotency_key": _idem_key},
                     )
                 except Exception as _q_exc:
-                    logger.warning("enqueue_unknown_hook failed idem=%s: %s", _idem_key, _q_exc)
+                    logger.error("enqueue_unknown_hook failed idem=%s: %s", _idem_key, _q_exc)
+                    _result.error_message = f"critical_unknown_enqueue_failed:broker_submit_error:{_q_exc}"
             return _result
         if result.raw_response is None:
             result.raw_response = {}

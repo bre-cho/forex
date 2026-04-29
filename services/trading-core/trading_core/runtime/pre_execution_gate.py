@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict
 
 from trading_core.risk.daily_profit_policy import resolve_daily_take_profit_target
@@ -20,7 +20,7 @@ class GateResult:
 
 
 @dataclass(frozen=True)
-class GateContext:
+class GateContextV1:
     provider_mode: str
     runtime_mode: str
     broker_connected: bool
@@ -59,12 +59,20 @@ class GateContext:
     slippage_pips: float = 0.0
     policy_version: str = ""
     idempotency_key: str = ""
+    quote_id: str = ""
+    quote_timestamp: float = 0.0
+    instrument_spec_hash: str = ""
+    policy_hash: str = ""
+    approved_volume: float = 0.0
+    margin_required: float = 0.0
+    portfolio_exposure_after_trade: float = 0.0
+    schema_version: str = field(default="gate_context_v1", init=False)
 
     def to_dict(self) -> Dict[str, Any]:
-        return dict(self.__dict__)
+        return asdict(self)
 
     @classmethod
-    def from_dict(cls, context: Dict[str, Any]) -> "GateContext":
+    def from_dict(cls, context: Dict[str, Any]) -> "GateContextV1":
         return cls(
             provider_mode=str(context.get("provider_mode", "stub")),
             runtime_mode=str(context.get("runtime_mode", "paper")),
@@ -103,11 +111,22 @@ class GateContext:
             slippage_pips=float(context.get("slippage_pips", 0.0) or 0.0),
             policy_version=str(context.get("policy_version", "") or ""),
             idempotency_key=str(context.get("idempotency_key", "") or ""),
+            quote_id=str(context.get("quote_id", "") or ""),
+            quote_timestamp=float(context.get("quote_timestamp", 0.0) or 0.0),
+            instrument_spec_hash=str(context.get("instrument_spec_hash", "") or ""),
+            policy_hash=str(context.get("policy_hash", "") or ""),
+            approved_volume=float(context.get("approved_volume", context.get("requested_volume", 0.0)) or 0.0),
+            margin_required=float(context.get("margin_required", 0.0) or 0.0),
+            portfolio_exposure_after_trade=float(context.get("portfolio_exposure_after_trade", 0.0) or 0.0),
         )
 
 
+# Backward-compatible alias for existing imports.
+GateContext = GateContextV1
+
+
 def canonicalize_gate_context(context: Dict[str, Any]) -> Dict[str, Any]:
-    return GateContext.from_dict(context).to_dict()
+    return GateContextV1.from_dict(context).to_dict()
 
 
 def hash_gate_context(context: Dict[str, Any]) -> str:

@@ -253,3 +253,34 @@ async def test_process_item_within_grace_period_noop():
 
     queue_svc.mark_retry.assert_not_called()
     queue_svc.move_to_dead_letter.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lock_bot_daily_state_uses_service_lock_day():
+    from app.workers.reconciliation_daemon import _lock_bot_daily_state
+
+    db = AsyncMock()
+    state_svc = AsyncMock()
+    state_svc.lock_day = AsyncMock()
+
+    with patch("app.workers.reconciliation_daemon.DailyTradingStateService", return_value=state_svc):
+        await _lock_bot_daily_state(db, "bot_123")
+
+    state_svc.lock_day.assert_called_once_with("bot_123", reason="unknown_order_escalation")
+
+
+@pytest.mark.asyncio
+async def test_create_critical_incident_skips_duplicate_open_item():
+    from app.workers.reconciliation_daemon import _create_critical_incident
+
+    item = _make_item(bot_instance_id="bot_dup", idempotency_key="idem_dup")
+    db = AsyncMock()
+
+    duplicate_scalar = MagicMock()
+    duplicate_scalar.scalar_one_or_none.return_value = MagicMock(id=99)
+    db.execute = AsyncMock(return_value=duplicate_scalar)
+    db.add = MagicMock()
+
+    await _create_critical_incident(db, item, "deadline_passed")
+
+    db.add.assert_not_called()

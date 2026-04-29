@@ -151,6 +151,7 @@ class SafetyLedgerService:
         request_payload: dict[str, Any],
         gate_context_hash: str | None = None,
         status: str = "PENDING_SUBMIT",
+        auto_commit: bool = True,
     ) -> BrokerOrderAttempt:
         stmt = select(BrokerOrderAttempt).where(
             BrokerOrderAttempt.bot_instance_id == bot_instance_id,
@@ -161,8 +162,11 @@ class SafetyLedgerService:
             if gate_context_hash and str(getattr(existing, "gate_context_hash", "") or "") != str(gate_context_hash):
                 existing.gate_context_hash = str(gate_context_hash)
                 existing.updated_at = datetime.now(timezone.utc)
-                await self.db.commit()
-                await self.db.refresh(existing)
+                if auto_commit:
+                    await self.db.commit()
+                    await self.db.refresh(existing)
+                else:
+                    await self.db.flush()
             return existing
 
         row = BrokerOrderAttempt(
@@ -180,8 +184,11 @@ class SafetyLedgerService:
             current_state="INTENT_CREATED",
         )
         self.db.add(row)
-        await self.db.commit()
-        await self.db.refresh(row)
+        if auto_commit:
+            await self.db.commit()
+            await self.db.refresh(row)
+        else:
+            await self.db.flush()
         return row
 
     async def get_order_attempt(self, bot_instance_id: str, idempotency_key: str) -> BrokerOrderAttempt | None:
@@ -201,6 +208,7 @@ class SafetyLedgerService:
         broker_order_id: str | None = None,
         error_message: str | None = None,
         gate_context_hash: str | None = None,
+        auto_commit: bool = True,
     ) -> BrokerOrderAttempt | None:
         stmt = select(BrokerOrderAttempt).where(
             BrokerOrderAttempt.bot_instance_id == bot_instance_id,
@@ -219,8 +227,11 @@ class SafetyLedgerService:
         if gate_context_hash is not None:
             row.gate_context_hash = str(gate_context_hash or "") or None
         row.updated_at = datetime.now(timezone.utc)
-        await self.db.commit()
-        await self.db.refresh(row)
+        if auto_commit:
+            await self.db.commit()
+            await self.db.refresh(row)
+        else:
+            await self.db.flush()
         return row
 
     async def record_daily_lock_event(
@@ -342,6 +353,7 @@ class SafetyLedgerService:
         latency_ms: float | None = None,
         raw_response_hash: str | None = None,
         submit_status: str | None = None,
+        auto_commit: bool = True,
     ) -> BrokerExecutionReceipt:
         payload = raw_response or {}
         payload_hash = raw_response_hash
@@ -369,8 +381,11 @@ class SafetyLedgerService:
             raw_response=payload,
         )
         self.db.add(row)
-        await self.db.commit()
-        await self.db.refresh(row)
+        if auto_commit:
+            await self.db.commit()
+            await self.db.refresh(row)
+        else:
+            await self.db.flush()
         return row
 
     async def list_execution_receipts(self, bot_instance_id: str, limit: int = 100) -> list[BrokerExecutionReceipt]:
