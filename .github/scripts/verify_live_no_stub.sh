@@ -38,6 +38,12 @@ if ! grep -Eq 'reconciliation_worker_unavailable' services/trading-core/trading_
   errors=$((errors+1))
 fi
 
+# 5) cTrader live path must fail closed when execution adapter is unavailable.
+if ! grep -Eq 'live execution adapter unavailable|_execution_adapter\.available' services/execution-service/execution_service/providers/ctrader.py; then
+  echo "[verify_live_no_stub] missing cTrader live execution-adapter fail-closed checks"
+  errors=$((errors+1))
+fi
+
 if [[ "$errors" -gt 0 ]]; then
   echo "[verify_live_no_stub] FAILED with $errors issue(s)"
   exit 1

@@ -7,6 +7,11 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from .base import AccountInfo, BrokerProvider, OrderRequest, OrderResult
+from .ctrader_execution_adapter import (
+    CTraderUnavailableExecutionAdapter,
+    build_execution_adapter,
+)
+from .ctrader_market_data_adapter import CTraderMarketDataAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +43,9 @@ class CTraderProvider(BrokerProvider):
         self.timeframe = timeframe
         self.provider_name = "ctrader"
         self.live = live
-        self.mode = "live" if live else "demo"
         self._provider = None
+        self._execution_adapter = CTraderUnavailableExecutionAdapter("execution_adapter_not_initialized")
+        self._market_data_adapter = CTraderMarketDataAdapter(None)
         self._connected = False
 
     async def connect(self) -> None:
@@ -50,15 +56,15 @@ class CTraderProvider(BrokerProvider):
                 symbol=self.symbol,
                 timeframe=self.timeframe,
             )
+            self._market_data_adapter = CTraderMarketDataAdapter(self._provider)
+            self._execution_adapter = build_execution_adapter(self._provider)
             # Live mode must verify account + initial market stream readiness before connected=true
             if self.live:
                 if not self._account_id:
                     raise RuntimeError("CTrader live account_id missing")
-                required_methods = ("get_account_info", "get_candles", "place_market_order", "get_positions")
-                missing = [name for name in required_methods if not hasattr(self._provider, name)]
-                if missing:
-                    raise RuntimeError(f"CTrader live adapter missing methods: {','.join(missing)}")
-                candles = self._provider.get_candles(limit=1)
+                if not self._execution_adapter.available:
+                    raise RuntimeError("CTrader live execution adapter unavailable")
+                candles = self._market_data_adapter.get_candles(limit=1)
                 if candles is None or candles.empty:
                     raise RuntimeError("CTrader live stream not ready")
             self._connected = True
@@ -71,6 +77,8 @@ class CTraderProvider(BrokerProvider):
                     "Ensure trading_core.engines.ctrader_provider is available."
                 )
             logger.warning("trading_core not available; CTraderProvider running in stub/paper mode only")
+            self._execution_adapter = CTraderUnavailableExecutionAdapter("trading_core_not_available")
+            self._market_data_adapter = CTraderMarketDataAdapter(None)
             self._connected = False
 
     async def disconnect(self) -> None:
@@ -78,8 +86,8 @@ class CTraderProvider(BrokerProvider):
         logger.info("CTraderProvider disconnected")
 
     async def get_account_info(self) -> AccountInfo:
-        if self._provider and hasattr(self._provider, "get_account_info"):
-            info = await self._provider.get_account_info()
+        if self._execution_adapter.available:
+            info = await self._execution_adapter.get_account_info()
             return AccountInfo(
                 balance=info.get("balance", 0),
                 equity=info.get("equity", 0),
@@ -94,13 +102,11 @@ class CTraderProvider(BrokerProvider):
         )
 
     async def get_candles(self, symbol: str, timeframe: str, limit: int = 200) -> pd.DataFrame:
-        if self._provider and hasattr(self._provider, "get_candles"):
-            return self._provider.get_candles(limit=limit)
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        return self._market_data_adapter.get_candles(limit=limit)
 
     async def place_order(self, request: OrderRequest) -> OrderResult:
-        if self._provider and hasattr(self._provider, "place_market_order"):
-            result = await self._provider.place_market_order(
+        if self._execution_adapter.available:
+            result = await self._execution_adapter.place_market_order(
                 symbol=request.symbol,
                 side=request.side,
                 volume=request.volume,
@@ -123,8 +129,8 @@ class CTraderProvider(BrokerProvider):
         )
 
     async def close_position(self, position_id: str) -> OrderResult:
-        if self._provider and hasattr(self._provider, "close_position"):
-            result = await self._provider.close_position(position_id=int(position_id))
+        if self._execution_adapter.available:
+            result = await self._execution_adapter.close_position(position_id=int(position_id))
             return OrderResult(
                 order_id=position_id, symbol="", side="close",
                 volume=result.get("volume", 0),
@@ -138,20 +144,24 @@ class CTraderProvider(BrokerProvider):
         )
 
     async def get_open_positions(self) -> List[Dict[str, Any]]:
-        if self._provider and hasattr(self._provider, "get_positions"):
-            return await self._provider.get_positions()
+        if self._execution_adapter.available:
+            return await self._execution_adapter.get_positions()
         return []
 
     async def get_trade_history(self, limit: int = 100) -> List[Dict[str, Any]]:
-        if self._provider and hasattr(self._provider, "get_history"):
-            return await self._provider.get_history(limit=limit)
+        if self._execution_adapter.available:
+            return await self._execution_adapter.get_history(limit=limit)
         return []
 
     async def health_check(self) -> Dict[str, Any]:
         if not self._connected:
             return {"status": "disconnected", "reason": "provider_not_connected"}
-        if self._provider is None:
-            return {"status": "degraded", "reason": "provider_running_in_stub_mode"}
+        execution_health = await self._execution_adapter.health_check()
+        if execution_health.status != "healthy":
+            return {"status": execution_health.status, "reason": execution_health.reason}
+        market_health = self._market_data_adapter.health_check()
+        if market_health.status != "healthy":
+            return {"status": market_health.status, "reason": market_health.reason}
         return {"status": "healthy", "reason": ""}
 
     @property
@@ -162,6 +172,6 @@ class CTraderProvider(BrokerProvider):
     def mode(self) -> str:
         if not self._connected:
             return "unavailable"
-        if self._provider is None:
+        if not self._execution_adapter.available:
             return "stub"
         return "live" if self.live else "demo"
