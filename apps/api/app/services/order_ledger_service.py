@@ -39,6 +39,7 @@ class OrderLedgerService:
         side: str,
         volume: float,
         request_payload: dict[str, Any],
+        gate_context_hash: str | None = None,
     ) -> None:
         """Persist order intent before broker submit and update read-model projection."""
         attempt = await self.ledger.create_or_get_order_attempt(
@@ -51,6 +52,7 @@ class OrderLedgerService:
             side=side,
             volume=volume,
             request_payload=request_payload,
+            gate_context_hash=gate_context_hash,
             status="PENDING_SUBMIT",
         )
         await self.projection.upsert_from_order_attempt(bot_instance_id, attempt)

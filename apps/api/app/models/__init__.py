@@ -436,6 +436,7 @@ class BrokerOrderAttempt(Base):
     side: Mapped[str] = mapped_column(String(8), nullable=False)
     volume: Mapped[float] = mapped_column(Float, nullable=False)
     request_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    gate_context_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="PENDING_SUBMIT")
     current_state: Mapped[str] = mapped_column(String(64), default="INTENT_CREATED")
     broker_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

@@ -147,6 +147,7 @@ class SafetyLedgerService:
         side: str,
         volume: float,
         request_payload: dict[str, Any],
+        gate_context_hash: str | None = None,
         status: str = "PENDING_SUBMIT",
     ) -> BrokerOrderAttempt:
         stmt = select(BrokerOrderAttempt).where(
@@ -155,6 +156,11 @@ class SafetyLedgerService:
         )
         existing = (await self.db.execute(stmt.limit(1))).scalar_one_or_none()
         if existing is not None:
+            if gate_context_hash and str(getattr(existing, "gate_context_hash", "") or "") != str(gate_context_hash):
+                existing.gate_context_hash = str(gate_context_hash)
+                existing.updated_at = datetime.now(timezone.utc)
+                await self.db.commit()
+                await self.db.refresh(existing)
             return existing
 
         row = BrokerOrderAttempt(
@@ -167,6 +173,7 @@ class SafetyLedgerService:
             side=side,
             volume=volume,
             request_payload=request_payload,
+            gate_context_hash=str(gate_context_hash or "") or None,
             status=status,
             current_state="INTENT_CREATED",
         )
@@ -191,6 +198,7 @@ class SafetyLedgerService:
         current_state: str | None = None,
         broker_order_id: str | None = None,
         error_message: str | None = None,
+        gate_context_hash: str | None = None,
     ) -> BrokerOrderAttempt | None:
         stmt = select(BrokerOrderAttempt).where(
             BrokerOrderAttempt.bot_instance_id == bot_instance_id,
@@ -206,6 +214,8 @@ class SafetyLedgerService:
             row.broker_order_id = broker_order_id
         if error_message is not None:
             row.error_message = error_message
+        if gate_context_hash is not None:
+            row.gate_context_hash = str(gate_context_hash or "") or None
         row.updated_at = datetime.now(timezone.utc)
         await self.db.commit()
         await self.db.refresh(row)

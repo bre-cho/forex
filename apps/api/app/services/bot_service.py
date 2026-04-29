@@ -26,6 +26,7 @@ from app.services.daily_trading_state import DailyTradingStateService
 from app.services.daily_profit_lock_engine import DailyProfitLockEngine
 from app.services.daily_lock_runtime_controller import DailyLockRuntimeController
 from app.services.order_ledger_service import OrderLedgerService
+from app.services.order_projection_service import OrderProjectionService
 from app.services.reconciliation_queue_service import ReconciliationQueueService
 from app.services.safety_ledger import SafetyLedgerService
 from app.services.live_readiness_guard import LiveReadinessGuard
@@ -89,6 +90,12 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
             idempotency_key=idempotency_key,
             status=str(getattr(attempt, "status", "PENDING_SUBMIT") if attempt is not None else "PENDING_SUBMIT"),
             current_state=str(next_state or "").upper(),
+        )
+        projection = OrderProjectionService(ledger.db)
+        await projection.sync_order_status_from_state_transition(
+            bot_id,
+            idempotency_key,
+            str(next_state or "").upper(),
         )
 
     async def on_signal(payload: dict) -> None:
@@ -206,6 +213,7 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                             side=str(payload.get("side") or ""),
                             volume=_safe_float(payload.get("volume"), 0.0),
                             request_payload=dict(payload.get("request_payload") or payload),
+                            gate_context_hash=str(payload.get("gate_context_hash") or "") or None,
                         )
                     except Exception as exc:
                         if bot_mode == "live":
@@ -549,35 +557,91 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
         async with AsyncSessionLocal() as db:
             queue = ReconciliationQueueService(db)
             ledger = SafetyLedgerService(db)
+            order_ledger = OrderLedgerService(db)
             idem = str(payload.get("idempotency_key") or "")
             outcome = str(payload.get("outcome") or "").lower()
             if not idem:
                 return
+            attempt = await ledger.get_order_attempt(bot_id, idem)
+            signal_id = str(payload.get("signal_id") or getattr(attempt, "signal_id", "") or "")
             if outcome in {"filled", "rejected"}:
-                await queue.mark_resolved(bot_id, idem)
-                await ledger.update_order_attempt(
+                await _record_transition_with_validation(
+                    ledger,
+                    signal_id=signal_id,
+                    idempotency_key=idem,
+                    next_state="RECONCILING",
+                    event_type="unknown_reconcile_started",
+                    detail="unknown_order_reconciliation_started",
+                    payload=dict(payload),
+                )
+                mapped_event_type = "order_filled" if outcome == "filled" else "order_rejected"
+                reconciled_payload = {
+                    **dict(payload),
+                    "signal_id": signal_id,
+                    "idempotency_key": idem,
+                }
+                await order_ledger.persist_execution_receipt_and_projection(
                     bot_instance_id=bot_id,
                     idempotency_key=idem,
-                    status=outcome.upper(),
-                    current_state=outcome.upper(),
-                    broker_order_id=str(payload.get("broker_order_id") or "") or None,
-                    error_message=str(payload.get("error") or "") or None,
+                    broker=str(payload.get("broker") or getattr(attempt, "broker", "") or "unknown"),
+                    event_type=mapped_event_type,
+                    payload=reconciled_payload,
                 )
+                await _record_transition_with_validation(
+                    ledger,
+                    signal_id=signal_id,
+                    idempotency_key=idem,
+                    next_state=outcome.upper(),
+                    event_type="unknown_reconciled",
+                    detail=str(payload.get("error") or ""),
+                    payload=dict(payload),
+                )
+                await queue.mark_resolved(bot_id, idem)
             elif outcome in {"failed_needs_operator", "error"}:
-                await queue.mark_failed_needs_operator(
-                    bot_id,
-                    idem,
-                    error=str(payload.get("error") or outcome),
-                )
-                await ledger.create_incident(
-                    bot_instance_id=bot_id,
-                    incident_type="unknown_order_failed_needs_operator",
-                    severity="critical",
-                    title="Unknown order requires operator reconciliation",
-                    detail=str(payload.get("error") or "max_retries_exceeded"),
-                )
-                daily = DailyTradingStateService(db)
-                await daily.lock_day(bot_id, "unknown_order_unresolved")
+                queue_item = await queue.get_item(bot_id, idem)
+                attempts_so_far = int(getattr(queue_item, "attempts", 0) or 0)
+                max_retries = int(os.getenv("UNKNOWN_ORDER_MAX_RETRIES", "5") or "5")
+                if attempts_so_far + 1 >= max_retries:
+                    await _record_transition_with_validation(
+                        ledger,
+                        signal_id=signal_id,
+                        idempotency_key=idem,
+                        next_state="RECONCILING",
+                        event_type="unknown_reconcile_started",
+                        detail="unknown_order_reconciliation_started",
+                        payload=dict(payload),
+                    )
+                    await _record_transition_with_validation(
+                        ledger,
+                        signal_id=signal_id,
+                        idempotency_key=idem,
+                        next_state="FAILED_NEEDS_OPERATOR",
+                        event_type="unknown_reconcile_failed",
+                        detail=str(payload.get("error") or "max_retries_exceeded"),
+                        payload=dict(payload),
+                    )
+                    await queue.mark_failed_needs_operator(
+                        bot_id,
+                        idem,
+                        error=str(payload.get("error") or outcome),
+                    )
+                    await ledger.create_incident(
+                        bot_instance_id=bot_id,
+                        incident_type="unknown_order_failed_needs_operator",
+                        severity="critical",
+                        title="Unknown order requires operator reconciliation",
+                        detail=str(payload.get("error") or "max_retries_exceeded"),
+                    )
+                    daily = DailyTradingStateService(db)
+                    await daily.lock_day(bot_id, "unknown_order_unresolved")
+                else:
+                    retry_after = min(300.0, 15.0 * (2 ** max(0, attempts_so_far)))
+                    await queue.mark_retry(
+                        bot_id,
+                        idem,
+                        error=str(payload.get("error") or outcome),
+                        retry_after_seconds=retry_after,
+                    )
 
     async def close_db_trade(trade_id: str) -> None:
         async with AsyncSessionLocal() as db:

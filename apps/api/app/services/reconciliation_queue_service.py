@@ -15,6 +15,13 @@ class ReconciliationQueueService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
 
+    async def get_item(self, bot_instance_id: str, idempotency_key: str) -> ReconciliationQueueItem | None:
+        stmt = select(ReconciliationQueueItem).where(
+            ReconciliationQueueItem.bot_instance_id == bot_instance_id,
+            ReconciliationQueueItem.idempotency_key == idempotency_key,
+        )
+        return (await self.db.execute(stmt.limit(1))).scalar_one_or_none()
+
     async def enqueue_unknown_order(
         self,
         *,
