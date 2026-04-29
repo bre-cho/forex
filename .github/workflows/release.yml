@@ -23,6 +23,10 @@ jobs:
         run: |
           bash .github/scripts/verify_market_data_quality_scenarios.sh
 
+      - name: Verify runtime snapshot payload contract
+        run: |
+          python .github/scripts/verify_runtime_snapshot_payload.py
+
       - name: Build API image
         run: |
           docker build -t ${{ secrets.REGISTRY }}/forex-api:${{ github.ref_name }} apps/api/

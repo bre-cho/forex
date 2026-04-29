@@ -151,6 +151,22 @@ jobs:
         run: |
           bash .github/scripts/verify_market_data_quality_scenarios.sh
 
+      - name: Verify runtime snapshot payload contract (mandatory)
+        run: |
+          python .github/scripts/verify_runtime_snapshot_payload.py
+
+      - name: Verify QA parity + runtime snapshot API tests (mandatory)
+        env:
+          DATABASE_URL: postgresql+asyncpg://forex:forex_test@localhost:5432/forex_test
+          REDIS_URL: redis://localhost:6379/0
+          JWT_SECRET: test_secret_key
+          SECRET_KEY: test_secret_key
+        run: |
+          PYTHONPATH=/workspaces/forex:apps/api:services/trading-core:services/execution-service \
+            pytest -q \
+              apps/api/tests/test_qa_parity_endpoint.py \
+              apps/api/tests/test_runtime_snapshot_contract.py
+
       - name: Verify production config excludes legacy stack
         run: |
           bash .github/scripts/verify_production_no_legacy_stack.sh

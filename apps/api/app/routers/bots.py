@@ -35,6 +35,23 @@ def _lifecycle_response(target_status: str, bot_id: str, already_in_state: bool)
     }
 
 
+def _runtime_snapshot_not_running(bot_id: str) -> dict:
+    return {
+        "bot_instance_id": bot_id,
+        "status": "not_running",
+        "started_at": None,
+        "stopped_at": None,
+        "balance": 0.0,
+        "equity": 0.0,
+        "daily_pnl": 0.0,
+        "open_trades": 0,
+        "total_trades": 0,
+        "error_message": None,
+        "metadata": {},
+        "uptime_seconds": 0.0,
+    }
+
+
 async def _get_bot_or_404(bot_id: str, workspace_id: str, db: AsyncSession) -> BotInstance:
     result = await db.execute(
         select(BotInstance).where(
@@ -312,7 +329,7 @@ async def get_runtime(
     await _get_bot_or_404(bot_id, workspace_id, db)
     registry = _get_registry(request)
     if registry is None or registry.get(bot_id) is None:
-        return {"status": "not_running", "bot_id": bot_id}
+        return _runtime_snapshot_not_running(bot_id)
     return await registry.get_snapshot(bot_id)
 
 

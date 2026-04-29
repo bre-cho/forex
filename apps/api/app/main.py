@@ -83,6 +83,7 @@ from app.routers import (
     live_trading,
     notifications,
     public,
+    qa_parity,
     risk_policy,
     signals,
     strategies,
@@ -110,6 +111,7 @@ app.include_router(incidents.router)
 app.include_router(live_trading.router)
 app.include_router(risk_policy.router)
 app.include_router(experiments.router)
+app.include_router(qa_parity.router)
 app.include_router(legacy.router)
 
 
