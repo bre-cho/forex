@@ -36,7 +36,9 @@ class CTraderProvider(BrokerProvider):
         self._account_id = account_id
         self.symbol = symbol
         self.timeframe = timeframe
+        self.provider_name = "ctrader"
         self.live = live
+        self.mode = "live" if live else "demo"
         self._provider = None
         self._connected = False
 
@@ -52,6 +54,10 @@ class CTraderProvider(BrokerProvider):
             if self.live:
                 if not self._account_id:
                     raise RuntimeError("CTrader live account_id missing")
+                required_methods = ("get_account_info", "get_candles", "place_market_order", "get_positions")
+                missing = [name for name in required_methods if not hasattr(self._provider, name)]
+                if missing:
+                    raise RuntimeError(f"CTrader live adapter missing methods: {','.join(missing)}")
                 candles = self._provider.get_candles(limit=1)
                 if candles is None or candles.empty:
                     raise RuntimeError("CTrader live stream not ready")

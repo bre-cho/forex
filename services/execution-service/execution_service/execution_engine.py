@@ -27,6 +27,7 @@ class ExecutionEngine:
         sync_interval: float = 30.0,
         runtime_mode: str = "paper",
         gate_policy: Optional[Dict[str, Any]] = None,
+        verify_idempotency_reservation=None,
     ) -> None:
         self._provider = provider
         self._provider_name = provider_name
@@ -36,6 +37,7 @@ class ExecutionEngine:
         self._sync_interval = sync_interval
         self._runtime_mode = str(runtime_mode or "paper").lower()
         self._gate = PreExecutionGate(gate_policy or {})
+        self._verify_idempotency_reservation = verify_idempotency_reservation
 
     async def start(self) -> None:
         await self._provider.connect()
@@ -94,6 +96,47 @@ class ExecutionEngine:
                         commission=0.0,
                         success=False,
                         error_message="execution_gate_blocked:missing_pre_execution_context",
+                    )
+                if self._verify_idempotency_reservation is None:
+                    return OrderResult(
+                        order_id="",
+                        symbol=request.symbol,
+                        side=request.side,
+                        volume=request.volume,
+                        fill_price=float(request.price or 0.0),
+                        commission=0.0,
+                        success=False,
+                        error_message="execution_gate_blocked:missing_idempotency_verifier",
+                    )
+                try:
+                    reservation_exists = bool(
+                        await self._verify_idempotency_reservation(
+                            ctx.bot_instance_id,
+                            payload.idempotency_key,
+                            payload.brain_cycle_id or None,
+                        )
+                    )
+                except Exception as exc:
+                    return OrderResult(
+                        order_id="",
+                        symbol=request.symbol,
+                        side=request.side,
+                        volume=request.volume,
+                        fill_price=float(request.price or 0.0),
+                        commission=0.0,
+                        success=False,
+                        error_message=f"execution_gate_blocked:idempotency_verification_failed:{exc}",
+                    )
+                if not reservation_exists:
+                    return OrderResult(
+                        order_id="",
+                        symbol=request.symbol,
+                        side=request.side,
+                        volume=request.volume,
+                        fill_price=float(request.price or 0.0),
+                        commission=0.0,
+                        success=False,
+                        error_message="execution_gate_blocked:missing_idempotency_reservation",
                     )
                 gate_ctx = {
                     "provider_mode": ctx.provider_mode,

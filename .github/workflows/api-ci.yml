@@ -127,11 +127,27 @@ jobs:
         run: |
           .github/scripts/verify_frontend_api_contract.py
 
+      - name: Verify production config excludes legacy stack
+        run: |
+          bash .github/scripts/verify_production_no_legacy_stack.sh
+
       - name: Run P0 gate + trading-core tests
         run: |
           PYTHONPATH=/workspaces/forex:services/trading-core:services/execution-service \
             pytest services/trading-core/tests/ -v
         continue-on-error: true
+
+      - name: Run focused live trading invariant tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://forex:forex_test@localhost:5432/forex_test
+          REDIS_URL: redis://localhost:6379/0
+          JWT_SECRET: test_secret_key
+          SECRET_KEY: test_secret_key
+        run: |
+          PYTHONPATH=/workspaces/forex:apps/api:services/trading-core:services/execution-service \
+            pytest -q \
+              apps/api/tests/test_daily_trading_state.py \
+              services/execution-service/tests/test_reconciliation_worker.py
 
       - name: Check migration consistency
         env:

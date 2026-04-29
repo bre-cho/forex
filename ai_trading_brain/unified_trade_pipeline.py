@@ -98,7 +98,7 @@ class UnifiedTradePipeline:
         )
         add(BrainStage.EXECUTION_PLAN, brain_action, "execution_intent_ready", final_score, intent.__dict__)
 
-        broker_ok, broker_reason = self._validate_broker_route(item.broker)
+        broker_ok, broker_reason = self._validate_broker_route(item)
         add(BrainStage.BROKER_ROUTE, BrainAction.ALLOW if broker_ok else BrainAction.BLOCK, broker_reason)
         if not broker_ok:
             return self._finish(cycle_id, BrainAction.BLOCK, broker_reason, final_score, selected, None, decisions, decision.policy_snapshot)
@@ -176,9 +176,17 @@ class UnifiedTradePipeline:
     def _blend_score(self, decision_score: float, causal: float, utility: float, game: float) -> float:
         return round((decision_score * 0.58) + (causal * 0.16) + (utility * 0.16) + (game * 0.10), 4)
 
-    def _validate_broker_route(self, broker: str) -> Tuple[bool, str]:
+    def _validate_broker_route(self, item: BrainInput) -> Tuple[bool, str]:
+        broker = str(item.broker or "stub").lower()
+        runtime_mode = str(
+            item.telemetry.get("runtime_mode")
+            or item.settings.get("runtime_mode")
+            or "paper"
+        ).lower()
         health = self.registry.health()
         if broker == "stub":
+            if runtime_mode == "live":
+                return False, "live_stub_broker_forbidden"
             return True, "stub_broker_route"
         failed = health.get("critical_failed", [])
         if failed:

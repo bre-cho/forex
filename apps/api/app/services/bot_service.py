@@ -162,11 +162,32 @@ def _runtime_hooks(bot_id: str):
                     logger.warning("record_gate_event failed [%s]: %s", bot_id, exc)
         await _publish_bot_event_safe(bot_id, event_type, payload)
 
-    async def reserve_idempotency(idempotency_key: str) -> bool:
+    async def reserve_idempotency(
+        idempotency_key: str,
+        signal_id: str | None = None,
+        brain_cycle_id: str | None = None,
+    ) -> bool:
         async with AsyncSessionLocal() as db:
             ledger = SafetyLedgerService(db)
-            # signal_id is not always available here; key serves as signal surrogate
-            return await ledger.reserve_idempotency(bot_id, idempotency_key, idempotency_key)
+            return await ledger.reserve_idempotency(
+                bot_id,
+                signal_id or idempotency_key,
+                idempotency_key,
+                brain_cycle_id,
+            )
+
+    async def verify_idempotency_reservation(
+        bot_instance_id: str,
+        idempotency_key: str,
+        brain_cycle_id: str | None = None,
+    ) -> bool:
+        async with AsyncSessionLocal() as db:
+            ledger = SafetyLedgerService(db)
+            return await ledger.has_idempotency_reservation(
+                bot_instance_id,
+                idempotency_key,
+                brain_cycle_id,
+            )
 
     async def get_daily_state() -> dict | None:
         async with AsyncSessionLocal() as db:
@@ -225,13 +246,7 @@ def _runtime_hooks(bot_id: str):
             equity = float(payload.get("account_equity") or 0.0)
             if equity > 0:
                 daily = DailyTradingStateService(db)
-                state = await daily.get_or_create(bot_id)
-                if float(state.starting_equity or 0.0) <= 0:
-                    state.starting_equity = equity
-                state.current_equity = equity
-                state.daily_profit_amount = float((state.current_equity or 0.0) - (state.starting_equity or 0.0))
-                if float(state.starting_equity or 0.0) > 0:
-                    state.daily_loss_pct = max(0.0, -state.daily_profit_amount / float(state.starting_equity) * 100.0)
+                await daily.recompute_from_broker_equity(bot_id, equity)
                 await db.commit()
 
     async def on_reconciliation_incident(payload: dict) -> None:
@@ -256,6 +271,7 @@ def _runtime_hooks(bot_id: str):
         "on_snapshot": on_snapshot,
         "on_event": on_event,
         "reserve_idempotency": reserve_idempotency,
+        "verify_idempotency_reservation": verify_idempotency_reservation,
         "get_daily_state": get_daily_state,
         "get_db_open_trades": get_db_open_trades,
         "close_db_trade": close_db_trade,
@@ -319,6 +335,7 @@ async def create_runtime_for_bot(
             credentials=broker_credentials,
             symbol=bot.symbol,
             timeframe=bot.timeframe,
+            runtime_mode=bot.mode,
         )
         if bot.mode == "live":
             await _assert_provider_usable(provider, bot.id)
@@ -340,6 +357,7 @@ async def create_runtime_for_bot(
             on_snapshot=hooks["on_snapshot"],
             on_event=hooks["on_event"],
             reserve_idempotency=hooks["reserve_idempotency"],
+            verify_idempotency_reservation=hooks["verify_idempotency_reservation"],
             get_daily_state=hooks["get_daily_state"],
             get_db_open_trades=hooks["get_db_open_trades"],
             close_db_trade=hooks["close_db_trade"],

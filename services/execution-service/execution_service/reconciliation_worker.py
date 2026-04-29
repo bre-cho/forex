@@ -191,6 +191,19 @@ class ReconciliationWorker:
             result.status = "error"
             result.error = str(exc)
             logger.error("ReconciliationWorker error [%s]: %s", self.bot_instance_id, exc)
+            if self._on_incident:
+                incident = {
+                    "bot_instance_id": self.bot_instance_id,
+                    "incident_type": "reconciliation_runtime_error",
+                    "severity": "critical",
+                    "title": "Reconciliation worker error",
+                    "detail": str(exc),
+                    "escalation_action": "kill_switch",
+                }
+                try:
+                    await self._on_incident(incident)
+                except Exception as incident_exc:
+                    logger.error("on_incident hook failed after reconciliation error: %s", incident_exc)
 
         result.finished_at = time.time()
         if self._on_result:

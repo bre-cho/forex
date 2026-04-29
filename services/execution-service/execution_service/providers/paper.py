@@ -24,6 +24,8 @@ class PaperProvider(BrokerProvider):
         initial_balance: float = 10_000.0,
     ) -> None:
         self.symbol = symbol
+        self.provider_name = "paper"
+        self.mode = "paper"
         self._balance = initial_balance
         self._equity = initial_balance
         self._positions: List[Dict[str, Any]] = []

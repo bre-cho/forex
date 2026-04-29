@@ -55,6 +55,7 @@ class BotRuntime:
         on_snapshot: Optional[SnapshotHook] = None,
         on_event: Optional[EventHook] = None,
         reserve_idempotency: Optional[Callable[[str], Awaitable[bool]]] = None,
+        verify_idempotency_reservation: Optional[Callable[[str, str, str | None], Awaitable[bool]]] = None,
         get_daily_state: Optional[Callable[[], Awaitable[Dict[str, Any] | None]]] = None,
         get_db_open_trades: Optional[Callable[[], Awaitable[list[Dict[str, Any]]]]] = None,
         close_db_trade: Optional[Callable[[str], Awaitable[None]]] = None,
@@ -78,6 +79,7 @@ class BotRuntime:
         self._on_snapshot = on_snapshot
         self._on_event = on_event
         self._reserve_idempotency = reserve_idempotency
+        self._verify_idempotency_reservation = verify_idempotency_reservation
         self._get_daily_state = get_daily_state
         self._get_db_open_trades = get_db_open_trades
         self._close_db_trade = close_db_trade
@@ -150,6 +152,7 @@ class BotRuntime:
                     provider_name=self.bot_instance_id,
                     runtime_mode=self.runtime_mode,
                     gate_policy=gate_policy,
+                    verify_idempotency_reservation=self._verify_idempotency_reservation,
                 )
 
             if ForexBrainRuntime is not None:
@@ -271,7 +274,7 @@ class BotRuntime:
             if df is None or df.empty:
                 return
             wave = self._analyse_market(df)
-            signal = self._generate_signal(df, wave)
+            signal = await self._generate_signal(df, wave)
             if signal and signal.get("direction") in {"BUY", "SELL"}:
                 await self._persist_signal(signal)
                 trade_signal = self._build_trade_signal(signal, df)
@@ -316,7 +319,7 @@ class BotRuntime:
     def _analyse_market(self, df):
         return self._wave_detector.analyse(df)
 
-    def _generate_signal(self, df, wave):
+    async def _generate_signal(self, df, wave):
         wave_state = str(getattr(getattr(wave, "main_wave", ""), "value", getattr(wave, "main_wave", "")))
         direction = "HOLD"
         if wave_state == "BULL_MAIN":
@@ -346,18 +349,30 @@ class BotRuntime:
             try:
                 from ai_trading_brain.brain_contracts import BrainInput
 
+                provider_name = self._resolve_broker_identity()
+                if self.runtime_mode == "live" and provider_name == "stub":
+                    raise RuntimeError("live_broker_identity_unresolved")
+
                 brain_input = BrainInput(
                     symbol=str(signal["symbol"]),
                     timeframe=getattr(self.broker_provider, "timeframe", "M5"),
-                    broker=getattr(self.broker_provider, "provider_name", "stub"),
+                    broker=provider_name,
                     market={
                         "close": entry_price,
                         "wave_state": wave_state,
                         "confidence": signal["confidence"],
+                        "broker_connected": bool(getattr(self.broker_provider, "is_connected", False)),
                     },
                     account={"equity": self.state.equity},
                     positions=[],
                     signals=[signal],
+                    settings={
+                        "runtime_mode": self.runtime_mode,
+                        "risk_pct": float(self.risk_config.get("risk_pct", 0.5))
+                        if isinstance(self.risk_config, dict)
+                        else 0.5,
+                    },
+                    telemetry={"runtime_mode": self.runtime_mode},
                 )
                 cycle_result = self._brain.run_cycle(brain_input)
                 action = str(getattr(cycle_result.action, "value", cycle_result.action)).upper()
@@ -373,8 +388,10 @@ class BotRuntime:
                     intent_side = str(cycle_result.execution_intent.side).upper()
                     signal["direction"] = intent_side if intent_side in {"BUY", "SELL"} else "HOLD"
                 self.state.metadata["last_brain_cycle"] = cycle_result.to_dict()
-                if self._on_event:
-                    asyncio.create_task(self._safe_hook(self._on_event("brain_cycle", cycle_result.to_dict()), "brain_cycle"))
+                if self.runtime_mode == "live":
+                    await self._emit_required_event("brain_cycle", cycle_result.to_dict(), "brain_cycle_persistence_failed")
+                else:
+                    await self._emit_event("brain_cycle", cycle_result.to_dict())
             except Exception as exc:
                 logger.warning("Brain run_cycle failed [%s]: %s", self.bot_instance_id, exc)
                 if self.runtime_mode == "live":
@@ -384,6 +401,28 @@ class BotRuntime:
                     signal["brain_reason"] = self.state.error_message
 
         return signal
+
+    def _resolve_broker_identity(self) -> str:
+        provider_name = str(
+            getattr(self.broker_provider, "provider_name", "")
+            or getattr(self.broker_provider, "mode", "")
+            or ""
+        ).lower()
+        if provider_name in {"", "unknown"}:
+            provider_name = self.broker_provider.__class__.__name__.replace("Provider", "").lower()
+        if provider_name in {"_asyncpaperadapter", "paperprovider"}:
+            return "paper"
+        if provider_name in {"ctrader", "mt5", "bybit", "paper"}:
+            return provider_name
+        return "stub"
+
+    async def _emit_required_event(self, event_type: str, payload: Dict[str, Any], error_code: str) -> None:
+        if self._on_event is None:
+            raise RuntimeError(f"{error_code}:missing_on_event_hook")
+        try:
+            await self._on_event(event_type, payload)
+        except Exception as exc:
+            raise RuntimeError(f"{error_code}:{exc}") from exc
 
     def _build_trade_signal(self, signal: Dict[str, Any], df):
         from trading_core.engines.signal_coordinator import TradeSignal
@@ -494,7 +533,15 @@ class BotRuntime:
 
             # Reserve idempotency in DB before broker call (fail-closed in live)
             if self._reserve_idempotency is not None:
-                reserved = await self._reserve_idempotency(idempotency_key)
+                brain_cycle_id = str(getattr(signal, "meta", {}).get("brain_cycle_id", "") or "")
+                try:
+                    reserved = await self._reserve_idempotency(
+                        idempotency_key,
+                        str(signal.signal_id),
+                        brain_cycle_id or None,
+                    )
+                except TypeError:
+                    reserved = await self._reserve_idempotency(idempotency_key)
                 if not reserved:
                     dup_event = {
                         "bot_instance_id": self.bot_instance_id,

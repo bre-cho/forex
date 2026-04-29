@@ -18,6 +18,7 @@ class RuntimeFactory:
         credentials: Dict[str, Any],
         symbol: str,
         timeframe: str,
+        runtime_mode: str = "paper",
     ):
         """
         Instantiate the correct broker provider based on provider_type.
@@ -33,6 +34,8 @@ class RuntimeFactory:
                 def __init__(self, symbol_name: str) -> None:
                     self.symbol = symbol_name
                     self.timeframe = timeframe
+                    self.provider_name = "paper"
+                    self.mode = "paper"
                     self._provider = MockDataProvider(symbol=symbol_name)
                     self._connected = False
 
@@ -63,9 +66,12 @@ class RuntimeFactory:
             kwargs = dict(credentials or {})
             kwargs.setdefault("symbol", symbol)
             kwargs.setdefault("timeframe", timeframe)
+            if provider_type in {"ctrader", "mt5"}:
+                kwargs.setdefault("live", str(runtime_mode).lower() == "live")
+            if provider_type == "bybit":
+                kwargs.setdefault("testnet", str(runtime_mode).lower() != "live")
             return get_provider(provider_type, **kwargs)
-        logger.warning("Unknown provider_type '%s', falling back to paper", provider_type)
-        return get_provider("paper", symbol=symbol)
+        raise ValueError(f"Unsupported provider_type: {provider_type!r}")
 
     @staticmethod
     def from_bot_config(
@@ -76,14 +82,22 @@ class RuntimeFactory:
         """Build a BotRuntime from the bot_instances + bot_instance_configs DB records."""
         from .bot_runtime import BotRuntime
 
-        provider_type = bot_config.get("mode", "paper")  # 'paper' | 'live'
-        actual_provider_type = "ctrader" if provider_type == "live" else "paper"
+        runtime_mode = str(bot_config.get("mode", "paper") or "paper").lower()
+        if runtime_mode == "paper":
+            actual_provider_type = "paper"
+        else:
+            actual_provider_type = str(
+                bot_config.get("broker_type") or bot_config.get("provider_type") or ""
+            ).lower()
+            if actual_provider_type not in {"ctrader", "mt5", "bybit"}:
+                raise ValueError(f"Unsupported live provider_type: {actual_provider_type!r}")
 
         provider = RuntimeFactory.create_provider(
             provider_type=actual_provider_type,
             credentials=broker_credentials,
             symbol=bot_config.get("symbol", "EURUSD"),
             timeframe=bot_config.get("timeframe", "M5"),
+            runtime_mode=runtime_mode,
         )
 
         return BotRuntime(
@@ -91,5 +105,6 @@ class RuntimeFactory:
             strategy_config=bot_config.get("strategy_config", {}),
             broker_provider=provider,
             risk_config=bot_config.get("risk_json", {}),
+            runtime_mode=runtime_mode,
             ai_config=bot_config.get("ai_json", {}),
         )

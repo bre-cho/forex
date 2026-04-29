@@ -45,6 +45,7 @@ class MT5Provider(BrokerProvider):
         self.server = server
         self.symbol = symbol
         self.timeframe = timeframe
+        self.provider_name = "mt5"
         self.live = live
         self.mode = "live" if live else "demo"
         self._connected = False
@@ -71,6 +72,27 @@ class MT5Provider(BrokerProvider):
         vmax = float(getattr(symbol_info, "volume_max", max(vmin, step)) or max(vmin, step))
         normalized = round(round(volume / step) * step, 8)
         return max(vmin, min(vmax, normalized))
+
+    def _trade_allowed(self, account_info: Any, terminal_info: Any, symbol_info: Any) -> tuple[bool, str]:
+        if account_info is None:
+            return False, "account_info_unavailable"
+        if terminal_info is None:
+            return False, "terminal_info_unavailable"
+        if not bool(getattr(terminal_info, "connected", True)):
+            return False, "terminal_not_connected"
+        if not bool(getattr(terminal_info, "trade_allowed", True)):
+            return False, "terminal_trade_not_allowed"
+        if not bool(getattr(account_info, "trade_allowed", True)):
+            return False, "account_trade_not_allowed"
+        if symbol_info is None:
+            return False, "symbol_info_unavailable"
+        if not bool(getattr(symbol_info, "visible", True)):
+            return False, "symbol_not_visible"
+        trade_mode = int(getattr(symbol_info, "trade_mode", 0) or 0)
+        disabled_mode = int(getattr(_mt5_sdk, "SYMBOL_TRADE_MODE_DISABLED", -1) or -1)
+        if trade_mode == disabled_mode:
+            return False, "symbol_trade_disabled"
+        return True, "ok"
 
     async def connect(self) -> None:
         if self.live:
@@ -126,19 +148,33 @@ class MT5Provider(BrokerProvider):
         self._ensure_symbol(request.symbol)
         symbol_info = _mt5_sdk.symbol_info(request.symbol)
         tick = _mt5_sdk.symbol_info_tick(request.symbol)
+        account_info = _mt5_sdk.account_info()
+        terminal_info = _mt5_sdk.terminal_info()
         if symbol_info is None or tick is None:
-            return OrderResult(success=False, error_message=f"Symbol/tick unavailable: {request.symbol}")
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(request.volume), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message=f"Symbol/tick unavailable: {request.symbol}")
+        trade_allowed, reason = self._trade_allowed(account_info, terminal_info, symbol_info)
+        if not trade_allowed:
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(request.volume), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message=f"MT5 preflight failed: {reason}")
         volume = self._normalize_volume(symbol_info, request.volume)
         spread = abs(float(tick.ask) - float(tick.bid))
         max_spread = float(getattr(symbol_info, "point", 0.0001) or 0.0001) * 30
         if spread > max_spread:
-            return OrderResult(success=False, error_message=f"Spread too high: {spread}")
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(volume), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message=f"Spread too high: {spread}")
+        order_price = float(tick.ask) if request.side.lower() == "buy" else float(tick.bid)
+        if hasattr(_mt5_sdk, "order_calc_margin"):
+            try:
+                margin_required = _mt5_sdk.order_calc_margin(mt5_order_type, request.symbol, volume, order_price)
+            except Exception:
+                margin_required = None
+            free_margin = float(getattr(account_info, "margin_free", 0.0) or 0.0)
+            if margin_required is not None and free_margin > 0 and float(margin_required) > free_margin:
+                return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(volume), fill_price=order_price, commission=0.0, success=False, error_message="MT5 preflight failed: insufficient_free_margin")
         req = {
             "action": _mt5_sdk.TRADE_ACTION_DEAL,
             "symbol": request.symbol,
             "volume": volume,
             "type": mt5_order_type,
-            "price": float(tick.ask) if request.side.lower() == "buy" else float(tick.bid),
+            "price": order_price,
             "sl": request.stop_loss or 0.0,
             "tp": request.take_profit or 0.0,
             "deviation": 20,
@@ -149,7 +185,7 @@ class MT5Provider(BrokerProvider):
         result = _mt5_sdk.order_send(req)
         if result is None or result.retcode != _mt5_sdk.TRADE_RETCODE_DONE:
             code = getattr(result, "retcode", -1)
-            return OrderResult(success=False, error_message=f"MT5 order failed retcode={code}")
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(volume), fill_price=order_price, commission=0.0, success=False, error_message=f"MT5 order failed retcode={code}")
         # Verify fill/deal exists for stronger live safety
         deals = _mt5_sdk.history_deals_get(position=result.order) or []
         if deals is None:
@@ -161,13 +197,14 @@ class MT5Provider(BrokerProvider):
             side=request.side,
             volume=float(result.volume),
             fill_price=float(result.price),
+            commission=float(sum(float(getattr(d, "commission", 0.0) or 0.0) for d in deals)) if deals else 0.0,
         )
 
     async def close_position(self, position_id: str) -> OrderResult:
         self._require_sdk()
         positions = _mt5_sdk.positions_get(ticket=int(position_id))
         if not positions:
-            return OrderResult(success=False, error_message=f"Position {position_id} not found")
+            return OrderResult(order_id=position_id, symbol="", side="close", volume=0.0, fill_price=0.0, commission=0.0, success=False, error_message=f"Position {position_id} not found")
         pos = positions[0]
         close_type = _mt5_sdk.ORDER_TYPE_SELL if pos.type == 0 else _mt5_sdk.ORDER_TYPE_BUY
         tick = _mt5_sdk.symbol_info_tick(pos.symbol)
@@ -184,8 +221,8 @@ class MT5Provider(BrokerProvider):
         }
         result = _mt5_sdk.order_send(req)
         if result is None or result.retcode != _mt5_sdk.TRADE_RETCODE_DONE:
-            return OrderResult(success=False, error_message=f"MT5 close failed retcode={getattr(result, 'retcode', -1)}")
-        return OrderResult(success=True, order_id=str(result.order), symbol=pos.symbol)
+            return OrderResult(order_id=position_id, symbol=pos.symbol, side="close", volume=float(getattr(pos, 'volume', 0.0) or 0.0), fill_price=float(price or 0.0), commission=0.0, success=False, error_message=f"MT5 close failed retcode={getattr(result, 'retcode', -1)}")
+        return OrderResult(order_id=str(result.order), symbol=pos.symbol, side="close", volume=float(getattr(pos, 'volume', 0.0) or 0.0), fill_price=float(price or 0.0), commission=0.0, success=True)
 
     async def get_open_positions(self) -> List[Dict[str, Any]]:
         self._require_sdk()

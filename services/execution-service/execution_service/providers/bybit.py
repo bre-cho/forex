@@ -43,6 +43,7 @@ class BybitProvider(BrokerProvider):
         self.symbol = symbol
         self.timeframe = timeframe
         self.testnet = testnet
+        self.provider_name = "bybit"
         self.mode = "demo" if testnet else "live"
         self._session: Optional[Any] = None
         self._connected = False
@@ -96,10 +97,11 @@ class BybitProvider(BrokerProvider):
         resp = self._session.get_wallet_balance(accountType="UNIFIED")
         if resp.get("retCode") != 0:
             raise RuntimeError(f"Bybit wallet: {resp.get('retMsg')}")
-        coins = resp["result"]["list"][0]["coin"]
-        usdt = next((c for c in coins if c["coin"] == "USDT"), {})
-        equity = float(usdt.get("equity", 0))
-        avail = float(usdt.get("availableToWithdraw", 0))
+        wallet = (resp.get("result", {}).get("list") or [{}])[0]
+        coins = wallet.get("coin") or []
+        usdt = next((c for c in coins if c.get("coin") == "USDT"), {})
+        equity = float(wallet.get("totalEquity") or usdt.get("equity") or 0)
+        avail = float(wallet.get("totalAvailableBalance") or usdt.get("availableBalance") or usdt.get("walletBalance") or 0)
         return AccountInfo(
             balance=equity,
             equity=equity,
@@ -125,6 +127,18 @@ class BybitProvider(BrokerProvider):
 
     async def place_order(self, request: OrderRequest) -> OrderResult:
         self._require_sdk()
+        if self._session is None:
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(request.volume), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message="Bybit session not connected")
+        if not self._instrument_info:
+            info_resp = self._session.get_instruments_info(category="linear", symbol=request.symbol)
+            if info_resp.get("retCode") == 0 and info_resp.get("result", {}).get("list"):
+                self._instrument_info = info_resp["result"]["list"][0]
+        status = str(self._instrument_info.get("status") or "Trading")
+        if status.lower() not in {"trading", "settling"}:
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(request.volume), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message=f"Bybit instrument not tradable: {status}")
+        account = await self.get_account_info()
+        if float(account.free_margin or 0.0) <= 0:
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(request.volume), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message="Bybit preflight failed: insufficient_available_balance")
         qty = self._normalize_qty(float(request.volume))
         link_id = str(request.comment or f"{request.symbol}-{int(__import__('time').time()*1000)}")[:36]
         resp = self._session.place_order(
@@ -138,12 +152,15 @@ class BybitProvider(BrokerProvider):
             orderLinkId=link_id,
         )
         if resp.get("retCode") != 0:
-            return OrderResult(success=False, error_message=f"Bybit order failed: {resp.get('retMsg')}")
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(qty), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message=f"Bybit order failed: {resp.get('retMsg')}")
         order_id = str(resp["result"].get("orderId", ""))
         fill_price = request.price or 0.0
+        commission = 0.0
         exec_resp = self._session.get_executions(category="linear", orderId=order_id, limit=1)
         if exec_resp.get("retCode") == 0 and exec_resp.get("result", {}).get("list"):
-            fill_price = float(exec_resp["result"]["list"][0].get("execPrice", fill_price))
+            exec_row = exec_resp["result"]["list"][0]
+            fill_price = float(exec_row.get("execPrice", fill_price))
+            commission = float(exec_row.get("execFee") or 0.0)
         return OrderResult(
             success=True,
             order_id=order_id,
@@ -151,6 +168,7 @@ class BybitProvider(BrokerProvider):
             side=request.side,
             volume=qty,
             fill_price=fill_price,
+            commission=commission,
         )
 
     async def close_position(self, position_id: str) -> OrderResult:
@@ -158,7 +176,7 @@ class BybitProvider(BrokerProvider):
         positions = await self.get_open_positions()
         pos = next((p for p in positions if p.get("id") == position_id), None)
         if pos is None:
-            return OrderResult(success=False, error_message=f"Position {position_id} not found")
+            return OrderResult(order_id=position_id, symbol="", side="close", volume=0.0, fill_price=0.0, commission=0.0, success=False, error_message=f"Position {position_id} not found")
         close_side = "Sell" if pos["side"] == "BUY" else "Buy"
         resp = self._session.place_order(
             category="linear",
@@ -169,8 +187,8 @@ class BybitProvider(BrokerProvider):
             reduceOnly=True,
         )
         if resp.get("retCode") != 0:
-            return OrderResult(success=False, error_message=f"Bybit close failed: {resp.get('retMsg')}")
-        return OrderResult(success=True, order_id=resp["result"]["orderId"], symbol=pos["symbol"])
+            return OrderResult(order_id=position_id, symbol=pos["symbol"], side="close", volume=float(pos["volume"]), fill_price=0.0, commission=0.0, success=False, error_message=f"Bybit close failed: {resp.get('retMsg')}")
+        return OrderResult(order_id=resp["result"]["orderId"], symbol=pos["symbol"], side="close", volume=float(pos["volume"]), fill_price=0.0, commission=0.0, success=True)
 
     async def get_open_positions(self) -> List[Dict[str, Any]]:
         self._require_sdk()
