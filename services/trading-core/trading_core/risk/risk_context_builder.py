@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from .pip_value import pip_size_for_symbol, pip_value_per_lot
+from .instrument_spec import InstrumentSpec, get_fallback_spec
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,8 @@ class RiskContextBuilder:
         stop_loss: float | None,
         requested_volume: float,
         risk_pct: float,
+        instrument_spec: Optional[InstrumentSpec] = None,
+        runtime_mode: str = "paper",
     ) -> RiskContext:
         equity = float(getattr(account_info, "equity", 0.0) or 0.0)
         free_margin = float(getattr(account_info, "free_margin", 0.0) or 0.0)
@@ -37,13 +40,28 @@ class RiskContextBuilder:
         if equity <= 0:
             raise RuntimeError("risk_context_missing_equity")
 
-        notional = abs(float(requested_volume or 0.0) * float(entry_price or 0.0) * 100000.0)
+        # Resolve instrument spec: live mode requires a real broker spec
+        spec = instrument_spec
+        if spec is None:
+            if runtime_mode == "live":
+                raise RuntimeError("risk_context_missing_instrument_spec")
+            spec = get_fallback_spec(symbol)
+
+        # Compute contract size (broker-provided or fallback)
+        contract_size = spec.contract_size if spec else 100000.0
+        margin_rate = spec.margin_rate if spec else 0.01
+
+        volume = abs(float(requested_volume or 0.0))
+        price = float(entry_price or 0.0)
+        notional = volume * contract_size * price
+
         current_notional = 0.0
         symbol_notional = 0.0
         for pos in open_positions or []:
-            v = float(pos.get("volume") or pos.get("qty") or 0.0)
-            p = float(pos.get("open_price") or pos.get("price") or entry_price or 0.0)
-            n = abs(v * p * 100000.0)
+            v = abs(float(pos.get("volume") or pos.get("qty") or 0.0))
+            p = float(pos.get("open_price") or pos.get("price") or price or 0.0)
+            pos_contract_size = contract_size  # best approximation
+            n = v * pos_contract_size * p
             current_notional += n
             if str(pos.get("symbol") or "").upper() == str(symbol or "").upper():
                 symbol_notional += n
@@ -53,14 +71,15 @@ class RiskContextBuilder:
         symbol_exposure = ((symbol_notional + notional) / equity) * 100.0
 
         sl = float(stop_loss or 0.0)
-        pip_size = pip_size_for_symbol(symbol)
-        pip_value = pip_value_per_lot(symbol)
-        stop_pips = abs(float(entry_price or 0.0) - sl) / pip_size if sl > 0 and entry_price > 0 else 0.0
-        max_loss = stop_pips * pip_value * float(requested_volume or 0.0)
+        pip_size = spec.pip_size if spec else pip_size_for_symbol(symbol)
+        pip_value = spec.pip_value_per_lot(price) if spec else pip_value_per_lot(symbol)
+        stop_pips = abs(price - sl) / pip_size if sl > 0 and price > 0 else 0.0
+        max_loss = stop_pips * pip_value * volume
 
-        projected_margin = margin + notional * 0.01
+        # Margin calculation uses broker margin_rate, not hardcoded 0.01
+        projected_margin = margin + notional * margin_rate
         margin_usage_pct = (projected_margin / equity) * 100.0
-        free_margin_after = free_margin - notional * 0.01
+        free_margin_after = free_margin - notional * margin_rate
 
         # conservative proxy for correlation bucket (USD-quoted majors grouped)
         correlated = 0.0

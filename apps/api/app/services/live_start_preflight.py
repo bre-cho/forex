@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,9 +11,26 @@ from app.services.daily_trading_state import DailyTradingStateService
 from app.services.live_readiness_guard import LiveReadinessGuard
 from app.services.policy_service import PolicyService
 
+# Minimum required keys for a live-approved risk policy
+_REQUIRED_LIVE_POLICY_KEYS = {
+    "daily_take_profit",
+    "max_daily_loss_pct",
+    "max_margin_usage_pct",
+    "max_account_exposure_pct",
+}
+
 
 class LiveStartPreflightError(RuntimeError):
     pass
+
+
+def _validate_policy_has_live_keys(snapshot: Any) -> None:
+    """Raise if the active policy snapshot is missing any required live keys."""
+    if not isinstance(snapshot, dict):
+        raise LiveStartPreflightError("active_policy_snapshot_invalid")
+    missing = _REQUIRED_LIVE_POLICY_KEYS - set(snapshot.keys())
+    if missing:
+        raise LiveStartPreflightError(f"active_policy_missing_keys:{','.join(sorted(missing))}")
 
 
 async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSession) -> dict:
@@ -29,12 +47,16 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
         raise LiveStartPreflightError(f"provider_preflight_failed:{readiness.reason}")
     checks["broker_health"] = True
 
-    policy = PolicyService(db)
-    checks["active_policy"] = await policy.is_policy_approved_for_live(bot.id)
-    if not checks["active_policy"]:
+    policy_svc = PolicyService(db)
+    is_approved = await policy_svc.is_policy_approved_for_live(bot.id)
+    if not is_approved:
         raise LiveStartPreflightError("active_policy_missing")
+    active_policy = await policy_svc.get_active_policy(bot.id)
+    snapshot = getattr(active_policy, "policy_snapshot", None) or {}
+    _validate_policy_has_live_keys(snapshot)
+    checks["active_policy"] = True
 
-    # Sync broker equity before checking daily state freshness
+    # Sync broker equity — in live mode, fail-closed: no fallback to stale state
     daily = DailyTradingStateService(db)
     try:
         acct_info = await provider.get_account_info()
@@ -45,9 +67,9 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
         await db.commit()
     except LiveStartPreflightError:
         raise
-    except Exception:
-        # If broker equity sync fails, fall back to existing state but mark stale
-        state = await daily.get_or_create(bot.id)
+    except Exception as exc:
+        # Fail-closed: never start live with unverified broker equity
+        raise LiveStartPreflightError(f"broker_equity_sync_failed:{type(exc).__name__}") from exc
 
     updated = state.updated_at
     now = datetime.now(timezone.utc)

@@ -142,3 +142,51 @@ class BrokerProvider(ABC):
     @abstractmethod
     def is_connected(self) -> bool:
         """Return True if the provider is currently connected."""
+
+    # ------------------------------------------------------------------
+    # Optional methods required for live mode (raise NotImplementedError
+    # by default — live readiness guard checks these).
+    # ------------------------------------------------------------------
+
+    async def get_instrument_spec(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Return instrument/symbol specification dict.
+
+        Live mode requires a real implementation from the provider.
+        """
+        raise NotImplementedError(f"get_instrument_spec not implemented for {type(self).__name__}")
+
+    async def estimate_margin(self, symbol: str, side: str, volume: float, price: float) -> float:
+        """Estimate required margin for an order in account currency.
+
+        Live mode should use broker's own margin calculator if available.
+        """
+        raise NotImplementedError(f"estimate_margin not implemented for {type(self).__name__}")
+
+    async def get_order_by_client_id(self, client_order_id: str) -> Optional[Dict[str, Any]]:
+        """Look up an order by client/idempotency/comment id.
+
+        Required for UnknownOrderReconciler in live mode.
+        Returns None if not found.
+        """
+        raise NotImplementedError(f"get_order_by_client_id not implemented for {type(self).__name__}")
+
+    async def get_executions_by_client_id(self, client_order_id: str) -> List[Dict[str, Any]]:
+        """Return list of executions/deals for a given client order id.
+
+        Required for UnknownOrderReconciler in live mode.
+        Returns [] if not found.
+        """
+        raise NotImplementedError(f"get_executions_by_client_id not implemented for {type(self).__name__}")
+
+    async def close_all_positions(self, symbol: Optional[str] = None) -> List[OrderResult]:
+        """Close all open positions, optionally filtered by symbol."""
+        raise NotImplementedError(f"close_all_positions not implemented for {type(self).__name__}")
+
+    async def get_server_time(self) -> Optional[float]:
+        """Return broker server UTC timestamp (epoch seconds). None if unsupported."""
+        return None
+
+    async def get_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Return current bid/ask quote for symbol. None if unsupported."""
+        return None
+

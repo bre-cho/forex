@@ -361,6 +361,17 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                     detail=str(payload.get("reason") or "daily_take_profit_hit"),
                     payload=dict(payload),
                 )
+                # Apply runtime action (pause/close/reduce) if provider and registry available
+                lock_action = str(payload.get("lock_action") or "stop_new_orders")
+                _provider = hooks.get("get_provider") and await hooks["get_provider"]() if callable(hooks.get("get_provider")) else None
+                _registry = hooks.get("get_registry") and hooks["get_registry"]() if callable(hooks.get("get_registry")) else None
+                if _provider is not None or _registry is not None:
+                    from app.services.daily_lock_runtime_controller import DailyLockRuntimeController
+                    ctrl = DailyLockRuntimeController(
+                        provider=_provider,
+                        runtime_registry=_registry,
+                    )
+                    await ctrl.apply_lock_action(bot_id, lock_action)
         await _publish_bot_event_safe(bot_id, event_type, payload)
 
     async def reserve_idempotency(

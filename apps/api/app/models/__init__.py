@@ -233,12 +233,17 @@ class Signal(Base):
 
 class Order(Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        UniqueConstraint("bot_instance_id", "idempotency_key", name="uq_orders_bot_idempotency"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     bot_instance_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("bot_instances.id"), nullable=False
     )
-    broker_order_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    broker_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(256), nullable=True, index=True)
+    source_attempt_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     symbol: Mapped[str] = mapped_column(String(20), nullable=False)
     side: Mapped[str] = mapped_column(String(10), nullable=False)
     order_type: Mapped[str] = mapped_column(String(20), nullable=False)

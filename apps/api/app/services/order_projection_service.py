@@ -57,7 +57,9 @@ class OrderProjectionService:
 
         row = Order(
             bot_instance_id=bot_instance_id,
-            broker_order_id=str(attempt.broker_order_id or idempotency_key),
+            broker_order_id=str(attempt.broker_order_id) if attempt.broker_order_id else None,
+            idempotency_key=idempotency_key or None,
+            source_attempt_id=attempt.id if hasattr(attempt, "id") else None,
             symbol=str(attempt.symbol or ""),
             side=str(attempt.side or ""),
             order_type=str((attempt.request_payload or {}).get("order_type") or "market"),
@@ -129,10 +131,9 @@ class OrderProjectionService:
     ) -> Order | None:
         if not idempotency_key:
             return None
-        # broker_order_id is used as the projection key (idempotency key stored there on creation)
         stmt = select(Order).where(
             Order.bot_instance_id == bot_instance_id,
-            Order.broker_order_id == idempotency_key,
+            Order.idempotency_key == idempotency_key,
         ).limit(1)
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()

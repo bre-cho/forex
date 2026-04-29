@@ -80,6 +80,8 @@ class ReconciliationWorker:
         on_incident: Optional[ReconciliationHook] = None,
         interval_seconds: float = 30.0,
         max_mismatch_rounds: int = 3,
+        get_unknown_order_attempts: Optional[Callable] = None,
+        on_unknown_resolved: Optional[Callable] = None,
     ) -> None:
         self.bot_instance_id = bot_instance_id
         self.provider = provider
@@ -89,6 +91,8 @@ class ReconciliationWorker:
         self._on_incident = on_incident
         self.interval_seconds = interval_seconds
         self.max_mismatch_rounds = max_mismatch_rounds
+        self._get_unknown_order_attempts = get_unknown_order_attempts
+        self._on_unknown_resolved = on_unknown_resolved
         self._task: Optional[asyncio.Task] = None
         self._mismatch_rounds: int = 0
         self._running = False
@@ -216,4 +220,57 @@ class ReconciliationWorker:
     async def _loop(self) -> None:
         while self._running:
             await self.run_once()
+            await self.resolve_unknown_orders()
             await asyncio.sleep(self.interval_seconds)
+
+    async def resolve_unknown_orders(self) -> None:
+        """Scan and resolve any UNKNOWN broker_order_attempts via UnknownOrderReconciler.
+
+        This method is a no-op if ``get_unknown_order_attempts`` hook is not provided.
+        ``get_unknown_order_attempts`` must be an async callable that returns a list of
+        dicts with at least ``idempotency_key`` and optionally ``signal_id``.
+
+        ``on_unknown_resolved`` hook (if provided) receives the UnknownOrderResult dict
+        and should update DB state (attempt transitions, projection, incidents).
+        """
+        get_unknowns = getattr(self, "_get_unknown_order_attempts", None)
+        on_resolved = getattr(self, "_on_unknown_resolved", None)
+        if not callable(get_unknowns):
+            return
+        try:
+            unknown_orders = await get_unknowns()
+        except Exception as exc:
+            logger.warning("get_unknown_order_attempts failed for %s: %s", self.bot_instance_id, exc)
+            return
+        if not unknown_orders:
+            return
+
+        from execution_service.unknown_order_reconciler import UnknownOrderReconciler
+        reconciler = UnknownOrderReconciler(
+            provider=self.provider,
+            on_resolved=on_resolved,
+            max_retries=1,  # worker runs periodically; each sweep does 1 attempt
+            retry_interval_seconds=0,
+        )
+        for order in unknown_orders:
+            key = str(order.get("idempotency_key") or "")
+            if not key:
+                continue
+            try:
+                result = await reconciler.resolve_unknown_order(
+                    bot_instance_id=self.bot_instance_id,
+                    idempotency_key=key,
+                    signal_id=str(order.get("signal_id") or ""),
+                )
+                if result.outcome == "failed_needs_operator" and self._on_incident:
+                    await self._on_incident({
+                        "type": "unknown_order_failed_needs_operator",
+                        "bot_instance_id": self.bot_instance_id,
+                        "idempotency_key": key,
+                        "detail": result.error or "max_retries_exceeded",
+                        "severity": "critical",
+                        "escalation_action": "operator_required",
+                    })
+            except Exception as exc:
+                logger.error("resolve_unknown_orders error key=%s: %s", key, exc)
+
