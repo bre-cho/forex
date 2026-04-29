@@ -37,6 +37,7 @@ def _validate_policy_has_live_keys(snapshot: Any) -> None:
 async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSession) -> dict:
     checks: dict[str, bool] = {
         "broker_health": False,
+        "broker_capability_proof": False,
         "active_policy": False,
         "daily_state_fresh": False,
         "no_daily_lock": False,
@@ -48,6 +49,16 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
     if not readiness.ok:
         raise LiveStartPreflightError(f"provider_preflight_failed:{readiness.reason}")
     checks["broker_health"] = True
+
+    # P0.1 — Broker capability proof: verify all live-required provider capabilities
+    account_id = str(getattr(bot, "broker_account_id", "") or "")
+    proof_result = await LiveReadinessGuard.require_capability_proof(
+        provider,
+        expected_account_id=account_id or None,
+    )
+    if not proof_result.ok:
+        raise LiveStartPreflightError(f"provider_capability_proof_failed:{proof_result.reason}")
+    checks["broker_capability_proof"] = True
 
     policy_svc = PolicyService(db)
     is_approved = await policy_svc.is_policy_approved_for_live(bot.id)

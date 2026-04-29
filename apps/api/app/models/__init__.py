@@ -574,6 +574,35 @@ class TradingIncident(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
+class DailyLockAction(Base):
+    """Exactly-once audit record for each daily lock action (P0.3).
+
+    status: pending | running | completed | failed | compensating
+    lock_action: stop_new_orders | close_all_and_stop | reduce_risk_only
+    """
+    __tablename__ = "daily_lock_actions"
+    __table_args__ = (
+        UniqueConstraint("bot_instance_id", "trading_day", "lock_action", name="uq_daily_lock_action_bot_day_action"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    trading_day: Mapped[date] = mapped_column(Date, nullable=False)
+    lock_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lock_action: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    positions_before: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    positions_after: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    action_detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    action_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
 class PolicyVersion(Base):
     __tablename__ = "policy_versions"
     __table_args__ = (UniqueConstraint("bot_instance_id", "version", name="uq_policy_version_bot"),)

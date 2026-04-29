@@ -34,6 +34,8 @@ class ExecutionEngine:
         gate_policy: Optional[Dict[str, Any]] = None,
         verify_idempotency_reservation=None,
         submit_timeout_seconds: float = 10.0,
+        mark_submitting_hook=None,
+        enqueue_unknown_hook=None,
     ) -> None:
         self._provider = provider
         self._provider_name = provider_name
@@ -45,6 +47,11 @@ class ExecutionEngine:
         self._gate = PreExecutionGate(gate_policy or {})
         self._verify_idempotency_reservation = verify_idempotency_reservation
         self._submit_timeout_seconds = float(submit_timeout_seconds)
+        # P0.4 hooks: async callables invoked at SUBMITTING and UNKNOWN
+        # mark_submitting_hook(bot_instance_id, idempotency_key) -> None
+        # enqueue_unknown_hook(bot_instance_id, idempotency_key, signal_id, payload) -> None
+        self._mark_submitting_hook = mark_submitting_hook
+        self._enqueue_unknown_hook = enqueue_unknown_hook
 
     async def start(self) -> None:
         await self._provider.connect()
@@ -333,6 +340,19 @@ class ExecutionEngine:
                 success=False,
                 error_message=f"execution_gate_blocked:{gate_result.reason}",
             )
+
+        # P0.4 — Persist SUBMITTING before calling broker.
+        # If the process dies after this line but before receipt, DB shows SUBMITTING
+        # and the unknown-order daemon will catch it during next poll.
+        _bot_id = str(getattr(ctx, "bot_instance_id", "") or "") if ctx else ""
+        _idem_key = str(getattr(request, "idempotency_key", "") or getattr(request, "client_order_id", "") or "")
+        _signal_id = str(getattr(getattr(payload, "intent", None) or {}, "signal_id", "") or "") if isinstance(payload, ExecutionCommand) else ""
+        if self._runtime_mode == "live" and _bot_id and _idem_key and callable(self._mark_submitting_hook):
+            try:
+                await self._mark_submitting_hook(_bot_id, _idem_key)
+            except Exception as _hook_exc:
+                logger.warning("mark_submitting_hook failed idem=%s: %s", _idem_key, _hook_exc)
+
         started = time.perf_counter()
         try:
             result = await asyncio.wait_for(
@@ -340,7 +360,7 @@ class ExecutionEngine:
                 timeout=self._submit_timeout_seconds,
             )
         except asyncio.TimeoutError:
-            return OrderResult(
+            _result = OrderResult(
                 order_id="",
                 symbol=request.symbol,
                 side=request.side,
@@ -353,8 +373,18 @@ class ExecutionEngine:
                 fill_status="UNKNOWN",
                 raw_response={"latency_ms": round((time.perf_counter() - started) * 1000.0, 2)},
             )
+            # P0.4 — Enqueue for reconciliation after timeout
+            if self._runtime_mode == "live" and _bot_id and _idem_key and callable(self._enqueue_unknown_hook):
+                try:
+                    await self._enqueue_unknown_hook(
+                        _bot_id, _idem_key, _signal_id,
+                        {"reason": "broker_submit_timeout", "symbol": request.symbol, "idempotency_key": _idem_key},
+                    )
+                except Exception as _q_exc:
+                    logger.warning("enqueue_unknown_hook failed idem=%s: %s", _idem_key, _q_exc)
+            return _result
         except Exception as exc:
-            return OrderResult(
+            _result = OrderResult(
                 order_id="",
                 symbol=request.symbol,
                 side=request.side,
@@ -367,6 +397,16 @@ class ExecutionEngine:
                 fill_status="UNKNOWN",
                 raw_response={"latency_ms": round((time.perf_counter() - started) * 1000.0, 2)},
             )
+            # P0.4 — Enqueue for reconciliation after broker error
+            if self._runtime_mode == "live" and _bot_id and _idem_key and callable(self._enqueue_unknown_hook):
+                try:
+                    await self._enqueue_unknown_hook(
+                        _bot_id, _idem_key, _signal_id,
+                        {"reason": f"broker_submit_error:{exc}", "symbol": request.symbol, "idempotency_key": _idem_key},
+                    )
+                except Exception as _q_exc:
+                    logger.warning("enqueue_unknown_hook failed idem=%s: %s", _idem_key, _q_exc)
+            return _result
         if result.raw_response is None:
             result.raw_response = {}
         result.raw_response.setdefault("latency_ms", round((time.perf_counter() - started) * 1000.0, 2))

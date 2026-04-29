@@ -7,16 +7,26 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import DailyTradingState
+from app.services.trading_day_resolver import TradingDayResolver
+
+# Default resolver: Forex rollover at 22:00 UTC (NY close).
+# Override via get_or_create(trading_day=...) to pass a pre-resolved day.
+_DEFAULT_RESOLVER = TradingDayResolver.default()
 
 
 class DailyTradingStateService:
     """Loads and updates per-bot daily state used by pre-execution safety gate."""
 
-    def __init__(self, db: AsyncSession) -> None:
+    def __init__(self, db: AsyncSession, resolver: Optional[TradingDayResolver] = None) -> None:
         self.db = db
+        self._resolver = resolver or _DEFAULT_RESOLVER
+
+    def _current_trading_day(self) -> date:
+        """Return the current trading day using the configured resolver."""
+        return self._resolver.resolve()
 
     async def get_or_create(self, bot_instance_id: str, trading_day: Optional[date] = None) -> DailyTradingState:
-        trading_day = trading_day or date.today()
+        trading_day = trading_day or self._current_trading_day()
         result = await self.db.execute(
             select(DailyTradingState).where(
                 DailyTradingState.bot_instance_id == bot_instance_id,

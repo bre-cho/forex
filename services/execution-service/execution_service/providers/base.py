@@ -1,6 +1,7 @@
 """Abstract base class for broker providers."""
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -69,6 +70,56 @@ class AccountInfo:
     free_margin: float
     margin_level: float
     currency: str
+    account_id: Optional[str] = None
+    broker_name: Optional[str] = None
+
+
+@dataclass
+class BrokerCapabilityProof:
+    """Result of a live capability verification run.  All required fields must be True
+    before live trading is permitted.  Populated by provider.verify_live_capability()."""
+
+    provider: str
+    mode: str
+    account_authorized: bool = False
+    account_id_match: bool = False
+    quote_realtime: bool = False
+    server_time_valid: bool = False
+    instrument_spec_valid: bool = False
+    margin_estimate_valid: bool = False
+    client_order_id_supported: bool = False
+    order_lookup_supported: bool = False
+    execution_lookup_supported: bool = False
+    close_all_supported: bool = False
+    proof_timestamp: float = 0.0
+    detail: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def all_required_passed(self) -> bool:
+        """All required live capability checks passed."""
+        return all([
+            self.account_authorized,
+            self.account_id_match,
+            self.quote_realtime,
+            self.server_time_valid,
+            self.instrument_spec_valid,
+            self.client_order_id_supported,
+            self.order_lookup_supported,
+            self.close_all_supported,
+        ])
+
+    def failed_checks(self) -> List[str]:
+        checks = {
+            "account_authorized": self.account_authorized,
+            "account_id_match": self.account_id_match,
+            "quote_realtime": self.quote_realtime,
+            "server_time_valid": self.server_time_valid,
+            "instrument_spec_valid": self.instrument_spec_valid,
+            "client_order_id_supported": self.client_order_id_supported,
+            "order_lookup_supported": self.order_lookup_supported,
+            "close_all_supported": self.close_all_supported,
+        }
+        return [k for k, v in checks.items() if not v]
 
 
 
@@ -216,4 +267,99 @@ class BrokerProvider(ABC):
         Live mode must fail if this returns False (no idempotency audit trail).
         """
         return False
+
+    async def verify_live_capability(
+        self,
+        *,
+        expected_account_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> "BrokerCapabilityProof":
+        """Run all live capability checks and return a proof object.
+
+        Default implementation performs a best-effort capability check using the
+        methods available on this provider.  Live providers should override this
+        to add provider-specific checks (e.g. clientMsgId roundtrip).
+
+        Returns a BrokerCapabilityProof — caller must verify proof.all_required_passed.
+        """
+        proof = BrokerCapabilityProof(
+            provider=type(self).__name__,
+            mode=getattr(self, "mode", "unknown"),
+            proof_timestamp=time.time(),
+        )
+        # 1. Account authorized
+        try:
+            info = await self.get_account_info()
+            if info and float(getattr(info, "equity", 0.0) or 0.0) > 0:
+                proof.account_authorized = True
+                # 2. Account ID match
+                provider_account_id = str(getattr(info, "account_id", "") or "")
+                if expected_account_id:
+                    proof.account_id_match = (provider_account_id == str(expected_account_id))
+                else:
+                    proof.account_id_match = bool(provider_account_id)
+                proof.detail["account_id"] = provider_account_id
+        except Exception as exc:
+            proof.detail["account_error"] = str(exc)
+
+        # 3. Server time valid
+        try:
+            srv_time = await self.get_server_time()
+            if srv_time and abs(srv_time - time.time()) < 120:
+                proof.server_time_valid = True
+            proof.detail["server_time"] = srv_time
+        except Exception as exc:
+            proof.detail["server_time_error"] = str(exc)
+
+        # 4. Quote realtime
+        probe_symbol = symbol or "EURUSD"
+        try:
+            quote = await self.get_quote(probe_symbol)
+            if quote and (quote.get("bid") or quote.get("ask")):
+                proof.quote_realtime = True
+            proof.detail["quote"] = quote
+        except Exception as exc:
+            proof.detail["quote_error"] = str(exc)
+
+        # 5. Instrument spec valid
+        try:
+            spec = await self.get_instrument_spec(probe_symbol)
+            if spec:
+                proof.instrument_spec_valid = True
+        except Exception as exc:
+            proof.detail["instrument_spec_error"] = str(exc)
+
+        # 6. Margin estimate valid
+        try:
+            margin = await self.estimate_margin(probe_symbol, "buy", 0.01, 1.1)
+            if margin is not None and float(margin) >= 0:
+                proof.margin_estimate_valid = True
+        except Exception as exc:
+            proof.detail["margin_estimate_error"] = str(exc)
+
+        # 7. client_order_id supported
+        proof.client_order_id_supported = bool(self.supports_client_order_id)
+
+        # 8. Order lookup
+        try:
+            getattr(self, "get_order_by_client_id")
+            proof.order_lookup_supported = True
+        except AttributeError:
+            pass
+
+        # 9. Execution lookup
+        try:
+            getattr(self, "get_executions_by_client_id")
+            proof.execution_lookup_supported = True
+        except AttributeError:
+            pass
+
+        # 10. Close all
+        try:
+            getattr(self, "close_all_positions")
+            proof.close_all_supported = True
+        except AttributeError:
+            pass
+
+        return proof
 

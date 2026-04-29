@@ -51,6 +51,34 @@ class LiveReadinessGuard:
         return ReadinessResult(True, "ok")
 
     @classmethod
+    async def require_capability_proof(
+        cls,
+        provider: Any,
+        *,
+        expected_account_id: str | None = None,
+        symbol: str | None = None,
+    ) -> ReadinessResult:
+        """P0.1: Run BrokerCapabilityProof and fail-closed if any required check fails.
+
+        Should be called during live start preflight.  Providers that do not implement
+        verify_live_capability() will fail with provider_capability_proof_unavailable.
+        """
+        verify = getattr(provider, "verify_live_capability", None)
+        if not callable(verify):
+            return ReadinessResult(False, "provider_capability_proof_unavailable")
+        try:
+            proof = await verify(
+                expected_account_id=expected_account_id,
+                symbol=symbol,
+            )
+        except Exception as exc:
+            return ReadinessResult(False, f"provider_capability_proof_error:{exc}")
+        if not proof.all_required_passed:
+            failed = ",".join(proof.failed_checks())
+            return ReadinessResult(False, f"broker_capability_proof_failed:{failed}")
+        return ReadinessResult(True, "ok")
+
+    @classmethod
     async def assert_live_provider_contract(cls, provider: Any, *, symbol: str = "") -> ReadinessResult:
         """P0.4: Verify all live-required methods are implemented (not base NotImplemented)."""
         required_methods = [

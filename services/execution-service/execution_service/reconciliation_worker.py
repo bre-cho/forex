@@ -78,6 +78,7 @@ class ReconciliationWorker:
         on_close_trade: Optional[Callable[[str], "asyncio.Coroutine[Any, Any, None]"]] = None,
         on_result: Optional[ReconciliationHook] = None,
         on_incident: Optional[ReconciliationHook] = None,
+        on_pause_new_orders: Optional[Callable[[str], "asyncio.Coroutine[Any, Any, None]"]] = None,
         interval_seconds: float = 30.0,
         max_mismatch_rounds: int = 3,
         get_unknown_order_attempts: Optional[Callable] = None,
@@ -89,6 +90,8 @@ class ReconciliationWorker:
         self._on_close_trade = on_close_trade
         self._on_result = on_result
         self._on_incident = on_incident
+        # P0.7: called immediately when a ghost broker position is detected
+        self._on_pause_new_orders = on_pause_new_orders
         self.interval_seconds = interval_seconds
         self.max_mismatch_rounds = max_mismatch_rounds
         self._get_unknown_order_attempts = get_unknown_order_attempts
@@ -163,8 +166,7 @@ class ReconciliationWorker:
                             "error": str(exc),
                         })
 
-            # Broker has positions DB doesn't know about — P0.6: this is NOT informational
-            # In live mode: pause new orders immediately + critical incident
+            # Broker has positions DB doesn't know about — P0.7: pause new orders immediately
             ghost_at_broker = broker_ids - db_ids - {""}
             for broker_id in ghost_at_broker:
                 result.mismatches.append({
@@ -177,6 +179,16 @@ class ReconciliationWorker:
                     "Ghost broker position detected [%s]: broker_id=%s — pausing new orders",
                     self.bot_instance_id, broker_id,
                 )
+                # P0.7: immediately pause new orders via registry hook
+                if self._on_pause_new_orders is not None:
+                    try:
+                        await self._on_pause_new_orders(self.bot_instance_id)
+                        logger.warning(
+                            "ReconciliationWorker: new orders paused bot=%s due to ghost position broker_id=%s",
+                            self.bot_instance_id, broker_id,
+                        )
+                    except Exception as exc:
+                        logger.error("on_pause_new_orders failed bot=%s: %s", self.bot_instance_id, exc)
                 if self._on_incident:
                     ghost_incident = {
                         "bot_instance_id": self.bot_instance_id,
