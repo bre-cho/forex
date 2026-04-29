@@ -50,11 +50,18 @@ async def test_apply_close_all_and_stop_with_close_all_positions():
 
 @pytest.mark.asyncio
 async def test_apply_close_all_and_stop_fallback_per_position():
-    """When provider has no close_all_positions, falls back to individual close."""
+    """When provider has no close_all_positions, falls back to individual close.
+    After positions are closed individually, verification call returns empty list.
+    """
     registry = _make_registry(stop=None)
     provider = _make_provider(positions=[{"id": "P1"}, {"id": "P2"}])
     # no close_all_positions method
     del provider.close_all_positions
+    # first call returns positions to iterate; second call (verification) returns empty
+    provider.get_open_positions = AsyncMock(side_effect=[
+        [{"id": "P1"}, {"id": "P2"}],
+        [],
+    ])
     ctrl = DailyLockRuntimeController(provider=provider, runtime_registry=registry)
     result = await ctrl.apply_lock_action("bot-3", "close_all_and_stop")
     assert result["outcome"] == "ok"

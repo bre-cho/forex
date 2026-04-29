@@ -99,10 +99,9 @@ def test_risk_context_builder_live_with_spec():
         risk_pct=1.0,
         instrument_spec=spec,
         runtime_mode="live",
+        broker_margin_required=30.0,
     )
-    # notional = 0.01 * 1 * 30000 = 300
-    # margin = 2000 + 300 * 0.1 = 2030
-    # free_margin_after = 8000 - 30 = 7970
+    # broker_margin_required = 30.0; free_margin_after = 8000 - 30 = 7970
     assert ctx.free_margin_after_order == pytest.approx(7970.0, abs=1.0)
     assert ctx.max_loss_amount_if_sl_hit > 0
 

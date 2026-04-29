@@ -93,6 +93,7 @@ class OrderLedgerService:
         await self.ledger.record_execution_receipt(
             bot_instance_id=bot_instance_id,
             idempotency_key=idempotency_key,
+            client_order_id=str(payload.get("client_order_id") or idempotency_key),
             broker=broker,
             broker_order_id=str(payload.get("broker_order_id") or "") or None,
             broker_position_id=str(payload.get("broker_position_id") or "") or None,
@@ -103,6 +104,10 @@ class OrderLedgerService:
             filled_volume=float(payload.get("filled_volume") or payload.get("volume") or 0.0),
             avg_fill_price=float(payload.get("avg_fill_price") or payload.get("price") or 0.0) or None,
             commission=float(payload.get("commission") or 0.0),
+            account_id=str(payload.get("account_id") or "") or None,
+            server_time=float(payload.get("server_time")) if payload.get("server_time") is not None else None,
+            latency_ms=float(payload.get("latency_ms") or 0.0),
+            raw_response_hash=str(payload.get("raw_response_hash") or "") or None,
             raw_response=dict(payload.get("raw_response") or {}),
         )
         await self.ledger.update_order_attempt(

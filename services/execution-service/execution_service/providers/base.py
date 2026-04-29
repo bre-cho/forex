@@ -29,11 +29,17 @@ class OrderResult:
     fill_price: float
     commission: float
     success: bool
+    client_order_id: Optional[str] = None
+    broker_order_id: Optional[str] = None
     error_message: Optional[str] = None
     submit_status: str = "UNKNOWN"   # ACKED | REJECTED | UNKNOWN
     fill_status: str = "UNKNOWN"     # FILLED | PARTIAL | PENDING | UNKNOWN
     broker_position_id: Optional[str] = None
     broker_deal_id: Optional[str] = None
+    account_id: Optional[str] = None
+    server_time: Optional[float] = None
+    latency_ms: float = 0.0
+    raw_response_hash: Optional[str] = None
     raw_response: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -84,6 +90,13 @@ class PreExecutionContext:
     kill_switch: bool
     idempotency_key: str
     brain_cycle_id: str
+    account_id: Optional[str] = None
+    broker_name: str = ""
+    order_type: str = "market"
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    policy_version: str = ""
     margin_usage_pct: float = 0.0
     free_margin_after_order: float = 0.0
     account_exposure_pct: float = 0.0

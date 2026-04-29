@@ -367,9 +367,37 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                             provider=provider,
                             runtime_registry=registry,
                         )
-                        await controller.apply_lock_action(bot_id, lock_action)
+                        controller_outcome = await controller.apply_lock_action(bot_id, lock_action)
+                        await ledger.record_daily_lock_event(
+                            bot_instance_id=bot_id,
+                            event_type=f"{event_type}_controller_outcome",
+                            lock_action=lock_action,
+                            reason=str((controller_outcome or {}).get("outcome") or "unknown"),
+                            payload={
+                                "event": event_type,
+                                "source_payload": dict(payload),
+                                "controller_outcome": dict(controller_outcome or {}),
+                            },
+                        )
+                        if str((controller_outcome or {}).get("outcome") or "").lower() in {"error", "partial"}:
+                            await notify_incident(
+                                incident_type="daily_lock_controller_failure",
+                                severity="critical",
+                                title="Daily lock controller failed",
+                                detail=str((controller_outcome or {}).get("detail") or "controller_failed"),
+                                payload=dict(controller_outcome or {}),
+                            )
+                            if runtime is not None:
+                                runtime.state.metadata["kill_switch"] = True
                 except Exception as exc:
                     logger.error("DailyLockRuntimeController failed for bot %s: %s", bot_id, exc)
+                    await notify_incident(
+                        incident_type="daily_lock_controller_failure",
+                        severity="critical",
+                        title="Daily lock controller exception",
+                        detail=str(exc),
+                        payload={"event": event_type, "bot_id": bot_id},
+                    )
         await _publish_bot_event_safe(bot_id, event_type, payload)
 
     async def reserve_idempotency(

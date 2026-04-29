@@ -173,6 +173,15 @@ class UnknownOrderReconciler:
         self, *, bot_instance_id: str, idempotency_key: str, signal_id: str
     ) -> UnknownOrderResult:
         provider = self._provider
+        provider_mode = str(getattr(provider, "mode", "") or "").lower()
+        supports_client_order_id = bool(getattr(provider, "supports_client_order_id", False))
+        if provider_mode == "live" and not supports_client_order_id:
+            return UnknownOrderResult(
+                idempotency_key=idempotency_key,
+                bot_instance_id=bot_instance_id,
+                outcome="error",
+                error="provider_client_order_lookup_unsupported",
+            )
 
         # --- 1. Try direct order lookup by client order id ---
         broker_order: Optional[Dict[str, Any]] = None
@@ -180,6 +189,13 @@ class UnknownOrderReconciler:
             try:
                 broker_order = await provider.get_order_by_client_id(idempotency_key)
             except Exception as exc:
+                if provider_mode == "live":
+                    return UnknownOrderResult(
+                        idempotency_key=idempotency_key,
+                        bot_instance_id=bot_instance_id,
+                        outcome="error",
+                        error=f"provider_order_lookup_failed:{exc}",
+                    )
                 logger.warning("get_order_by_client_id failed: %s", exc)
 
         if broker_order and isinstance(broker_order, dict):
@@ -191,6 +207,13 @@ class UnknownOrderReconciler:
             try:
                 executions = await provider.get_executions_by_client_id(idempotency_key) or []
             except Exception as exc:
+                if provider_mode == "live":
+                    return UnknownOrderResult(
+                        idempotency_key=idempotency_key,
+                        bot_instance_id=bot_instance_id,
+                        outcome="error",
+                        error=f"provider_execution_lookup_failed:{exc}",
+                    )
                 logger.warning("get_executions_by_client_id failed: %s", exc)
 
         if executions:

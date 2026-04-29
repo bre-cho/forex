@@ -32,6 +32,7 @@ class RiskContextBuilder:
         risk_pct: float,
         instrument_spec: Optional[InstrumentSpec] = None,
         runtime_mode: str = "paper",
+        broker_margin_required: Optional[float] = None,
     ) -> RiskContext:
         equity = float(getattr(account_info, "equity", 0.0) or 0.0)
         free_margin = float(getattr(account_info, "free_margin", 0.0) or 0.0)
@@ -73,13 +74,22 @@ class RiskContextBuilder:
         sl = float(stop_loss or 0.0)
         pip_size = spec.pip_size if spec else pip_size_for_symbol(symbol)
         pip_value = spec.pip_value_per_lot(price) if spec else pip_value_per_lot(symbol)
+        if runtime_mode == "live" and float(pip_value or 0.0) <= 0:
+            raise RuntimeError("risk_context_pip_value_unavailable")
         stop_pips = abs(price - sl) / pip_size if sl > 0 and price > 0 else 0.0
         max_loss = stop_pips * pip_value * volume
 
-        # Margin calculation uses broker margin_rate, not hardcoded 0.01
-        projected_margin = margin + notional * margin_rate
+        # Margin calculation: live mode must use broker-native estimate.
+        if runtime_mode == "live":
+            if broker_margin_required is None or float(broker_margin_required) <= 0:
+                raise RuntimeError("risk_context_missing_broker_margin_estimate")
+            margin_required = float(broker_margin_required)
+        else:
+            margin_required = notional * margin_rate
+
+        projected_margin = margin + margin_required
         margin_usage_pct = (projected_margin / equity) * 100.0
-        free_margin_after = free_margin - notional * margin_rate
+        free_margin_after = free_margin - margin_required
 
         # conservative proxy for correlation bucket (USD-quoted majors grouped)
         correlated = 0.0

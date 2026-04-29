@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date, datetime, timezone
 from typing import Any, Optional
 
@@ -328,14 +330,24 @@ class SafetyLedgerService:
         broker_order_id: str | None,
         broker_position_id: str | None,
         broker_deal_id: str | None,
-        submit_status: str,
+        client_order_id: str | None = None,
         fill_status: str,
         requested_volume: float,
         filled_volume: float,
         avg_fill_price: float | None,
         commission: float,
         raw_response: dict[str, Any] | None = None,
+        account_id: str | None = None,
+        server_time: float | None = None,
+        latency_ms: float | None = None,
+        raw_response_hash: str | None = None,
+        submit_status: str | None = None,
     ) -> BrokerExecutionReceipt:
+        payload = raw_response or {}
+        payload_hash = raw_response_hash
+        if not payload_hash:
+            canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            payload_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         row = BrokerExecutionReceipt(
             bot_instance_id=bot_instance_id,
             idempotency_key=idempotency_key,
@@ -344,12 +356,17 @@ class SafetyLedgerService:
             broker_position_id=broker_position_id,
             broker_deal_id=broker_deal_id,
             submit_status=submit_status,
+            client_order_id=client_order_id,
             fill_status=fill_status,
             requested_volume=float(requested_volume or 0.0),
             filled_volume=float(filled_volume or 0.0),
             avg_fill_price=avg_fill_price,
             commission=float(commission or 0.0),
-            raw_response=raw_response or {},
+            account_id=account_id,
+            server_time=float(server_time) if server_time is not None else None,
+            latency_ms=float(latency_ms or 0.0),
+            raw_response_hash=payload_hash,
+            raw_response=payload,
         )
         self.db.add(row)
         await self.db.commit()

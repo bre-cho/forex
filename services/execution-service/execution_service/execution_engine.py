@@ -10,6 +10,7 @@ from .account_sync import AccountSync
 from .order_router import OrderRouter
 from .providers.base import BrokerProvider, ExecutionCommand, OrderRequest, OrderResult, PreExecutionContext
 from trading_core.runtime.pre_execution_gate import PreExecutionGate, hash_gate_context
+from trading_core.runtime.frozen_context_contract import validate_frozen_context_bindings
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,17 @@ class ExecutionEngine:
             request = payload.request
             ctx = payload.pre_execution_context
             if self._runtime_mode == "live":
+                if not bool(getattr(self._provider, "supports_client_order_id", False)):
+                    return OrderResult(
+                        order_id="",
+                        symbol=request.symbol,
+                        side=request.side,
+                        volume=request.volume,
+                        fill_price=float(request.price or 0.0),
+                        commission=0.0,
+                        success=False,
+                        error_message="execution_gate_blocked:provider_client_order_id_unsupported",
+                    )
                 if not payload.brain_cycle_id:
                     return OrderResult(
                         order_id="",
@@ -189,9 +201,12 @@ class ExecutionEngine:
                         success=False,
                         error_message="execution_gate_blocked:gate_context_hash_mismatch",
                     )
-                # Revalidate critical request bindings against frozen gate context
-                frozen_volume = float(gate_ctx.get("requested_volume", 0.0) or 0.0)
-                if frozen_volume > 0 and abs(frozen_volume - float(request.volume or 0.0)) > 1e-9:
+                binding = validate_frozen_context_bindings(
+                    request=request,
+                    context=ctx,
+                    provider_name=self._provider_name,
+                )
+                if not binding.ok:
                     return OrderResult(
                         order_id="",
                         symbol=request.symbol,
@@ -200,7 +215,7 @@ class ExecutionEngine:
                         fill_price=float(request.price or 0.0),
                         commission=0.0,
                         success=False,
-                        error_message="execution_gate_blocked:request_volume_context_mismatch",
+                        error_message=f"execution_gate_blocked:{binding.reason}",
                     )
             else:
                 gate_ctx = {

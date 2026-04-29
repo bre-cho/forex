@@ -487,6 +487,7 @@ class BrokerExecutionReceipt(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
     idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    client_order_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     broker: Mapped[str] = mapped_column(String(32), nullable=False)
     broker_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     broker_position_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -497,6 +498,10 @@ class BrokerExecutionReceipt(Base):
     filled_volume: Mapped[float] = mapped_column(Float, nullable=False)
     avg_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     commission: Mapped[float] = mapped_column(Float, default=0.0)
+    account_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    server_time: Mapped[float | None] = mapped_column(Float, nullable=True)
+    latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    raw_response_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     raw_response: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 

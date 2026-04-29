@@ -295,8 +295,9 @@ class CTraderProvider(BrokerProvider):
                     if inspect.isawaitable(result):
                         result = await result
                     return dict(result) if result else None
-                except Exception:
-                    pass
+                except Exception as exc:
+                    if self.live:
+                        raise RuntimeError(f"ctrader_get_order_by_client_id_failed:{exc}") from exc
             # Fallback: search history
             try:
                 history = await self._execution_adapter.get_history(limit=500)
@@ -304,8 +305,9 @@ class CTraderProvider(BrokerProvider):
                     comment = str(trade.get("comment") or trade.get("clientMsgId") or "")
                     if comment == str(client_order_id):
                         return dict(trade)
-            except Exception:
-                pass
+            except Exception as exc:
+                if self.live:
+                    raise RuntimeError(f"ctrader_history_lookup_failed:{exc}") from exc
         return None
 
     async def get_executions_by_client_id(self, client_order_id: str):
@@ -319,16 +321,18 @@ class CTraderProvider(BrokerProvider):
                     if inspect.isawaitable(result):
                         result = await result
                     return [dict(r) for r in (result or [])]
-                except Exception:
-                    pass
+                except Exception as exc:
+                    if self.live:
+                        raise RuntimeError(f"ctrader_get_executions_by_client_id_failed:{exc}") from exc
             try:
                 history = await self._execution_adapter.get_history(limit=500)
                 return [
                     dict(t) for t in (history or [])
                     if str(t.get("comment") or t.get("clientMsgId") or "") == str(client_order_id)
                 ]
-            except Exception:
-                pass
+            except Exception as exc:
+                if self.live:
+                    raise RuntimeError(f"ctrader_execution_history_failed:{exc}") from exc
         return []
 
     async def close_all_positions(self, symbol=None):
@@ -372,8 +376,9 @@ class CTraderProvider(BrokerProvider):
                     if inspect.isawaitable(result):
                         result = await result
                     return dict(result) if result else None
-                except Exception:
-                    pass
+                except Exception as exc:
+                    if self.live:
+                        raise RuntimeError(f"ctrader_get_quote_failed:{exc}") from exc
             # Fallback: derive from candles
             try:
                 candles = self._market_data_adapter.get_candles(limit=1)
@@ -381,7 +386,8 @@ class CTraderProvider(BrokerProvider):
                     last = candles.iloc[-1]
                     close = float(last.get("close") if hasattr(last, "get") else last["close"])
                     return {"symbol": symbol, "bid": close, "ask": close, "spread_pips": 0.0}
-            except Exception:
-                pass
+            except Exception as exc:
+                if self.live:
+                    raise RuntimeError(f"ctrader_quote_fallback_failed:{exc}") from exc
         return None
 

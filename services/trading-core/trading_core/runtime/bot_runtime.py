@@ -713,6 +713,8 @@ class BotRuntime:
                 "provider_mode": str(getattr(self.broker_provider, "mode", "stub")),
                 "runtime_mode": self.runtime_mode,
                 "broker_connected": bool(getattr(self.broker_provider, "is_connected", False)),
+                "symbol": str(signal.symbol),
+                "side": str(signal.direction).lower(),
                 "market_data_ok": bool(self.state.metadata.get("market_data_ok", False)),
                 "data_age_seconds": float(self.state.metadata.get("data_age_seconds", 10**9)),
                 "daily_profit_amount": float((daily_state or {}).get("daily_profit_amount", self._daily_profit_amount)),
@@ -751,10 +753,17 @@ class BotRuntime:
             risk_ctx = None
             if self.runtime_mode == "live":
                 try:
-                    from trading_core.risk import RiskContextBuilder
+                    from trading_core.risk import RiskContextBuilder, estimate_live_margin_required
 
                     open_positions_fn = getattr(self.broker_provider, "get_open_positions", None)
                     open_positions = await open_positions_fn() if callable(open_positions_fn) else []
+                    margin_required = await estimate_live_margin_required(
+                        provider=self.broker_provider,
+                        symbol=str(signal.symbol),
+                        side=str(signal.direction).lower(),
+                        volume=float(signal.lot_size),
+                        price=float(signal.entry_price),
+                    )
                     risk_ctx = RiskContextBuilder.build(
                         account_info=account,
                         open_positions=open_positions or [],
@@ -765,6 +774,7 @@ class BotRuntime:
                         risk_pct=float(self.risk_config.get("risk_pct", 0.5)) if isinstance(self.risk_config, dict) else 0.5,
                         instrument_spec=instrument_spec,
                         runtime_mode=self.runtime_mode,
+                        broker_margin_required=float(margin_required),
                     )
                 except Exception as exc:
                     self.state.error_message = f"risk_context_build_failed:{exc}"
@@ -863,6 +873,7 @@ class BotRuntime:
             bot_instance_id=self.bot_instance_id,
             runtime_mode=self.runtime_mode,
             provider_mode=str(getattr(self.broker_provider, "mode", "stub")),
+            broker_name=str(getattr(self.broker_provider, "provider_name", "")),
             broker_connected=bool(getattr(self.broker_provider, "is_connected", False)),
             market_data_ok=bool(self.state.metadata.get("market_data_ok", False)),
             data_age_seconds=float(self.state.metadata.get("data_age_seconds", 10**9)),
@@ -877,6 +888,12 @@ class BotRuntime:
             kill_switch=bool(self.state.metadata.get("kill_switch", False)),
             idempotency_key=str(signal.signal_id),
             brain_cycle_id=str(getattr(signal, "meta", {}).get("brain_cycle_id", "")),
+            account_id=str(getattr(locals().get("account", None), "account_id", "") or "") or None,
+            order_type=str(request.order_type or "market"),
+            entry_price=float(request.price) if request.price is not None else None,
+            stop_loss=float(request.stop_loss) if request.stop_loss is not None else None,
+            take_profit=float(request.take_profit) if request.take_profit is not None else None,
+            policy_version=str((getattr(signal, "meta", {}) or {}).get("policy_version") or (getattr(signal, "meta", {}) or {}).get("policy_version_id") or ""),
             policy_snapshot=getattr(signal, "meta", {}).get("policy_snapshot", {}),
             gate_context=dict(gate_ctx or {}),
             context_hash=str(gate_ctx_hash or ""),
@@ -966,7 +983,8 @@ class BotRuntime:
             "idempotency_key": command.idempotency_key,
             "brain_cycle_id": command.brain_cycle_id,
             "broker": str(getattr(self.broker_provider, "provider_name", "unknown")),
-            "broker_order_id": result.order_id,
+            "client_order_id": str(command.idempotency_key),
+            "broker_order_id": str(getattr(result, "broker_order_id", "") or result.order_id or "") or None,
             "broker_position_id": getattr(result, "broker_position_id", None),
             "broker_deal_id": getattr(result, "broker_deal_id", None),
             "symbol": result.symbol,
@@ -980,6 +998,10 @@ class BotRuntime:
             "commission": result.commission,
             "submit_status": str(getattr(result, "submit_status", "UNKNOWN") or "UNKNOWN"),
             "fill_status": str(getattr(result, "fill_status", "UNKNOWN") or "UNKNOWN"),
+            "account_id": str(getattr(result, "account_id", "") or "") or None,
+            "server_time": getattr(result, "server_time", None),
+            "latency_ms": float(getattr(result, "latency_ms", 0.0) or 0.0),
+            "raw_response_hash": str(getattr(result, "raw_response_hash", "") or "") or None,
             "raw_response": dict(getattr(result, "raw_response", {}) or {}),
             "status": "filled" if result.success else "rejected",
             "error_message": result.error_message,
@@ -1024,6 +1046,22 @@ class BotRuntime:
             await self._safe_hook(self._on_order(order_payload), "on_order")
 
         if not result.success:
+            submit_status = str(getattr(result, "submit_status", "UNKNOWN") or "UNKNOWN").upper()
+            fill_status = str(getattr(result, "fill_status", "UNKNOWN") or "UNKNOWN").upper()
+            if self.runtime_mode == "live" and (submit_status == "UNKNOWN" or fill_status == "UNKNOWN"):
+                if self._set_idempotency_status is not None:
+                    await self._set_idempotency_status(command.idempotency_key, "broker_unknown", command.brain_cycle_id or None)
+                await self._emit_event(
+                    "order_unknown",
+                    {
+                        **order_payload,
+                        "status": "unknown",
+                        "error_message": str(result.error_message or "broker_submit_unknown"),
+                    },
+                )
+                if self._reconciliation_worker is not None:
+                    await self._reconciliation_worker.run_once()
+                return
             if self._set_idempotency_status is not None:
                 await self._set_idempotency_status(command.idempotency_key, "rejected", command.brain_cycle_id or None)
             self.state.error_message = result.error_message

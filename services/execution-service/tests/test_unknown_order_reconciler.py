@@ -134,3 +134,46 @@ async def test_provider_without_lookup_methods():
     reconciler = UnknownOrderReconciler(provider=provider, max_retries=2, retry_interval_seconds=0)
     result = await reconciler.resolve_unknown_order(bot_instance_id="bot6", idempotency_key="KEY-no-lookup")
     assert result.outcome == "failed_needs_operator"
+
+
+# ------------------------------------------------------------------
+# P0.5: live mode fail-loud paths
+# ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_live_provider_without_client_order_id_support_returns_error():
+    """Live provider that does not support client_order_id must return error outcome."""
+    provider = MagicMock()
+    provider.mode = "live"
+    provider.supports_client_order_id = False
+    reconciler = UnknownOrderReconciler(provider=provider, max_retries=1, retry_interval_seconds=0)
+    result = await reconciler.resolve_unknown_order(bot_instance_id="bot-live", idempotency_key="KEY-live-1")
+    assert result.outcome == "error"
+    assert "unsupported" in result.error
+
+
+@pytest.mark.asyncio
+async def test_live_provider_order_lookup_throws_returns_error():
+    """In live mode, get_order_by_client_id exception must surface as error outcome (not swallowed)."""
+    provider = MagicMock()
+    provider.mode = "live"
+    provider.supports_client_order_id = True
+    provider.get_order_by_client_id = AsyncMock(side_effect=Exception("network_error"))
+    reconciler = UnknownOrderReconciler(provider=provider, max_retries=1, retry_interval_seconds=0)
+    result = await reconciler.resolve_unknown_order(bot_instance_id="bot-live2", idempotency_key="KEY-live-2")
+    assert result.outcome == "error"
+    assert "lookup_failed" in result.error
+
+
+@pytest.mark.asyncio
+async def test_live_provider_execution_lookup_throws_returns_error():
+    """In live mode, get_executions_by_client_id exception must surface as error outcome."""
+    provider = MagicMock()
+    provider.mode = "live"
+    provider.supports_client_order_id = True
+    provider.get_order_by_client_id = AsyncMock(return_value=None)
+    provider.get_executions_by_client_id = AsyncMock(side_effect=Exception("rpc_error"))
+    reconciler = UnknownOrderReconciler(provider=provider, max_retries=1, retry_interval_seconds=0)
+    result = await reconciler.resolve_unknown_order(bot_instance_id="bot-live3", idempotency_key="KEY-live-3")
+    assert result.outcome == "error"
+    assert "lookup_failed" in result.error

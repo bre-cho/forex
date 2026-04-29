@@ -105,19 +105,19 @@ class DailyLockRuntimeController:
         if hasattr(self._registry, "pause_new_orders"):
             await self._registry.pause_new_orders(bot_id)
         else:
-            logger.warning("registry.pause_new_orders not available — bot %s will not be paused", bot_id)
+            raise RuntimeError("registry_pause_new_orders_unavailable")
 
     async def _stop_bot(self, bot_id: str) -> None:
         if hasattr(self._registry, "stop"):
             await self._registry.stop(bot_id)
         else:
-            logger.warning("registry.stop not available — bot %s will not be stopped", bot_id)
+            raise RuntimeError("registry_stop_unavailable")
 
     async def _set_risk_mode(self, bot_id: str, mode: str) -> None:
         if hasattr(self._registry, "set_risk_mode"):
             await self._registry.set_risk_mode(bot_id, mode)
         else:
-            logger.warning("registry.set_risk_mode not available — bot %s mode not changed", bot_id)
+            raise RuntimeError("registry_set_risk_mode_unavailable")
 
     async def _close_all_positions(self, bot_id: str, symbol: Optional[str] = None) -> str:
         provider = self._provider
@@ -125,6 +125,10 @@ class DailyLockRuntimeController:
             results = await provider.close_all_positions(symbol)
             count = len(results) if results else 0
             logger.info("DailyLockRuntimeController: closed %d positions for bot %s", count, bot_id)
+            remaining = await provider.get_open_positions()
+            remaining_count = len([p for p in (remaining or []) if not symbol or str(p.get("symbol") or "").upper() == str(symbol).upper()])
+            if remaining_count > 0:
+                raise RuntimeError(f"close_all_positions_incomplete:{remaining_count}")
             return str(count)
         # Fallback: close individual positions
         try:
@@ -144,4 +148,8 @@ class DailyLockRuntimeController:
                 closed += 1
             except Exception as exc:
                 logger.error("close_position %s failed for bot %s: %s", pos_id, bot_id, exc)
+        remaining = await provider.get_open_positions()
+        remaining_count = len([p for p in (remaining or []) if not symbol or str(p.get("symbol") or "").upper() == str(symbol).upper()])
+        if remaining_count > 0:
+            raise RuntimeError(f"close_positions_fallback_incomplete:{remaining_count}")
         return str(closed)
