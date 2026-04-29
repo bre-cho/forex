@@ -2,10 +2,17 @@
 from __future__ import annotations
 from types import SimpleNamespace
 import pytest
+from trading_core.runtime.pre_execution_gate import hash_gate_context
 from trading_core.runtime.frozen_context_contract import validate_frozen_context_bindings
 
 
 def _base_ctx(**overrides):
+    gate_context = {
+        "symbol": "EURUSD",
+        "side": "buy",
+        "requested_volume": 0.1,
+        "idempotency_key": "idem-abc",
+    }
     d = dict(
         bot_instance_id="bot-1",
         idempotency_key="idem-abc",
@@ -17,7 +24,8 @@ def _base_ctx(**overrides):
         entry_price=1.1000,
         stop_loss=1.0900,
         take_profit=1.1200,
-        gate_context={"symbol": "EURUSD", "side": "buy", "requested_volume": 0.1},
+        gate_context=gate_context,
+        context_hash=hash_gate_context(gate_context),
     )
     d.update(overrides)
     return SimpleNamespace(**d)
@@ -52,7 +60,8 @@ def test_broker_name_case_insensitive():
 
 
 def test_symbol_mismatch():
-    ctx = _base_ctx(gate_context={"symbol": "GBPUSD", "side": "buy", "requested_volume": 0.1})
+    gate_context = {"symbol": "GBPUSD", "side": "buy", "requested_volume": 0.1, "idempotency_key": "idem-abc"}
+    ctx = _base_ctx(gate_context=gate_context, context_hash=hash_gate_context(gate_context))
     r = validate_frozen_context_bindings(request=_base_req(), context=ctx, provider_name="ctrader")
     assert not r.ok
     assert "symbol" in r.reason
@@ -93,3 +102,11 @@ def test_missing_policy_version():
     r = validate_frozen_context_bindings(request=_base_req(), context=_base_ctx(policy_version=""), provider_name="ctrader")
     assert not r.ok
     assert "policy_version" in r.reason
+
+
+def test_missing_gate_context_field_blocks_live() -> None:
+    gate_context = {"symbol": "EURUSD", "requested_volume": 0.1, "idempotency_key": "idem-abc"}
+    ctx = _base_ctx(gate_context=gate_context, context_hash=hash_gate_context(gate_context))
+    r = validate_frozen_context_bindings(request=_base_req(), context=ctx, provider_name="ctrader")
+    assert r.ok is False
+    assert "missing_gate_context_side" in r.reason

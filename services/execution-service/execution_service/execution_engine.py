@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional, Union
@@ -64,7 +66,62 @@ class ExecutionEngine:
     def _on_account_update(self, info: Dict[str, Any]) -> None:
         self._last_account_info = info
 
+    def _enforce_live_receipt_contract(
+        self,
+        *,
+        result: OrderResult,
+        request: OrderRequest,
+        context: Optional[PreExecutionContext],
+    ) -> OrderResult:
+        if result.raw_response is None:
+            result.raw_response = {}
+
+        if not result.raw_response_hash and result.raw_response:
+            payload = json.dumps(result.raw_response, sort_keys=True, separators=(",", ":"), default=str)
+            result.raw_response_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+        if not result.client_order_id:
+            result.client_order_id = str(getattr(request, "client_order_id", "") or getattr(request, "idempotency_key", "") or "") or None
+        if not result.account_id and context is not None:
+            result.account_id = str(getattr(context, "account_id", "") or "") or None
+
+        if not result.success:
+            return result
+
+        missing: list[str] = []
+        if str(result.submit_status or "").upper() != "ACKED":
+            missing.append("submit_status")
+        if str(result.fill_status or "").upper() not in {"FILLED", "PARTIAL"}:
+            missing.append("fill_status")
+        if not (str(result.broker_order_id or "") or str(result.broker_position_id or "")):
+            missing.append("broker_order_or_position_id")
+        if not str(result.account_id or ""):
+            missing.append("account_id")
+        if not str(result.raw_response_hash or ""):
+            missing.append("raw_response_hash")
+
+        if missing:
+            return OrderResult(
+                order_id="",
+                symbol=request.symbol,
+                side=request.side,
+                volume=request.volume,
+                fill_price=float(request.price or 0.0),
+                commission=0.0,
+                success=False,
+                error_message=f"invalid_live_execution_receipt:{','.join(missing)}",
+                client_order_id=result.client_order_id,
+                broker_order_id=result.broker_order_id,
+                submit_status="UNKNOWN",
+                fill_status="UNKNOWN",
+                account_id=result.account_id,
+                raw_response_hash=result.raw_response_hash,
+                raw_response=result.raw_response,
+            )
+        return result
+
     async def place_order(self, payload: Union[OrderRequest, ExecutionCommand]) -> OrderResult:
+        ctx: Optional[PreExecutionContext] = None
         if isinstance(payload, ExecutionCommand):
             request = payload.request
             ctx = payload.pre_execution_context
@@ -282,7 +339,7 @@ class ExecutionEngine:
                 self._router.route(self._provider_name, request),
                 timeout=self._submit_timeout_seconds,
             )
-        except TimeoutError:
+        except asyncio.TimeoutError:
             return OrderResult(
                 order_id="",
                 symbol=request.symbol,
@@ -313,6 +370,8 @@ class ExecutionEngine:
         if result.raw_response is None:
             result.raw_response = {}
         result.raw_response.setdefault("latency_ms", round((time.perf_counter() - started) * 1000.0, 2))
+        if self._runtime_mode == "live":
+            result = self._enforce_live_receipt_contract(result=result, request=request, context=ctx)
         return result
 
     async def close_position(self, position_id: str) -> OrderResult:

@@ -374,9 +374,12 @@ class CTraderProvider(BrokerProvider):
                     if inspect.isawaitable(result):
                         result = await result
                     return float(result) if result is not None else None
-                except Exception:
-                    pass
+                except Exception as exc:
+                    if self.live:
+                        raise RuntimeError(f"ctrader_get_server_time_failed:{exc}") from exc
         import time
+        if self.live:
+            raise RuntimeError("ctrader_live_server_time_unavailable")
         return float(time.time())
 
     async def get_quote(self, symbol: str):

@@ -162,9 +162,10 @@ class BotRuntime:
 
             if ExecutionEngine is not None:
                 gate_policy = self.risk_config.get("gate_policy", {}) if isinstance(self.risk_config, dict) else {}
+                broker_identity = str(getattr(self.broker_provider, "provider_name", "") or "").strip() or "unknown"
                 self._execution_engine = ExecutionEngine(
                     provider=self.broker_provider,
-                    provider_name=self.bot_instance_id,
+                    provider_name=broker_identity,
                     runtime_mode=self.runtime_mode,
                     gate_policy=gate_policy,
                     verify_idempotency_reservation=self._verify_idempotency_reservation,
@@ -558,16 +559,41 @@ class BotRuntime:
             sl = float(signal.sl)
             rr = abs((float(signal.tp) - entry) / (entry - sl)) if abs(entry - sl) > 0 else 0.0
             spread_pips = float(getattr(self.broker_provider, "spread_pips", 0.0))
+            policy_version = str(
+                (getattr(signal, "meta", {}) or {}).get("policy_version")
+                or (getattr(signal, "meta", {}) or {}).get("policy_version_id")
+                or ""
+            )
+            if self.runtime_mode == "live" and not policy_version:
+                self.state.error_message = "missing_policy_version"
+                return
             if self.runtime_mode == "live":
                 # P0.2: Fetch live quote for real spread; fail closed if missing
                 get_quote_fn = getattr(self.broker_provider, "get_quote", None)
-                if callable(get_quote_fn):
-                    try:
-                        live_quote = await get_quote_fn(str(signal.symbol))
-                        if live_quote:
-                            spread_pips = float(live_quote.get("spread_pips", 0.0) or 0.0)
-                    except Exception:
-                        pass  # spread_pips stays at provider default; gate will validate
+                if not callable(get_quote_fn):
+                    self.state.error_message = "live_quote_fetch_unavailable"
+                    return
+                try:
+                    live_quote = await get_quote_fn(str(signal.symbol))
+                except Exception as quote_exc:
+                    self.state.error_message = f"live_quote_fetch_failed:{quote_exc}"
+                    return
+                if not isinstance(live_quote, dict):
+                    self.state.error_message = "live_quote_unavailable"
+                    return
+                if "spread_pips" in live_quote:
+                    spread_pips = float(live_quote.get("spread_pips", 0.0) or 0.0)
+                elif live_quote.get("bid") is not None and live_quote.get("ask") is not None:
+                    bid = float(live_quote.get("bid") or 0.0)
+                    ask = float(live_quote.get("ask") or 0.0)
+                    if bid <= 0 or ask <= 0 or ask < bid:
+                        self.state.error_message = "live_quote_invalid_bid_ask"
+                        return
+                    pip_size = 0.01 if "JPY" in str(signal.symbol).upper() else 0.0001
+                    spread_pips = (ask - bid) / pip_size
+                else:
+                    self.state.error_message = "live_quote_missing_spread"
+                    return
                 account_info_fn = getattr(self.broker_provider, "get_account_info", None)
                 if not callable(account_info_fn):
                     self.state.error_message = "broker_account_info_unavailable"
@@ -741,7 +767,7 @@ class BotRuntime:
                 "broker_name": str(getattr(self.broker_provider, "provider_name", "")),
                 "starting_equity": float(getattr(account if self.runtime_mode == "live" else None, "equity", 0.0) or 0.0),
                 "slippage_pips": 0.0,  # updated after live quote if available
-                "policy_version": str((getattr(signal, "meta", {}) or {}).get("policy_version") or (getattr(signal, "meta", {}) or {}).get("policy_version_id") or ""),
+                "policy_version": policy_version,
                 "idempotency_key": idempotency_key,
             }
             if self.runtime_mode == "live" and self._get_policy_approval_status is not None:
@@ -904,7 +930,7 @@ class BotRuntime:
             entry_price=float(request.price) if request.price is not None else None,
             stop_loss=float(request.stop_loss) if request.stop_loss is not None else None,
             take_profit=float(request.take_profit) if request.take_profit is not None else None,
-            policy_version=str((getattr(signal, "meta", {}) or {}).get("policy_version") or (getattr(signal, "meta", {}) or {}).get("policy_version_id") or ""),
+            policy_version=policy_version,
             policy_snapshot=getattr(signal, "meta", {}).get("policy_snapshot", {}),
             gate_context=dict(gate_ctx or {}),
             context_hash=str(gate_ctx_hash or ""),

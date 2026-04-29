@@ -45,8 +45,12 @@ def validate_order_contract(mode: str, envelope: dict[str, Any]) -> ContractResu
     # live additionally requires receipt-grade evidence when marked success.
     success = bool(envelope.get("success", False))
     if success:
-        receipt_req = ["submit_status", "fill_status", "broker_order_id"]
+        receipt_req = ["submit_status", "fill_status", "account_id", "raw_response_hash"]
         missing_receipt = _missing(envelope, receipt_req)
+        broker_order_id = str(envelope.get("broker_order_id") or "").strip()
+        broker_position_id = str(envelope.get("broker_position_id") or "").strip()
+        if not broker_order_id and not broker_position_id:
+            missing_receipt.append("broker_order_id|broker_position_id")
         if missing_receipt:
             return ContractResult(False, "missing_live_receipt_fields", missing_receipt)
     return ContractResult(True)

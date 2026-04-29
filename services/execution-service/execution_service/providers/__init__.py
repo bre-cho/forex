@@ -3,6 +3,7 @@
 from .base import BrokerProvider, OrderRequest, OrderResult, AccountInfo
 from .paper import PaperProvider
 from .ctrader import CTraderProvider
+from .ctrader_live import CTraderLiveProvider
 from .mt5 import MT5Provider
 from .bybit import BybitProvider
 
@@ -13,6 +14,7 @@ __all__ = [
     "AccountInfo",
     "PaperProvider",
     "CTraderProvider",
+    "CTraderLiveProvider",
     "MT5Provider",
     "BybitProvider",
 ]

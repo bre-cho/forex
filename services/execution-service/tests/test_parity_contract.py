@@ -48,6 +48,8 @@ def test_live_requires_receipt_on_success() -> None:
         "submit_status": "ACKED",
         "fill_status": "FILLED",
         "broker_order_id": "bo-1",
+        "account_id": "acc-1",
+        "raw_response_hash": "abc123",
     }
     assert validate_order_contract("live", env).ok is True
 
@@ -56,3 +58,8 @@ def test_live_requires_receipt_on_success() -> None:
     failed = validate_order_contract("live", bad)
     assert failed.ok is False
     assert failed.reason == "missing_live_receipt_fields"
+
+    with_position_only = dict(env)
+    with_position_only.pop("broker_order_id")
+    with_position_only["broker_position_id"] = "pos-1"
+    assert validate_order_contract("live", with_position_only).ok is True
