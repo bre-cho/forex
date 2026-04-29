@@ -20,6 +20,7 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
         "broker_health": False,
         "active_policy": False,
         "daily_state_fresh": False,
+        "no_daily_lock": False,
         "no_critical_incident": False,
     }
 
@@ -33,14 +34,33 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
     if not checks["active_policy"]:
         raise LiveStartPreflightError("active_policy_missing")
 
+    # Sync broker equity before checking daily state freshness
     daily = DailyTradingStateService(db)
-    state = await daily.get_or_create(bot.id)
+    try:
+        acct_info = await provider.get_account_info()
+        equity = float(getattr(acct_info, "equity", None) or 0.0)
+        if equity <= 0:
+            raise LiveStartPreflightError("account_equity_invalid")
+        state = await daily.recompute_from_broker_equity(bot.id, equity)
+        await db.commit()
+    except LiveStartPreflightError:
+        raise
+    except Exception:
+        # If broker equity sync fails, fall back to existing state but mark stale
+        state = await daily.get_or_create(bot.id)
+
     updated = state.updated_at
     now = datetime.now(timezone.utc)
     age = (now - updated).total_seconds() if updated is not None else 10**9
     checks["daily_state_fresh"] = age <= 60.0
     if not checks["daily_state_fresh"]:
         raise LiveStartPreflightError("daily_state_stale")
+
+    # Block if daily lock is active
+    if getattr(state, "locked", False):
+        lock_reason = str(getattr(state, "lock_reason", None) or "daily_locked")
+        raise LiveStartPreflightError(f"daily_lock_active:{lock_reason}")
+    checks["no_daily_lock"] = True
 
     open_critical = (
         (

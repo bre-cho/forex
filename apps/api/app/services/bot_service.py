@@ -17,6 +17,7 @@ from app.models import (
     BotInstanceConfig,
     BotRuntimeSnapshot,
     BrokerConnection,
+    DailyTradingState,
     Order,
     Signal,
     Trade,

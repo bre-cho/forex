@@ -1,8 +1,10 @@
-"""Proposed file: services/trading-core/trading_core/runtime/pre_execution_gate.py"""
+"""services/trading-core/trading_core/runtime/pre_execution_gate.py"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict
+
+from trading_core.risk.daily_profit_policy import resolve_daily_take_profit_target
 
 
 @dataclass(frozen=True)
@@ -22,33 +24,13 @@ class PreExecutionGate:
         self.policy = policy or {}
 
     def _daily_take_profit_target(self, context: Dict[str, Any]) -> float:
-        mode = str(self.policy.get("daily_take_profit_mode", "fixed_amount") or "fixed_amount").lower()
-        profit = float(context.get("daily_profit_amount", 0.0) or 0.0)
         starting_equity = float(context.get("starting_equity", 0.0) or 0.0)
-
-        if mode == "percent_equity":
-            pct = float(self.policy.get("daily_take_profit_pct", 0.0) or 0.0)
-            if pct <= 0 or starting_equity <= 0:
-                return float("inf")
-            return starting_equity * pct / 100.0
-
-        if mode == "capital_tier":
-            tiers = self.policy.get("daily_take_profit_tiers", []) or []
-            if not isinstance(tiers, list) or starting_equity <= 0:
-                return float("inf")
-            target = None
-            for tier in tiers:
-                if not isinstance(tier, dict):
-                    continue
-                min_equity = float(tier.get("min_equity", 0.0) or 0.0)
-                amount = float(tier.get("target_amount", 0.0) or 0.0)
-                if starting_equity >= min_equity and amount > 0:
-                    target = amount
-            return float(target) if target is not None else float("inf")
-
-        # fixed_amount default
-        _ = profit
-        return float(self.policy.get("daily_take_profit_amount", 10**18) or 10**18)
+        daily_profit_amount = float(context.get("daily_profit_amount", 0.0) or 0.0)
+        return resolve_daily_take_profit_target(
+            self.policy,
+            starting_equity=starting_equity,
+            daily_profit_amount=daily_profit_amount,
+        )
 
     def evaluate(self, context: Dict[str, Any]) -> GateResult:
         # kill_switch can come from context (runtime signal) or policy (static config)
@@ -56,6 +38,10 @@ class PreExecutionGate:
             return GateResult("BLOCK", "kill_switch_enabled", severity="critical", lock_scope="bot", operator_action="reset_required")
         if context.get("portfolio_kill_switch") is True:
             return GateResult("BLOCK", "portfolio_kill_switch_enabled", severity="critical", lock_scope="portfolio", operator_action="reset_required")
+        # explicit daily_locked from DailyTradingState
+        if context.get("daily_locked") is True:
+            lock_reason = str(context.get("daily_lock_reason") or "daily_locked")
+            return GateResult("BLOCK", lock_reason, severity="warning", lock_scope="bot", operator_action="reset_required")
         if context.get("runtime_mode") == "live" and not context.get("broker_connected"):
             return GateResult("BLOCK", "broker_not_connected", severity="critical", operator_action="broker_check")
         # stub/degraded provider only blocks in live mode
