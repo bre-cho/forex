@@ -1,6 +1,8 @@
 """Tests for P0-A: Live start preflight fail-closed."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -93,4 +95,44 @@ async def test_preflight_fails_if_equity_is_zero():
     with patch("app.services.live_start_preflight.LiveReadinessGuard.check_provider", AsyncMock(return_value=readiness_ok)), \
          patch("app.services.live_start_preflight.PolicyService", return_value=policy_mock):
         with pytest.raises(LiveStartPreflightError, match="account_equity_invalid"):
+            await run_live_start_preflight(bot=bot, provider=provider, db=db)
+
+
+@pytest.mark.asyncio
+async def test_preflight_blocks_when_unknown_orders_unresolved():
+    bot = MagicMock()
+    bot.id = "bot-3"
+
+    acct = MagicMock()
+    acct.equity = 1000.0
+    provider = MagicMock()
+    provider.get_account_info = AsyncMock(return_value=acct)
+
+    db = AsyncMock(spec=AsyncSession)
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))
+
+    readiness_ok = MagicMock()
+    readiness_ok.ok = True
+
+    policy_mock = MagicMock()
+    policy_mock.is_policy_approved_for_live = AsyncMock(return_value=True)
+    active_policy = MagicMock()
+    active_policy.policy_snapshot = _make_valid_policy_snapshot()
+    policy_mock.get_active_policy = AsyncMock(return_value=active_policy)
+
+    daily_state = MagicMock()
+    daily_state.updated_at = datetime.now(timezone.utc)
+    daily_state.locked = False
+    daily_state.lock_reason = None
+    daily_svc = MagicMock()
+    daily_svc.recompute_from_broker_equity = AsyncMock(return_value=daily_state)
+
+    queue_svc = MagicMock()
+    queue_svc.has_unresolved = AsyncMock(return_value=True)
+
+    with patch("app.services.live_start_preflight.LiveReadinessGuard.check_provider", AsyncMock(return_value=readiness_ok)), \
+         patch("app.services.live_start_preflight.PolicyService", return_value=policy_mock), \
+         patch("app.services.live_start_preflight.DailyTradingStateService", return_value=daily_svc), \
+            patch("app.services.live_start_preflight.ReconciliationQueueService", return_value=queue_svc):
+        with pytest.raises(LiveStartPreflightError, match="unknown_orders_unresolved"):
             await run_live_start_preflight(bot=bot, provider=provider, db=db)

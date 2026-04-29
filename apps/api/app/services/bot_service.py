@@ -18,13 +18,14 @@ from app.models import (
     BotRuntimeSnapshot,
     BrokerConnection,
     DailyTradingState,
-    Order,
     Signal,
     Trade,
 )
 from app.services.incident_notifier import notify_incident
 from app.services.daily_trading_state import DailyTradingStateService
 from app.services.daily_profit_lock_engine import DailyProfitLockEngine
+from app.services.order_ledger_service import OrderLedgerService
+from app.services.reconciliation_queue_service import ReconciliationQueueService
 from app.services.safety_ledger import SafetyLedgerService
 from app.services.live_readiness_guard import LiveReadinessGuard
 from app.services.policy_service import PolicyService
@@ -108,20 +109,7 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
         await _publish_bot_event_safe(bot_id, "signal_generated", payload)
 
     async def on_order(payload: dict) -> None:
-        async with AsyncSessionLocal() as db:
-            db.add(
-                Order(
-                    bot_instance_id=bot_id,
-                    broker_order_id=str(payload.get("broker_order_id", "")),
-                    symbol=str(payload.get("symbol", "EURUSD")),
-                    side=_safe_upper(payload.get("side", "BUY"), "BUY"),
-                    order_type=str(payload.get("order_type", "market")),
-                    volume=_safe_float(payload.get("volume"), 0.0),
-                    price=_safe_float(payload.get("price"), 0.0) or None,
-                    status=str(payload.get("status", "pending")),
-                )
-            )
-            await db.commit()
+        # orders table is a projection sourced from ledger; raw payloads are not persisted directly.
         await _publish_bot_event_safe(bot_id, "order_created", payload)
 
     async def on_trade(payload: dict) -> None:
@@ -206,7 +194,8 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                     idem = str(payload.get("idempotency_key") or payload.get("signal_id") or "")
                     sig = str(payload.get("signal_id") or "")
                     try:
-                        await ledger.create_or_get_order_attempt(
+                        order_ledger = OrderLedgerService(db)
+                        await order_ledger.persist_intent(
                             bot_instance_id=bot_id,
                             signal_id=sig,
                             brain_cycle_id=str(payload.get("brain_cycle_id") or "") or None,
@@ -216,7 +205,6 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                             side=str(payload.get("side") or ""),
                             volume=_safe_float(payload.get("volume"), 0.0),
                             request_payload=dict(payload.get("request_payload") or payload),
-                            status="PENDING_SUBMIT",
                         )
                     except Exception as exc:
                         if bot_mode == "live":
@@ -250,30 +238,22 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                     "order_unknown": "UNKNOWN",
                 }[event_type]
                 try:
+                    order_ledger = OrderLedgerService(db)
                     await ledger.record_broker_order_event(dict(payload), event_type)
-                    await ledger.record_execution_receipt(
+                    await order_ledger.persist_execution_receipt_and_projection(
                         bot_instance_id=bot_id,
                         idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
                         broker=str(payload.get("broker") or payload.get("provider") or "unknown"),
-                        broker_order_id=str(payload.get("broker_order_id") or "") or None,
-                        broker_position_id=str(payload.get("broker_position_id") or "") or None,
-                        broker_deal_id=str(payload.get("broker_deal_id") or "") or None,
-                        submit_status=str(payload.get("submit_status") or ("ACKED" if event_type == "order_filled" else "UNKNOWN")),
-                        fill_status=str(payload.get("fill_status") or mapped_status),
-                        requested_volume=_safe_float(payload.get("requested_volume"), _safe_float(payload.get("volume"), 0.0)),
-                        filled_volume=_safe_float(payload.get("filled_volume"), _safe_float(payload.get("volume"), 0.0)),
-                        avg_fill_price=_safe_float(payload.get("avg_fill_price"), _safe_float(payload.get("price"), 0.0)),
-                        commission=_safe_float(payload.get("commission"), 0.0),
-                        raw_response=dict(payload.get("raw_response") or {}),
+                        event_type=event_type,
+                        payload=dict(payload),
                     )
-                    await ledger.update_order_attempt(
-                        bot_instance_id=bot_id,
-                        idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
-                        status=mapped_status,
-                        current_state=mapped_status,
-                        broker_order_id=str(payload.get("broker_order_id") or "") or None,
-                        error_message=str(payload.get("error_message") or "") or None,
-                    )
+                    if event_type == "order_unknown":
+                        await order_ledger.enqueue_unknown_order(
+                            bot_instance_id=bot_id,
+                            idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
+                            signal_id=str(payload.get("signal_id") or ""),
+                            payload=dict(payload),
+                        )
                     to_state = {
                         "order_filled": "ACKED",
                         "order_rejected": "REJECTED",
@@ -311,6 +291,11 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                         raise RuntimeError(f"update_order_attempt_failed:{exc}") from exc
                     logger.warning("update_order_attempt failed [%s]: %s", bot_id, exc)
             elif event_type == "order_submitted":
+                order_ledger = OrderLedgerService(db)
+                await order_ledger.persist_submit_requested(
+                    bot_instance_id=bot_id,
+                    idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
+                )
                 await _record_transition_with_validation(
                     ledger,
                     signal_id=str(payload.get("signal_id") or ""),
@@ -361,17 +346,7 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                     detail=str(payload.get("reason") or "daily_take_profit_hit"),
                     payload=dict(payload),
                 )
-                # Apply runtime action (pause/close/reduce) if provider and registry available
-                lock_action = str(payload.get("lock_action") or "stop_new_orders")
-                _provider = hooks.get("get_provider") and await hooks["get_provider"]() if callable(hooks.get("get_provider")) else None
-                _registry = hooks.get("get_registry") and hooks["get_registry"]() if callable(hooks.get("get_registry")) else None
-                if _provider is not None or _registry is not None:
-                    from app.services.daily_lock_runtime_controller import DailyLockRuntimeController
-                    ctrl = DailyLockRuntimeController(
-                        provider=_provider,
-                        runtime_registry=_registry,
-                    )
-                    await ctrl.apply_lock_action(bot_id, lock_action)
+                # Runtime action is handled by runtime-side controller flow.
         await _publish_bot_event_safe(bot_id, event_type, payload)
 
     async def reserve_idempotency(
@@ -543,6 +518,46 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                 "portfolio_kill_switch": bool(portfolio_kill_switch),
             }
 
+    async def get_unknown_order_attempts() -> list[dict]:
+        async with AsyncSessionLocal() as db:
+            queue = ReconciliationQueueService(db)
+            pending = await queue.list_pending(bot_id, limit=50)
+            return [
+                {
+                    "idempotency_key": str(item.idempotency_key),
+                    "signal_id": str(item.signal_id or ""),
+                }
+                for item in pending
+            ]
+
+    async def on_unknown_order_resolved(payload: dict) -> None:
+        async with AsyncSessionLocal() as db:
+            queue = ReconciliationQueueService(db)
+            ledger = SafetyLedgerService(db)
+            idem = str(payload.get("idempotency_key") or "")
+            outcome = str(payload.get("outcome") or "").lower()
+            if not idem:
+                return
+            if outcome in {"filled", "rejected"}:
+                await queue.mark_resolved(bot_id, idem)
+                await ledger.update_order_attempt(
+                    bot_instance_id=bot_id,
+                    idempotency_key=idem,
+                    status=outcome.upper(),
+                    current_state=outcome.upper(),
+                    broker_order_id=str(payload.get("broker_order_id") or "") or None,
+                    error_message=str(payload.get("error") or "") or None,
+                )
+            elif outcome in {"failed_needs_operator", "error"}:
+                await queue.mark_retry(
+                    bot_id,
+                    idem,
+                    error=str(payload.get("error") or outcome),
+                    retry_after_seconds=30.0,
+                )
+                daily = DailyTradingStateService(db)
+                await daily.lock_day(bot_id, "unknown_order_unresolved")
+
     async def close_db_trade(trade_id: str) -> None:
         async with AsyncSessionLocal() as db:
             row = (
@@ -602,10 +617,12 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
         "evaluate_daily_profit_lock": evaluate_daily_profit_lock,
         "get_portfolio_risk_snapshot": get_portfolio_risk_snapshot,
         "get_db_open_trades": get_db_open_trades,
+        "get_unknown_order_attempts": get_unknown_order_attempts,
         "get_policy_approval_status": get_policy_approval_status,
         "close_db_trade": close_db_trade,
         "on_reconciliation_result": on_reconciliation_result,
         "on_reconciliation_incident": on_reconciliation_incident,
+        "on_unknown_order_resolved": on_unknown_order_resolved,
     }
 
 
@@ -693,10 +710,12 @@ async def create_runtime_for_bot(
             evaluate_daily_profit_lock=hooks["evaluate_daily_profit_lock"],
             get_portfolio_risk_snapshot=hooks["get_portfolio_risk_snapshot"],
             get_db_open_trades=hooks["get_db_open_trades"],
+            get_unknown_order_attempts=hooks["get_unknown_order_attempts"],
             get_policy_approval_status=hooks["get_policy_approval_status"],
             close_db_trade=hooks["close_db_trade"],
             on_reconciliation_result=hooks["on_reconciliation_result"],
             on_reconciliation_incident=hooks["on_reconciliation_incident"],
+            on_unknown_order_resolved=hooks["on_unknown_order_resolved"],
         )
         logger.info("Runtime created for bot: %s (mode=%s)", bot.id, bot.mode)
 

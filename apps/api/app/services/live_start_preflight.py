@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BotInstance, TradingIncident
+from app.services.reconciliation_queue_service import ReconciliationQueueService
 from app.services.daily_trading_state import DailyTradingStateService
 from app.services.live_readiness_guard import LiveReadinessGuard
 from app.services.policy_service import PolicyService
@@ -39,6 +40,7 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
         "active_policy": False,
         "daily_state_fresh": False,
         "no_daily_lock": False,
+        "no_unknown_orders": False,
         "no_critical_incident": False,
     }
 
@@ -83,6 +85,11 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
         lock_reason = str(getattr(state, "lock_reason", None) or "daily_locked")
         raise LiveStartPreflightError(f"daily_lock_active:{lock_reason}")
     checks["no_daily_lock"] = True
+
+    recon_queue = ReconciliationQueueService(db)
+    if await recon_queue.has_unresolved(bot.id):
+        raise LiveStartPreflightError("unknown_orders_unresolved")
+    checks["no_unknown_orders"] = True
 
     open_critical = (
         (
