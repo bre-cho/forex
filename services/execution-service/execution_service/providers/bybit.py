@@ -280,3 +280,102 @@ class BybitProvider(BrokerProvider):
         except Exception as exc:
             return {"status": "degraded", "reason": self._normalize_error(exc, "health_check_failed")}
 
+    @property
+    def supports_client_order_id(self) -> bool:
+        return True
+
+    async def get_instrument_spec(self, symbol: str) -> Optional[Dict[str, Any]]:
+        self._require_sdk()
+        resp = self._session.get_instruments_info(category="linear", symbol=symbol)
+        if resp.get("retCode") == 0 and resp.get("result", {}).get("list"):
+            info = resp["result"]["list"][0]
+            lot = info.get("lotSizeFilter", {})
+            price_filter = info.get("priceFilter", {})
+            return {
+                "symbol": symbol,
+                "min_lot": float(lot.get("minOrderQty", 0.001) or 0.001),
+                "max_lot": float(lot.get("maxOrderQty", 1000.0) or 1000.0),
+                "lot_step": float(lot.get("qtyStep", 0.001) or 0.001),
+                "tick_size": float(price_filter.get("tickSize", 0.01) or 0.01),
+                "contract_size": 1.0,
+                "margin_rate": float(info.get("leverage", {}).get("leverageBuy", "10") or "10") and 1.0 / float(info.get("leverage", {}).get("leverageBuy", "10") or "10"),
+                "pip_size": float(price_filter.get("tickSize", 0.01) or 0.01),
+                "pip_value_per_lot": 1.0,
+                "raw": info,
+            }
+        return None
+
+    async def estimate_margin(self, symbol: str, side: str, volume: float, price: float) -> float:
+        spec = await self.get_instrument_spec(symbol)
+        if spec:
+            margin_rate = float(spec.get("margin_rate", 0.1) or 0.1)
+            contract_size = float(spec.get("contract_size", 1.0) or 1.0)
+            return volume * contract_size * price * margin_rate
+        return volume * price * 0.1
+
+    async def get_order_by_client_id(self, client_order_id: str) -> Optional[Dict[str, Any]]:
+        self._require_sdk()
+        try:
+            resp = self._session.get_open_orders(category="linear", orderLinkId=client_order_id, limit=1)
+            if resp.get("retCode") == 0 and resp.get("result", {}).get("list"):
+                return dict(resp["result"]["list"][0])
+            resp = self._session.get_order_history(category="linear", orderLinkId=client_order_id, limit=1)
+            if resp.get("retCode") == 0 and resp.get("result", {}).get("list"):
+                return dict(resp["result"]["list"][0])
+        except Exception:
+            pass
+        return None
+
+    async def get_executions_by_client_id(self, client_order_id: str) -> List[Dict[str, Any]]:
+        self._require_sdk()
+        order = await self.get_order_by_client_id(client_order_id)
+        if order:
+            order_id = order.get("orderId")
+            if order_id:
+                try:
+                    resp = self._session.get_executions(category="linear", orderId=order_id, limit=50)
+                    if resp.get("retCode") == 0 and resp.get("result", {}).get("list"):
+                        return [dict(r) for r in resp["result"]["list"]]
+                except Exception:
+                    pass
+        return []
+
+    async def close_all_positions(self, symbol=None) -> List[Any]:
+        positions = await self.get_open_positions()
+        results = []
+        for pos in positions or []:
+            if symbol and str(pos.get("symbol") or "").upper() != str(symbol).upper():
+                continue
+            result = await self.close_position(str(pos.get("id", "")))
+            results.append(result)
+        return results
+
+    async def get_server_time(self) -> Optional[float]:
+        self._require_sdk()
+        try:
+            resp = self._session.get_server_time()
+            if resp.get("retCode") == 0:
+                ts = resp.get("result", {}).get("timeSecond") or resp.get("result", {}).get("timeNano")
+                if ts:
+                    return float(ts) if float(ts) < 1e12 else float(ts) / 1e9
+        except Exception:
+            pass
+        import time
+        return float(time.time())
+
+    async def get_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
+        self._require_sdk()
+        try:
+            resp = self._session.get_tickers(category="linear", symbol=symbol)
+            if resp.get("retCode") == 0 and resp.get("result", {}).get("list"):
+                t = resp["result"]["list"][0]
+                bid = float(t.get("bid1Price") or t.get("lastPrice") or 0)
+                ask = float(t.get("ask1Price") or t.get("lastPrice") or 0)
+                spec = self._instrument_info.get("priceFilter", {})
+                tick = float(spec.get("tickSize", 0.01) or 0.01)
+                spread_pips = (ask - bid) / tick if tick > 0 else 0.0
+                return {"symbol": symbol, "bid": bid, "ask": ask, "spread_pips": spread_pips}
+        except Exception:
+            pass
+        return None
+

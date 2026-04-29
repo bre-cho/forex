@@ -93,6 +93,8 @@ class PreExecutionContext:
     portfolio_open_positions: int = 0
     portfolio_kill_switch: bool = False
     policy_snapshot: Dict[str, Any] = field(default_factory=dict)
+    gate_context: Dict[str, Any] = field(default_factory=dict)
+    context_hash: str = ""
 
 
 @dataclass
@@ -189,4 +191,14 @@ class BrokerProvider(ABC):
     async def get_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Return current bid/ask quote for symbol. None if unsupported."""
         return None
+
+    @property
+    def supports_client_order_id(self) -> bool:
+        """Return True if the provider can accept and look up orders by client order id.
+
+        Execution service treats this as False-by-default; providers that implement
+        get_order_by_client_id must override this property to return True.
+        Live mode must fail if this returns False (no idempotency audit trail).
+        """
+        return False
 

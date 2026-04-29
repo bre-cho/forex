@@ -121,10 +121,40 @@ class ReconciliationQueueService:
         await self.db.commit()
         return True
 
+    async def mark_failed_needs_operator(
+        self,
+        bot_instance_id: str,
+        idempotency_key: str,
+        *,
+        error: str,
+    ) -> bool:
+        row = (
+            (
+                await self.db.execute(
+                    select(ReconciliationQueueItem)
+                    .where(
+                        ReconciliationQueueItem.bot_instance_id == bot_instance_id,
+                        ReconciliationQueueItem.idempotency_key == idempotency_key,
+                    )
+                    .limit(1)
+                )
+            )
+            .scalar_one_or_none()
+        )
+        if row is None:
+            return False
+        row.status = "failed_needs_operator"
+        row.attempts = int(row.attempts or 0) + 1
+        row.last_error = str(error or "failed_needs_operator")
+        row.next_retry_at = None
+        row.updated_at = datetime.now(timezone.utc)
+        await self.db.commit()
+        return True
+
     async def has_unresolved(self, bot_instance_id: str) -> bool:
         stmt = select(ReconciliationQueueItem).where(
             ReconciliationQueueItem.bot_instance_id == bot_instance_id,
-            ReconciliationQueueItem.status.in_(["pending", "retry", "in_progress"]),
+            ReconciliationQueueItem.status.in_(["pending", "retry", "in_progress", "failed_needs_operator"]),
         )
         row = (await self.db.execute(stmt.limit(1))).scalar_one_or_none()
         return row is not None

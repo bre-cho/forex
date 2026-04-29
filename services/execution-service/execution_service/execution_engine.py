@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Union
 from .account_sync import AccountSync
 from .order_router import OrderRouter
 from .providers.base import BrokerProvider, ExecutionCommand, OrderRequest, OrderResult, PreExecutionContext
-from trading_core.runtime.pre_execution_gate import PreExecutionGate
+from trading_core.runtime.pre_execution_gate import PreExecutionGate, hash_gate_context
 
 logger = logging.getLogger(__name__)
 
@@ -142,30 +142,66 @@ class ExecutionEngine:
                         success=False,
                         error_message="execution_gate_blocked:missing_idempotency_reservation",
                     )
-                gate_ctx = {
-                    "provider_mode": ctx.provider_mode,
-                    "runtime_mode": ctx.runtime_mode,
-                    "broker_connected": ctx.broker_connected,
-                    "market_data_ok": ctx.market_data_ok,
-                    "data_age_seconds": ctx.data_age_seconds,
-                    "daily_profit_amount": ctx.daily_profit_amount,
-                    "daily_loss_pct": ctx.daily_loss_pct,
-                    "consecutive_losses": ctx.consecutive_losses,
-                    "spread_pips": ctx.spread_pips,
-                    "confidence": ctx.confidence,
-                    "rr": ctx.rr,
-                    "open_positions": ctx.open_positions,
-                    "idempotency_exists": False,
-                    "kill_switch": bool(ctx.kill_switch or ctx.daily_locked),
-                    "margin_usage_pct": float(getattr(ctx, "margin_usage_pct", 0.0) or 0.0),
-                    "free_margin_after_order": float(getattr(ctx, "free_margin_after_order", 0.0) or 0.0),
-                    "account_exposure_pct": float(getattr(ctx, "account_exposure_pct", 0.0) or 0.0),
-                    "symbol_exposure_pct": float(getattr(ctx, "symbol_exposure_pct", 0.0) or 0.0),
-                    "correlated_usd_exposure_pct": float(getattr(ctx, "correlated_usd_exposure_pct", 0.0) or 0.0),
-                    "portfolio_daily_loss_pct": float(getattr(ctx, "portfolio_daily_loss_pct", 0.0) or 0.0),
-                    "portfolio_open_positions": int(getattr(ctx, "portfolio_open_positions", 0) or 0),
-                    "portfolio_kill_switch": bool(getattr(ctx, "portfolio_kill_switch", False)),
-                }
+                if not getattr(ctx, "context_hash", ""):
+                    return OrderResult(
+                        order_id="",
+                        symbol=request.symbol,
+                        side=request.side,
+                        volume=request.volume,
+                        fill_price=float(request.price or 0.0),
+                        commission=0.0,
+                        success=False,
+                        error_message="execution_gate_blocked:missing_gate_context_hash",
+                    )
+                gate_ctx = dict(getattr(ctx, "gate_context", {}) or {})
+                if not gate_ctx:
+                    return OrderResult(
+                        order_id="",
+                        symbol=request.symbol,
+                        side=request.side,
+                        volume=request.volume,
+                        fill_price=float(request.price or 0.0),
+                        commission=0.0,
+                        success=False,
+                        error_message="execution_gate_blocked:missing_frozen_gate_context",
+                    )
+                try:
+                    computed_hash = hash_gate_context(gate_ctx)
+                except Exception as exc:
+                    return OrderResult(
+                        order_id="",
+                        symbol=request.symbol,
+                        side=request.side,
+                        volume=request.volume,
+                        fill_price=float(request.price or 0.0),
+                        commission=0.0,
+                        success=False,
+                        error_message=f"execution_gate_blocked:gate_context_hash_failed:{exc}",
+                    )
+                if computed_hash != str(ctx.context_hash):
+                    return OrderResult(
+                        order_id="",
+                        symbol=request.symbol,
+                        side=request.side,
+                        volume=request.volume,
+                        fill_price=float(request.price or 0.0),
+                        commission=0.0,
+                        success=False,
+                        error_message="execution_gate_blocked:gate_context_hash_mismatch",
+                    )
+                # Revalidate critical request bindings against frozen gate context
+                frozen_volume = float(gate_ctx.get("requested_volume", 0.0) or 0.0)
+                if frozen_volume > 0 and abs(frozen_volume - float(request.volume or 0.0)) > 1e-9:
+                    return OrderResult(
+                        order_id="",
+                        symbol=request.symbol,
+                        side=request.side,
+                        volume=request.volume,
+                        fill_price=float(request.price or 0.0),
+                        commission=0.0,
+                        success=False,
+                        error_message="execution_gate_blocked:request_volume_context_mismatch",
+                    )
             else:
                 gate_ctx = {
                     "provider_mode": str(getattr(self._provider, "mode", "stub")),

@@ -24,6 +24,7 @@ from app.models import (
 from app.services.incident_notifier import notify_incident
 from app.services.daily_trading_state import DailyTradingStateService
 from app.services.daily_profit_lock_engine import DailyProfitLockEngine
+from app.services.daily_lock_runtime_controller import DailyLockRuntimeController
 from app.services.order_ledger_service import OrderLedgerService
 from app.services.reconciliation_queue_service import ReconciliationQueueService
 from app.services.safety_ledger import SafetyLedgerService
@@ -338,15 +339,29 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                     currency=str(payload.get("currency") or "") or None,
                     raw_response=dict(payload.get("raw_response") or payload),
                 )
-            elif event_type == "daily_tp_hit":
+            elif event_type in ("daily_tp_hit", "daily_loss_hit"):
                 await notify_incident(
-                    incident_type="daily_tp_hit",
+                    incident_type=event_type,
                     severity="warning",
-                    title="Daily take-profit lock activated",
-                    detail=str(payload.get("reason") or "daily_take_profit_hit"),
+                    title=f"{'Daily take-profit' if event_type == 'daily_tp_hit' else 'Daily loss'} lock activated",
+                    detail=str(payload.get("reason") or event_type),
                     payload=dict(payload),
                 )
-                # Runtime action is handled by runtime-side controller flow.
+                # Wire daily lock controller to apply runtime action
+                lock_action = str(payload.get("lock_action") or "stop_new_orders")
+                try:
+                    from app.registry import get_registry
+                    registry = get_registry()
+                    runtime = registry.get(bot_id) if registry else None
+                    provider = getattr(runtime, "broker_provider", None) if runtime else None
+                    if registry and provider:
+                        controller = DailyLockRuntimeController(
+                            provider=provider,
+                            runtime_registry=registry,
+                        )
+                        await controller.apply_lock_action(bot_id, lock_action)
+                except Exception as exc:
+                    logger.error("DailyLockRuntimeController failed for bot %s: %s", bot_id, exc)
         await _publish_bot_event_safe(bot_id, event_type, payload)
 
     async def reserve_idempotency(
@@ -549,11 +564,17 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                     error_message=str(payload.get("error") or "") or None,
                 )
             elif outcome in {"failed_needs_operator", "error"}:
-                await queue.mark_retry(
+                await queue.mark_failed_needs_operator(
                     bot_id,
                     idem,
                     error=str(payload.get("error") or outcome),
-                    retry_after_seconds=30.0,
+                )
+                await ledger.create_incident(
+                    bot_instance_id=bot_id,
+                    incident_type="unknown_order_failed_needs_operator",
+                    severity="critical",
+                    title="Unknown order requires operator reconciliation",
+                    detail=str(payload.get("error") or "max_retries_exceeded"),
                 )
                 daily = DailyTradingStateService(db)
                 await daily.lock_day(bot_id, "unknown_order_unresolved")

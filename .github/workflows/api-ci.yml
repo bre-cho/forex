@@ -119,6 +119,10 @@ jobs:
         run: |
           bash .github/scripts/verify_live_no_stub.sh
 
+      - name: Verify live mode has no fallback spec/pip
+        run: |
+          bash .github/scripts/verify_live_no_fallback_spec.sh
+
       - name: Verify broker gate wiring
         run: |
           .github/scripts/verify_broker_gate_wiring.py

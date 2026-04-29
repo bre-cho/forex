@@ -260,3 +260,110 @@ class MT5Provider(BrokerProvider):
             for d in list(deals)[-limit:]
         ]
 
+    @property
+    def supports_client_order_id(self) -> bool:
+        return True
+
+    async def get_instrument_spec(self, symbol: str) -> Optional[Dict[str, Any]]:
+        self._require_sdk()
+        self._ensure_symbol(symbol)
+        info = _mt5_sdk.symbol_info(symbol)
+        if info is None:
+            if self.live:
+                raise RuntimeError(f"MT5 get_instrument_spec failed for {symbol}: {_mt5_sdk.last_error()}")
+            return None
+        return {
+            "symbol": symbol,
+            "min_lot": float(getattr(info, "volume_min", 0.01) or 0.01),
+            "max_lot": float(getattr(info, "volume_max", 100.0) or 100.0),
+            "lot_step": float(getattr(info, "volume_step", 0.01) or 0.01),
+            "contract_size": float(getattr(info, "trade_contract_size", 100000.0) or 100000.0),
+            "pip_size": float(getattr(info, "point", 0.0001) or 0.0001),
+            "pip_value_per_lot": float(getattr(info, "trade_tick_value", 10.0) or 10.0),
+            "margin_rate": float(getattr(info, "margin_initial", 0.01) or 0.01),
+            "currency_base": str(getattr(info, "currency_base", "")),
+            "currency_profit": str(getattr(info, "currency_profit", "")),
+        }
+
+    async def estimate_margin(self, symbol: str, side: str, volume: float, price: float) -> float:
+        self._require_sdk()
+        mt5_type = _mt5_sdk.ORDER_TYPE_BUY if side.lower() == "buy" else _mt5_sdk.ORDER_TYPE_SELL
+        if hasattr(_mt5_sdk, "order_calc_margin"):
+            try:
+                result = _mt5_sdk.order_calc_margin(mt5_type, symbol, volume, price)
+                if result is not None:
+                    return float(result)
+            except Exception:
+                pass
+        # Fallback: use contract_size * volume * price * margin_initial
+        spec = await self.get_instrument_spec(symbol)
+        if spec:
+            return volume * float(spec.get("contract_size", 100000.0)) * price * float(spec.get("margin_rate", 0.01))
+        return volume * price * 0.01
+
+    async def get_order_by_client_id(self, client_order_id: str) -> Optional[Dict[str, Any]]:
+        self._require_sdk()
+        # MT5 uses "comment" field as client order marker
+        from datetime import datetime, timedelta
+        from_date = datetime.now() - timedelta(days=7)
+        orders = _mt5_sdk.history_orders_get(from_date, datetime.now()) or []
+        for o in orders:
+            if str(getattr(o, "comment", "") or "") == str(client_order_id):
+                return {
+                    "id": str(o.ticket),
+                    "symbol": o.symbol,
+                    "comment": str(getattr(o, "comment", ""))
+                }
+        return None
+
+    async def get_executions_by_client_id(self, client_order_id: str) -> List[Dict[str, Any]]:
+        self._require_sdk()
+        from datetime import datetime, timedelta
+        from_date = datetime.now() - timedelta(days=7)
+        deals = _mt5_sdk.history_deals_get(from_date, datetime.now()) or []
+        return [
+            {
+                "id": str(d.ticket),
+                "order": str(d.order),
+                "symbol": d.symbol,
+                "side": "BUY" if d.type == 0 else "SELL",
+                "volume": d.volume,
+                "price": d.price,
+            }
+            for d in deals
+            if str(getattr(d, "comment", "") or "") == str(client_order_id)
+        ]
+
+    async def close_all_positions(self, symbol=None) -> list:
+        positions = await self.get_open_positions()
+        results = []
+        for pos in positions or []:
+            if symbol and str(pos.get("symbol") or "").upper() != str(symbol).upper():
+                continue
+            result = await self.close_position(str(pos["id"]))
+            results.append(result)
+        return results
+
+    async def get_server_time(self) -> Optional[float]:
+        if not _MT5_AVAILABLE:
+            import time
+            return float(time.time())
+        tick = _mt5_sdk.symbol_info_tick(self.symbol)
+        if tick is not None:
+            return float(getattr(tick, "time", 0) or 0)
+        import time
+        return float(time.time())
+
+    async def get_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
+        if not _MT5_AVAILABLE:
+            return None
+        tick = _mt5_sdk.symbol_info_tick(symbol)
+        if tick is None:
+            return None
+        info = _mt5_sdk.symbol_info(symbol)
+        pip_size = float(getattr(info, "point", 0.0001) or 0.0001) if info else 0.0001
+        bid = float(getattr(tick, "bid", 0) or 0)
+        ask = float(getattr(tick, "ask", 0) or 0)
+        spread_pips = (ask - bid) / pip_size if pip_size > 0 else 0.0
+        return {"symbol": symbol, "bid": bid, "ask": ask, "spread_pips": spread_pips}
+

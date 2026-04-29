@@ -158,14 +158,21 @@ class CTraderEngineExecutionAdapter(CTraderExecutionAdapter):
         comment: str = "",
     ) -> Dict[str, Any]:
         fn = getattr(self._provider, "place_market_order")
-        payload = await self._maybe_await(
-            fn,
-            symbol=symbol,
-            side=side,
-            volume=volume,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-        )
+        sig = inspect.signature(fn)
+        kwargs: Dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "volume": volume,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+        }
+        # Pass comment/client_order_id only if the underlying provider supports it.
+        # This is critical for idempotency in live mode.
+        if "comment" in sig.parameters:
+            kwargs["comment"] = comment
+        if "client_order_id" in sig.parameters:
+            kwargs["client_order_id"] = comment
+        payload = await self._maybe_await(fn, **kwargs)
         return dict(payload)
 
     async def close_position(self, *, position_id: int) -> Dict[str, Any]:

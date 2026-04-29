@@ -241,3 +241,147 @@ class CTraderProvider(BrokerProvider):
         if not self._execution_adapter.available:
             return "stub"
         return "live" if self.live else "demo"
+
+    @property
+    def supports_client_order_id(self) -> bool:
+        return True
+
+    # ------------------------------------------------------------------
+    # Live-required broker contract methods
+    # ------------------------------------------------------------------
+
+    async def get_instrument_spec(self, symbol: str):
+        """Return instrument spec dict from the underlying cTrader provider."""
+        if self._execution_adapter.available:
+            fn = getattr(self._provider, "get_instrument_spec", None)
+            if callable(fn):
+                try:
+                    payload = fn(symbol)
+                    import inspect
+                    if inspect.isawaitable(payload):
+                        payload = await payload
+                    return dict(payload) if payload else None
+                except Exception as exc:
+                    raise RuntimeError(f"ctrader_get_instrument_spec_failed:{exc}") from exc
+        if self.live:
+            raise NotImplementedError("CTraderProvider live mode requires get_instrument_spec on underlying engine")
+        return None
+
+    async def estimate_margin(self, symbol: str, side: str, volume: float, price: float) -> float:
+        """Estimate margin using broker-native calculation if available."""
+        if self._execution_adapter.available:
+            fn = getattr(self._provider, "estimate_margin", None)
+            if callable(fn):
+                try:
+                    import inspect
+                    result = fn(symbol=symbol, side=side, volume=volume, price=price)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    return float(result or 0.0)
+                except Exception as exc:
+                    raise RuntimeError(f"ctrader_estimate_margin_failed:{exc}") from exc
+        if self.live:
+            raise NotImplementedError("CTraderProvider live mode requires estimate_margin on underlying engine")
+        return 0.0
+
+    async def get_order_by_client_id(self, client_order_id: str):
+        """Look up a pending/historical order by clientMsgId/comment."""
+        if self._execution_adapter.available:
+            fn = getattr(self._provider, "get_order_by_client_id", None)
+            if callable(fn):
+                try:
+                    import inspect
+                    result = fn(client_order_id)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    return dict(result) if result else None
+                except Exception:
+                    pass
+            # Fallback: search history
+            try:
+                history = await self._execution_adapter.get_history(limit=500)
+                for trade in history or []:
+                    comment = str(trade.get("comment") or trade.get("clientMsgId") or "")
+                    if comment == str(client_order_id):
+                        return dict(trade)
+            except Exception:
+                pass
+        return None
+
+    async def get_executions_by_client_id(self, client_order_id: str):
+        """Return deals/executions matching a client order id."""
+        if self._execution_adapter.available:
+            fn = getattr(self._provider, "get_executions_by_client_id", None)
+            if callable(fn):
+                try:
+                    import inspect
+                    result = fn(client_order_id)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    return [dict(r) for r in (result or [])]
+                except Exception:
+                    pass
+            try:
+                history = await self._execution_adapter.get_history(limit=500)
+                return [
+                    dict(t) for t in (history or [])
+                    if str(t.get("comment") or t.get("clientMsgId") or "") == str(client_order_id)
+                ]
+            except Exception:
+                pass
+        return []
+
+    async def close_all_positions(self, symbol=None):
+        """Close all open positions, optionally filtered by symbol."""
+        positions = await self.get_open_positions()
+        results = []
+        for pos in positions or []:
+            if symbol and str(pos.get("symbol") or "").upper() != str(symbol).upper():
+                continue
+            pos_id = str(pos.get("id") or pos.get("position_id") or "")
+            if not pos_id:
+                continue
+            result = await self.close_position(pos_id)
+            results.append(result)
+        return results
+
+    async def get_server_time(self):
+        """Return broker server UTC timestamp (epoch seconds)."""
+        if self._execution_adapter.available:
+            fn = getattr(self._provider, "get_server_time", None)
+            if callable(fn):
+                try:
+                    import inspect
+                    result = fn()
+                    if inspect.isawaitable(result):
+                        result = await result
+                    return float(result) if result is not None else None
+                except Exception:
+                    pass
+        import time
+        return float(time.time())
+
+    async def get_quote(self, symbol: str):
+        """Return current bid/ask quote for symbol."""
+        if self._market_data_adapter is not None:
+            fn = getattr(self._market_data_adapter, "get_quote", None)
+            if callable(fn):
+                try:
+                    result = fn(symbol)
+                    import inspect
+                    if inspect.isawaitable(result):
+                        result = await result
+                    return dict(result) if result else None
+                except Exception:
+                    pass
+            # Fallback: derive from candles
+            try:
+                candles = self._market_data_adapter.get_candles(limit=1)
+                if candles is not None and not candles.empty:
+                    last = candles.iloc[-1]
+                    close = float(last.get("close") if hasattr(last, "get") else last["close"])
+                    return {"symbol": symbol, "bid": close, "ask": close, "spread_pips": 0.0}
+            except Exception:
+                pass
+        return None
+

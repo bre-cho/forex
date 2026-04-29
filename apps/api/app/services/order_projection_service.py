@@ -50,6 +50,9 @@ class OrderProjectionService:
         existing = await self._find_by_idempotency(bot_instance_id, idempotency_key)
         if existing is not None:
             existing.status = _map_attempt_state_to_order_status(attempt.current_state)
+            existing.current_state = str(attempt.current_state or "") or None
+            existing.last_transition_at = _now_utc()
+            existing.reconciliation_status = "reconciling" if str(attempt.current_state or "").upper() in {"UNKNOWN", "RECONCILING"} else "ok"
             existing.updated_at = _now_utc()
             await self.db.commit()
             await self.db.refresh(existing)
@@ -66,6 +69,9 @@ class OrderProjectionService:
             volume=float(attempt.volume or 0.0),
             price=float((attempt.request_payload or {}).get("price")) if (attempt.request_payload or {}).get("price") else None,
             status=_map_attempt_state_to_order_status(attempt.current_state),
+            current_state=str(attempt.current_state or "") or None,
+            reconciliation_status="reconciling" if str(attempt.current_state or "").upper() in {"UNKNOWN", "RECONCILING"} else "ok",
+            last_transition_at=_now_utc(),
             created_at=_now_utc(),
             updated_at=_now_utc(),
         )
@@ -103,6 +109,14 @@ class OrderProjectionService:
 
         if receipt.broker_order_id:
             existing.broker_order_id = str(receipt.broker_order_id)
+        existing.submit_status = str(receipt.submit_status or "") or None
+        existing.fill_status = str(receipt.fill_status or "") or None
+        existing.broker_position_id = str(receipt.broker_position_id or "") or None
+        existing.broker_deal_id = str(receipt.broker_deal_id or "") or None
+        existing.avg_fill_price = float(receipt.avg_fill_price) if receipt.avg_fill_price is not None else existing.avg_fill_price
+        existing.filled_volume = float(receipt.filled_volume or 0.0)
+        existing.reconciliation_status = "reconciling" if str(receipt.fill_status or "").upper() == "UNKNOWN" else "ok"
+        existing.last_transition_at = _now_utc()
         existing.updated_at = _now_utc()
         await self.db.commit()
         await self.db.refresh(existing)
@@ -119,6 +133,9 @@ class OrderProjectionService:
         if existing is None:
             return
         existing.status = _map_attempt_state_to_order_status(new_state)
+        existing.current_state = str(new_state or "") or None
+        existing.reconciliation_status = "reconciling" if str(new_state or "").upper() in {"UNKNOWN", "RECONCILING"} else "ok"
+        existing.last_transition_at = _now_utc()
         existing.updated_at = _now_utc()
         await self.db.commit()
 

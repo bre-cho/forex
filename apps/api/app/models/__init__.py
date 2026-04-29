@@ -250,6 +250,15 @@ class Order(Base):
     volume: Mapped[float] = mapped_column(Float, nullable=False)
     price: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
+    current_state: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    submit_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    fill_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    broker_position_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    broker_deal_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    avg_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    filled_volume: Mapped[float] = mapped_column(Float, default=0.0)
+    reconciliation_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_transition_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, onupdate=now_utc
@@ -449,6 +458,15 @@ class DailyLockEvent(Base):
 
 class OrderStateTransition(Base):
     __tablename__ = "order_state_transitions"
+    __table_args__ = (
+        UniqueConstraint(
+            "bot_instance_id",
+            "idempotency_key",
+            "event_type",
+            "to_state",
+            name="uq_order_transition_event_key",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)

@@ -145,6 +145,18 @@ class RuntimeRegistry:
         async with op_lock:
             await runtime.resume()
 
+    async def pause_new_orders(self, bot_instance_id: str) -> None:
+        """Pause new order submission for a bot (daily lock action)."""
+        runtime = self.get_or_raise(bot_instance_id)
+        runtime.state.metadata["new_orders_paused"] = True
+        logger.info("pause_new_orders: bot=%s", bot_instance_id)
+
+    async def set_risk_mode(self, bot_instance_id: str, mode: str) -> None:
+        """Set risk mode for a bot (e.g. 'reduce_only', 'normal')."""
+        runtime = self.get_or_raise(bot_instance_id)
+        runtime.state.metadata["risk_mode"] = mode
+        logger.info("set_risk_mode: bot=%s mode=%s", bot_instance_id, mode)
+
     async def remove(self, bot_instance_id: str) -> None:
         async with self._lock:
             runtime = self._runtimes.pop(bot_instance_id, None)

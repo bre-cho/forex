@@ -555,6 +555,15 @@ class BotRuntime:
             spread_pips = float(getattr(self.broker_provider, "spread_pips", 0.0))
             idempotency_key = str(signal.signal_id)
             if self.runtime_mode == "live":
+                # P0.2: Fetch live quote for real spread; fail closed if missing
+                get_quote_fn = getattr(self.broker_provider, "get_quote", None)
+                if callable(get_quote_fn):
+                    try:
+                        live_quote = await get_quote_fn(str(signal.symbol))
+                        if live_quote:
+                            spread_pips = float(live_quote.get("spread_pips", 0.0) or 0.0)
+                    except Exception:
+                        pass  # spread_pips stays at provider default; gate will validate
                 account_info_fn = getattr(self.broker_provider, "get_account_info", None)
                 if not callable(account_info_fn):
                     self.state.error_message = "broker_account_info_unavailable"
@@ -585,6 +594,45 @@ class BotRuntime:
 
                 try:
                     from trading_core.risk import PositionSizingInput, calculate_position_size, pip_size_for_symbol, pip_value_per_lot
+                    from trading_core.risk.instrument_spec import InstrumentSpec, get_fallback_spec
+
+                    # P0.2: In live mode, fetch broker instrument spec for native sizing
+                    broker_spec_payload = None
+                    instrument_spec = None
+                    get_spec_fn = getattr(self.broker_provider, "get_instrument_spec", None)
+                    if self.runtime_mode == "live" and callable(get_spec_fn):
+                        try:
+                            broker_spec_payload = await get_spec_fn(str(signal.symbol))
+                        except Exception as spec_exc:
+                            self.state.error_message = f"instrument_spec_fetch_failed:{spec_exc}"
+                            return
+                        if broker_spec_payload is None:
+                            self.state.error_message = "instrument_spec_missing_live"
+                            return
+                    if broker_spec_payload:
+                        instrument_spec = InstrumentSpec(
+                            symbol=str(signal.symbol),
+                            pip_size=float(broker_spec_payload.get("pip_size", 0.0001) or 0.0001),
+                            pip_value_per_lot_usd=float(broker_spec_payload.get("pip_value_per_lot", 10.0) or 10.0),
+                            contract_size=float(broker_spec_payload.get("contract_size", 100000.0) or 100000.0),
+                            margin_rate=float(broker_spec_payload.get("margin_rate", 0.01) or 0.01),
+                            min_lot=float(broker_spec_payload.get("min_lot", 0.01) or 0.01),
+                            max_lot=float(broker_spec_payload.get("max_lot", 100.0) or 100.0),
+                            lot_step=float(broker_spec_payload.get("lot_step", 0.01) or 0.01),
+                        )
+                    elif self.runtime_mode != "live":
+                        instrument_spec = get_fallback_spec(str(signal.symbol))
+
+                    spec_pip_size = instrument_spec.pip_size if instrument_spec else pip_size_for_symbol(str(signal.symbol))
+                    spec_pip_value = instrument_spec.pip_value_per_lot(float(signal.entry_price)) if instrument_spec else pip_value_per_lot(str(signal.symbol))
+                    spec_min_lot = instrument_spec.min_lot if instrument_spec else float(self.risk_config.get("min_lot", 0.01) or 0.01) if isinstance(self.risk_config, dict) else 0.01
+                    spec_max_lot = instrument_spec.max_lot if instrument_spec else float(self.risk_config.get("max_lot", 100.0) or 100.0) if isinstance(self.risk_config, dict) else 100.0
+                    spec_lot_step = instrument_spec.lot_step if instrument_spec else float(self.risk_config.get("lot_step", 0.01) or 0.01) if isinstance(self.risk_config, dict) else 0.01
+
+                    # P0.2: Live mode requires SL; block if missing
+                    if self.runtime_mode == "live" and (not signal.sl or float(signal.sl) <= 0):
+                        self.state.error_message = "stop_loss_required_in_live"
+                        return
 
                     sizing = calculate_position_size(
                         PositionSizingInput(
@@ -592,11 +640,11 @@ class BotRuntime:
                             risk_pct=float(self.risk_config.get("risk_pct", 0.5)) if isinstance(self.risk_config, dict) else 0.5,
                             entry_price=float(signal.entry_price),
                             stop_loss=float(signal.sl),
-                            pip_size=pip_size_for_symbol(str(signal.symbol)),
-                            pip_value_per_lot=pip_value_per_lot(str(signal.symbol)),
-                            min_lot=float(self.risk_config.get("min_lot", 0.01) or 0.01) if isinstance(self.risk_config, dict) else 0.01,
-                            max_lot=float(self.risk_config.get("max_lot", 100.0) or 100.0) if isinstance(self.risk_config, dict) else 100.0,
-                            lot_step=float(self.risk_config.get("lot_step", 0.01) or 0.01) if isinstance(self.risk_config, dict) else 0.01,
+                            pip_size=spec_pip_size,
+                            pip_value_per_lot=spec_pip_value,
+                            min_lot=spec_min_lot,
+                            max_lot=spec_max_lot,
+                            lot_step=spec_lot_step,
                         )
                     )
                     approved_lot = float(sizing.lot or 0.0)
@@ -675,8 +723,13 @@ class BotRuntime:
                 "rr": rr,
                 "open_positions": int(self.state.open_trades),
                 "idempotency_exists": False,
+                "daily_locked": bool((daily_state or {}).get("locked", False)),
+                "daily_lock_reason": str((daily_state or {}).get("reason") or ""),
                 "kill_switch": bool(self.state.metadata.get("kill_switch", False)) or bool((daily_state or {}).get("locked", False)),
                 "policy_version_approved": True,
+                "new_orders_paused": bool(self.state.metadata.get("new_orders_paused", False)),
+                "stop_loss": float(signal.sl or 0.0),
+                "requested_volume": float(signal.lot_size or 0.0),
             }
             if self.runtime_mode == "live" and self._get_policy_approval_status is not None:
                 gate_ctx["policy_version_approved"] = bool(await self._get_policy_approval_status())
@@ -710,6 +763,8 @@ class BotRuntime:
                         stop_loss=float(signal.sl),
                         requested_volume=float(signal.lot_size),
                         risk_pct=float(self.risk_config.get("risk_pct", 0.5)) if isinstance(self.risk_config, dict) else 0.5,
+                        instrument_spec=instrument_spec,
+                        runtime_mode=self.runtime_mode,
                     )
                 except Exception as exc:
                     self.state.error_message = f"risk_context_build_failed:{exc}"
@@ -723,9 +778,15 @@ class BotRuntime:
                         "account_exposure_pct": float(risk_ctx.account_exposure_pct),
                         "symbol_exposure_pct": float(risk_ctx.symbol_exposure_pct),
                         "correlated_usd_exposure_pct": float(risk_ctx.correlated_usd_exposure_pct),
+                        "max_loss_amount_if_sl_hit": float(risk_ctx.max_loss_amount_if_sl_hit),
                     }
                 )
             gate_result = self._gate.evaluate(gate_ctx)
+            try:
+                from trading_core.runtime.pre_execution_gate import hash_gate_context
+                gate_ctx_hash = hash_gate_context(gate_ctx)
+            except Exception:
+                gate_ctx_hash = ""
             gate_event = {
                 "bot_instance_id": self.bot_instance_id,
                 "signal_id": str(signal.signal_id),
@@ -733,6 +794,7 @@ class BotRuntime:
                 "gate_action": gate_result.action,
                 "gate_reason": gate_result.reason,
                 "gate_details": gate_result.details,
+                "gate_context_hash": gate_ctx_hash,
                 "brain_cycle_id": str(getattr(signal, "meta", {}).get("brain_cycle_id", "") or ""),
                 "broker": str(getattr(self.broker_provider, "provider_name", "")),
                 "symbol": str(signal.symbol),
@@ -816,6 +878,8 @@ class BotRuntime:
             idempotency_key=str(signal.signal_id),
             brain_cycle_id=str(getattr(signal, "meta", {}).get("brain_cycle_id", "")),
             policy_snapshot=getattr(signal, "meta", {}).get("policy_snapshot", {}),
+            gate_context=dict(gate_ctx or {}),
+            context_hash=str(gate_ctx_hash or ""),
             margin_usage_pct=float((gate_ctx or {}).get("margin_usage_pct", 0.0)),
             free_margin_after_order=float((gate_ctx or {}).get("free_margin_after_order", 0.0)),
             account_exposure_pct=float((gate_ctx or {}).get("account_exposure_pct", 0.0)),

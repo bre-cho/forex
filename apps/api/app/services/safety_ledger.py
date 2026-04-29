@@ -269,9 +269,31 @@ class SafetyLedgerService:
             payload=payload or {},
         )
         self.db.add(row)
-        await self.db.commit()
-        await self.db.refresh(row)
-        return row
+        try:
+            await self.db.commit()
+            await self.db.refresh(row)
+            return row
+        except IntegrityError:
+            await self.db.rollback()
+            existing = (
+                (
+                    await self.db.execute(
+                        select(OrderStateTransition)
+                        .where(
+                            OrderStateTransition.bot_instance_id == bot_instance_id,
+                            OrderStateTransition.idempotency_key == idempotency_key,
+                            OrderStateTransition.event_type == event_type,
+                            OrderStateTransition.to_state == to_state,
+                        )
+                        .order_by(OrderStateTransition.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalar_one_or_none()
+            )
+            if existing is not None:
+                return existing
+            raise
 
     async def list_order_state_transitions(self, bot_instance_id: str, limit: int = 100) -> list[OrderStateTransition]:
         return (
