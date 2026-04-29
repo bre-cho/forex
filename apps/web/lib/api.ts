@@ -78,6 +78,16 @@ export const botApi = {
     api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/resume`),
   runtime: (workspaceId: string, botId: string) =>
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/runtime`),
+  dailyState: (workspaceId: string, botId: string) =>
+    api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/daily-state`),
+  incidents: (workspaceId: string, botId: string, limit = 20) =>
+    api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/incidents`, { params: { limit } }),
+  reconcileNow: (workspaceId: string, botId: string) =>
+    api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/reconcile-now`),
+  resetDailyLock: (workspaceId: string, botId: string) =>
+    api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/daily-state/reset-lock`),
+  resolveIncident: (workspaceId: string, botId: string, incidentId: number) =>
+    api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/incidents/${incidentId}/resolve`),
   signals: (workspaceId: string, botId: string) =>
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/signals`),
   orders: (workspaceId: string, botId: string) =>
