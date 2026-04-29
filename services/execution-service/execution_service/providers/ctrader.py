@@ -138,6 +138,8 @@ class CTraderProvider(BrokerProvider):
                     commission=0.0,
                     success=False,
                     error_message=self._normalize_error(exc),
+                    submit_status="UNKNOWN",
+                    fill_status="UNKNOWN",
                 )
             broker_order_id = str(result.get("orderId") or result.get("positionId") or "")
             execution_price = float(result.get("executionPrice") or result.get("fillPrice") or 0.0)
@@ -151,6 +153,9 @@ class CTraderProvider(BrokerProvider):
                     commission=float(result.get("commission") or 0.0),
                     success=False,
                     error_message="ctrader_error:missing_order_id",
+                    submit_status="REJECTED",
+                    fill_status="UNKNOWN",
+                    raw_response=dict(result),
                 )
             if execution_price <= 0:
                 return OrderResult(
@@ -162,6 +167,9 @@ class CTraderProvider(BrokerProvider):
                     commission=float(result.get("commission") or 0.0),
                     success=False,
                     error_message="ctrader_error:invalid_execution_price",
+                    submit_status="ACKED",
+                    fill_status="UNKNOWN",
+                    raw_response=dict(result),
                 )
             return OrderResult(
                 order_id=broker_order_id,
@@ -171,11 +179,17 @@ class CTraderProvider(BrokerProvider):
                 fill_price=execution_price,
                 commission=float(result.get("commission") or 0.0),
                 success=True,
+                submit_status="ACKED",
+                fill_status="FILLED",
+                broker_position_id=str(result.get("positionId") or "") or None,
+                broker_deal_id=str(result.get("dealId") or "") or None,
+                raw_response=dict(result),
             )
         return OrderResult(
             order_id="", symbol=request.symbol, side=request.side,
             volume=request.volume, fill_price=0, commission=0,
             success=False, error_message="Provider not connected",
+            submit_status="UNKNOWN", fill_status="UNKNOWN",
         )
 
     async def close_position(self, position_id: str) -> OrderResult:

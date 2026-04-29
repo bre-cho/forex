@@ -102,7 +102,7 @@ export function useBotLiveActions(workspaceId: string, botId: string) {
   });
 
   const resetDailyLock = useMutation({
-    mutationFn: () => botApi.resetDailyLock(workspaceId, botId).then((r) => r.data),
+    mutationFn: (reason: string = 'operator_reset') => botApi.resetDailyLock(workspaceId, botId, reason).then((r) => r.data),
     onSuccess: invalidate,
   });
 

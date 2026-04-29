@@ -1,7 +1,9 @@
 """Execution engine — orchestrates order routing and account sync."""
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import Any, Dict, List, Optional, Union
 
 from .account_sync import AccountSync
@@ -28,6 +30,7 @@ class ExecutionEngine:
         runtime_mode: str = "paper",
         gate_policy: Optional[Dict[str, Any]] = None,
         verify_idempotency_reservation=None,
+        submit_timeout_seconds: float = 10.0,
     ) -> None:
         self._provider = provider
         self._provider_name = provider_name
@@ -38,6 +41,7 @@ class ExecutionEngine:
         self._runtime_mode = str(runtime_mode or "paper").lower()
         self._gate = PreExecutionGate(gate_policy or {})
         self._verify_idempotency_reservation = verify_idempotency_reservation
+        self._submit_timeout_seconds = float(submit_timeout_seconds)
 
     async def start(self) -> None:
         await self._provider.connect()
@@ -213,7 +217,44 @@ class ExecutionEngine:
                 success=False,
                 error_message=f"execution_gate_blocked:{gate_result.reason}",
             )
-        return await self._router.route(self._provider_name, request)
+        started = time.perf_counter()
+        try:
+            result = await asyncio.wait_for(
+                self._router.route(self._provider_name, request),
+                timeout=self._submit_timeout_seconds,
+            )
+        except TimeoutError:
+            return OrderResult(
+                order_id="",
+                symbol=request.symbol,
+                side=request.side,
+                volume=request.volume,
+                fill_price=float(request.price or 0.0),
+                commission=0.0,
+                success=False,
+                error_message="broker_submit_timeout",
+                submit_status="UNKNOWN",
+                fill_status="UNKNOWN",
+                raw_response={"latency_ms": round((time.perf_counter() - started) * 1000.0, 2)},
+            )
+        except Exception as exc:
+            return OrderResult(
+                order_id="",
+                symbol=request.symbol,
+                side=request.side,
+                volume=request.volume,
+                fill_price=float(request.price or 0.0),
+                commission=0.0,
+                success=False,
+                error_message=f"broker_submit_error:{exc}",
+                submit_status="UNKNOWN",
+                fill_status="UNKNOWN",
+                raw_response={"latency_ms": round((time.perf_counter() - started) * 1000.0, 2)},
+            )
+        if result.raw_response is None:
+            result.raw_response = {}
+        result.raw_response.setdefault("latency_ms", round((time.perf_counter() - started) * 1000.0, 2))
+        return result
 
     async def close_position(self, position_id: str) -> OrderResult:
         return await self._router.close(self._provider_name, position_id)

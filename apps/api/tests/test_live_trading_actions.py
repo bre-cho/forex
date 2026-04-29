@@ -39,7 +39,7 @@ class _FakeRegistry:
 
 
 def _build_user() -> User:
-    return User(email="tester@example.com", hashed_password="hash", full_name="Tester")
+    return User(email="tester@example.com", hashed_password="hash", full_name="Tester", is_superuser=True)
 
 
 @pytest.mark.asyncio
@@ -118,6 +118,9 @@ async def test_live_trading_action_endpoints() -> None:
         assert rec_runs.status_code == 200
         assert rec_runs.json()
 
+        receipts = await client.get("/v1/workspaces/ws-1/bots/bot-1/execution-receipts")
+        assert receipts.status_code == 200
+
         incidents = await client.get("/v1/workspaces/ws-1/bots/bot-1/incidents")
         incident_id = incidents.json()[0]["id"]
 
@@ -125,9 +128,18 @@ async def test_live_trading_action_endpoints() -> None:
         assert res.status_code == 200
         assert res.json()["status"] == "resolved"
 
-        reset = await client.post("/v1/workspaces/ws-1/bots/bot-1/daily-state/reset-lock")
+        reset = await client.post(
+            "/v1/workspaces/ws-1/bots/bot-1/daily-state/reset-lock",
+            json={"reason": "incident_resolved"},
+        )
         assert reset.status_code == 200
         assert reset.json()["locked"] is False
+
+        bad_reset = await client.post(
+            "/v1/workspaces/ws-1/bots/bot-1/daily-state/reset-lock",
+            json={},
+        )
+        assert bad_reset.status_code == 400
 
         kill = await client.post("/v1/workspaces/ws-1/bots/bot-1/kill-switch")
         assert kill.status_code == 200

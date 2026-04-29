@@ -149,17 +149,17 @@ class BybitProvider(BrokerProvider):
     async def place_order(self, request: OrderRequest) -> OrderResult:
         self._require_sdk()
         if self._session is None:
-            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(request.volume), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message="Bybit session not connected")
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(request.volume), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message="Bybit session not connected", submit_status="UNKNOWN", fill_status="UNKNOWN")
         if not self._instrument_info:
             info_resp = self._session.get_instruments_info(category="linear", symbol=request.symbol)
             if info_resp.get("retCode") == 0 and info_resp.get("result", {}).get("list"):
                 self._instrument_info = info_resp["result"]["list"][0]
         status = str(self._instrument_info.get("status") or "Trading")
         if status.lower() not in {"trading", "settling"}:
-            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(request.volume), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message=f"Bybit instrument not tradable: {status}")
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(request.volume), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message=f"Bybit instrument not tradable: {status}", submit_status="REJECTED", fill_status="UNKNOWN")
         account = await self.get_account_info()
         if float(account.free_margin or 0.0) <= 0:
-            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(request.volume), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message="Bybit preflight failed: insufficient_available_balance")
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(request.volume), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message="Bybit preflight failed: insufficient_available_balance", submit_status="REJECTED", fill_status="UNKNOWN")
         qty = self._normalize_qty(float(request.volume))
         link_id = str(request.comment or f"{request.symbol}-{int(__import__('time').time()*1000)}")[:36]
         resp = self._session.place_order(
@@ -173,10 +173,10 @@ class BybitProvider(BrokerProvider):
             orderLinkId=link_id,
         )
         if resp.get("retCode") != 0:
-            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(qty), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message=self._normalize_error(resp, "bybit_order_failed"))
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(qty), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message=self._normalize_error(resp, "bybit_order_failed"), submit_status="REJECTED", fill_status="UNKNOWN", raw_response=dict(resp))
         order_id = str(resp["result"].get("orderId", ""))
         if not order_id:
-            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(qty), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message="bybit_order_failed:missing_order_id")
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(qty), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message="bybit_order_failed:missing_order_id", submit_status="REJECTED", fill_status="UNKNOWN", raw_response=dict(resp))
         fill_price = request.price or 0.0
         commission = 0.0
         # Verify submit state after broker acknowledgement.
@@ -188,7 +188,7 @@ class BybitProvider(BrokerProvider):
         except Exception:
             order_status = None
         if order_status and order_status.lower() in {"rejected", "cancelled", "deactivated"}:
-            return OrderResult(order_id=order_id, symbol=request.symbol, side=request.side, volume=float(qty), fill_price=float(fill_price or 0.0), commission=0.0, success=False, error_message=f"bybit_order_failed:status_{order_status}")
+            return OrderResult(order_id=order_id, symbol=request.symbol, side=request.side, volume=float(qty), fill_price=float(fill_price or 0.0), commission=0.0, success=False, error_message=f"bybit_order_failed:status_{order_status}", submit_status="REJECTED", fill_status="UNKNOWN", raw_response={"place": dict(resp), "verify": verify_resp if 'verify_resp' in locals() else {}})
         exec_resp = self._session.get_executions(category="linear", orderId=order_id, limit=1)
         if exec_resp.get("retCode") == 0 and exec_resp.get("result", {}).get("list"):
             exec_row = exec_resp["result"]["list"][0]
@@ -202,6 +202,10 @@ class BybitProvider(BrokerProvider):
             volume=qty,
             fill_price=fill_price,
             commission=commission,
+            submit_status="ACKED",
+            fill_status="FILLED" if fill_price and float(fill_price) > 0 else "PENDING",
+            broker_deal_id=str((exec_resp.get("result", {}).get("list") or [{}])[0].get("execId") or "") or None,
+            raw_response={"place": dict(resp), "verify": verify_resp if 'verify_resp' in locals() else {}, "executions": dict(exec_resp)},
         )
 
     async def close_position(self, position_id: str) -> OrderResult:

@@ -30,6 +30,27 @@ class OrderResult:
     commission: float
     success: bool
     error_message: Optional[str] = None
+    submit_status: str = "UNKNOWN"   # ACKED | REJECTED | UNKNOWN
+    fill_status: str = "UNKNOWN"     # FILLED | PARTIAL | PENDING | UNKNOWN
+    broker_position_id: Optional[str] = None
+    broker_deal_id: Optional[str] = None
+    raw_response: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ExecutionReceipt:
+    idempotency_key: str
+    broker_order_id: Optional[str]
+    broker_position_id: Optional[str]
+    broker_deal_id: Optional[str]
+    submit_status: str
+    fill_status: str
+    requested_volume: float
+    filled_volume: float
+    avg_fill_price: Optional[float]
+    commission: float
+    raw_response: Dict[str, Any]
+    latency_ms: float
 
 
 @dataclass

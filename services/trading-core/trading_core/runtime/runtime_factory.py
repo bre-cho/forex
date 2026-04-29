@@ -4,6 +4,7 @@ RuntimeFactory — creates BotRuntime instances from DB config.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,11 @@ class RuntimeFactory:
         try:
             from execution_service.providers import get_provider
         except ImportError:
+            if str(runtime_mode or "").lower() == "live" and os.environ.get("ALLOW_STUB_IN_LIVE", "false").lower() != "true":
+                raise RuntimeError(
+                    "Live mode requires execution_service providers. "
+                    "Stub fallback is disabled when ALLOW_STUB_IN_LIVE=false."
+                )
             logger.warning("execution_service.providers unavailable, using local paper adapter")
             from trading_core.engines.data_provider import MockDataProvider
 

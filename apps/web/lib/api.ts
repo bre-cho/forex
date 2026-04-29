@@ -84,6 +84,8 @@ export const botApi = {
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/incidents`, { params: { limit } }),
   orderStateTransitions: (workspaceId: string, botId: string, limit = 50) =>
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/order-state-transitions`, { params: { limit } }),
+  executionReceipts: (workspaceId: string, botId: string, limit = 50) =>
+    api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/execution-receipts`, { params: { limit } }),
   reconciliationRuns: (workspaceId: string, botId: string, limit = 20) =>
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/reconciliation-runs`, { params: { limit } }),
   reconcileNow: (workspaceId: string, botId: string) =>
@@ -92,8 +94,8 @@ export const botApi = {
     api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/kill-switch`),
   resetKillSwitch: (workspaceId: string, botId: string) =>
     api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/reset-kill-switch`),
-  resetDailyLock: (workspaceId: string, botId: string) =>
-    api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/daily-state/reset-lock`),
+  resetDailyLock: (workspaceId: string, botId: string, reason: string) =>
+    api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/daily-state/reset-lock`, { reason }),
   resolveIncident: (workspaceId: string, botId: string, incidentId: number) =>
     api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/incidents/${incidentId}/resolve`),
   signals: (workspaceId: string, botId: string) =>

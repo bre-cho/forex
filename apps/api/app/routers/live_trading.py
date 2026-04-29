@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
-from app.models import User
+from app.models import AuditLog, User
 from app.services.safety_ledger import SafetyLedgerService
 
 router = APIRouter(prefix="/v1/workspaces/{workspace_id}/bots/{bot_id}", tags=["live-trading"])
@@ -63,6 +63,18 @@ async def get_order_state_transitions(
 ):
     svc = SafetyLedgerService(db)
     return await svc.list_order_state_transitions(bot_id, limit)
+
+
+@router.get("/execution-receipts")
+async def get_execution_receipts(
+    workspace_id: str,
+    bot_id: str,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    svc = SafetyLedgerService(db)
+    return await svc.list_execution_receipts(bot_id, limit)
 
 
 @router.get("/daily-state")
@@ -157,13 +169,29 @@ async def reset_daily_state_lock(
     workspace_id: str,
     bot_id: str,
     request: Request,
+    payload: dict,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if not bool(getattr(current_user, "is_superuser", False)):
+        raise HTTPException(status_code=403, detail="Admin permission required")
+    reason = str((payload or {}).get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Reset reason required")
     svc = SafetyLedgerService(db)
     state = await svc.reset_daily_lock(bot_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Daily state not found")
+    db.add(
+        AuditLog(
+            user_id=str(getattr(current_user, "id", "") or ""),
+            action="daily_state_reset_lock",
+            resource_type="bot_instance",
+            resource_id=bot_id,
+            details={"reason": reason, "workspace_id": workspace_id},
+        )
+    )
+    await db.commit()
     registry = _get_registry(request)
     if registry is not None and registry.get(bot_id) is not None:
         runtime = registry.get(bot_id)

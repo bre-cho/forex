@@ -61,6 +61,7 @@ class BotRuntime:
         get_daily_state: Optional[Callable[[], Awaitable[Dict[str, Any] | None]]] = None,
         refresh_daily_state_from_broker: Optional[Callable[[float | None], Awaitable[Dict[str, Any] | None]]] = None,
         get_db_open_trades: Optional[Callable[[], Awaitable[list[Dict[str, Any]]]]] = None,
+        get_policy_approval_status: Optional[Callable[[], Awaitable[bool]]] = None,
         close_db_trade: Optional[Callable[[str], Awaitable[None]]] = None,
         on_reconciliation_result: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
         on_reconciliation_incident: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
@@ -87,6 +88,7 @@ class BotRuntime:
         self._get_daily_state = get_daily_state
         self._refresh_daily_state_from_broker = refresh_daily_state_from_broker
         self._get_db_open_trades = get_db_open_trades
+        self._get_policy_approval_status = get_policy_approval_status
         self._close_db_trade = close_db_trade
         self._on_reconciliation_result = on_reconciliation_result
         self._on_reconciliation_incident = on_reconciliation_incident
@@ -552,6 +554,16 @@ class BotRuntime:
                         updated_ts = float(datetime.fromisoformat(updated_raw).timestamp())
                     except Exception:
                         updated_ts = None
+                elif isinstance(updated_raw, datetime):
+                    try:
+                        updated_ts = float(updated_raw.timestamp())
+                    except Exception:
+                        updated_ts = None
+                elif hasattr(updated_raw, "isoformat"):
+                    try:
+                        updated_ts = float(datetime.fromisoformat(updated_raw.isoformat()).timestamp())
+                    except Exception:
+                        updated_ts = None
                 if updated_ts is None:
                     self.state.error_message = "daily_state_stale_or_missing_timestamp"
                     return
@@ -574,7 +586,10 @@ class BotRuntime:
                 "open_positions": int(self.state.open_trades),
                 "idempotency_exists": False,
                 "kill_switch": bool(self.state.metadata.get("kill_switch", False)) or bool((daily_state or {}).get("locked", False)),
+                "policy_version_approved": True,
             }
+            if self.runtime_mode == "live" and self._get_policy_approval_status is not None:
+                gate_ctx["policy_version_approved"] = bool(await self._get_policy_approval_status())
             gate_result = self._gate.evaluate(gate_ctx)
             gate_event = {
                 "bot_instance_id": self.bot_instance_id,
@@ -720,12 +735,22 @@ class BotRuntime:
             "signal_id": signal.signal_id,
             "idempotency_key": command.idempotency_key,
             "brain_cycle_id": command.brain_cycle_id,
+            "broker": str(getattr(self.broker_provider, "provider_name", "unknown")),
             "broker_order_id": result.order_id,
+            "broker_position_id": getattr(result, "broker_position_id", None),
+            "broker_deal_id": getattr(result, "broker_deal_id", None),
             "symbol": result.symbol,
             "side": result.side.upper(),
             "order_type": request.order_type,
             "volume": result.volume,
+            "requested_volume": request.volume,
+            "filled_volume": result.volume,
             "price": result.fill_price,
+            "avg_fill_price": result.fill_price,
+            "commission": result.commission,
+            "submit_status": str(getattr(result, "submit_status", "UNKNOWN") or "UNKNOWN"),
+            "fill_status": str(getattr(result, "fill_status", "UNKNOWN") or "UNKNOWN"),
+            "raw_response": dict(getattr(result, "raw_response", {}) or {}),
             "status": "filled" if result.success else "rejected",
             "error_message": result.error_message,
         }
@@ -740,6 +765,23 @@ class BotRuntime:
             self._consecutive_losses += 1
             await self._emit_event("order_rejected", order_payload)
             return
+
+        # Receipt-grade requirement in live mode: do not open trade without broker ack/fill proof.
+        if self.runtime_mode == "live":
+            submit_status = str(getattr(result, "submit_status", "UNKNOWN") or "UNKNOWN").upper()
+            fill_status = str(getattr(result, "fill_status", "UNKNOWN") or "UNKNOWN").upper()
+            if submit_status not in {"ACKED"} or fill_status not in {"FILLED", "PARTIAL"} or float(result.fill_price or 0.0) <= 0:
+                if self._set_idempotency_status is not None:
+                    await self._set_idempotency_status(command.idempotency_key, "broker_unknown", command.brain_cycle_id or None)
+                unknown_payload = {
+                    **order_payload,
+                    "status": "unknown",
+                    "error_message": "execution_receipt_unverified",
+                }
+                await self._emit_event("order_unknown", unknown_payload)
+                if self._reconciliation_worker is not None:
+                    await self._reconciliation_worker.run_once()
+                return
 
         if self._set_idempotency_status is not None:
             await self._set_idempotency_status(command.idempotency_key, "filled", command.brain_cycle_id or None)

@@ -444,6 +444,26 @@ class OrderStateTransition(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
+class BrokerExecutionReceipt(Base):
+    __tablename__ = "broker_execution_receipts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    broker: Mapped[str] = mapped_column(String(32), nullable=False)
+    broker_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    broker_position_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    broker_deal_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    submit_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    fill_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    requested_volume: Mapped[float] = mapped_column(Float, nullable=False)
+    filled_volume: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    commission: Mapped[float] = mapped_column(Float, default=0.0)
+    raw_response: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
 class BrokerReconciliationRun(Base):
     __tablename__ = "broker_reconciliation_runs"
 
@@ -481,4 +501,21 @@ class PolicyVersion(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     policy_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
     change_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="draft")
+    approved_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    activated_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class PolicyApproval(Base):
+    __tablename__ = "policy_approvals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)  # draft | approved | activated | rejected
+    actor_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)

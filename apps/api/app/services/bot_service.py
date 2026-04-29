@@ -24,6 +24,7 @@ from app.models import (
 from app.services.daily_trading_state import DailyTradingStateService
 from app.services.safety_ledger import SafetyLedgerService
 from app.services.live_readiness_guard import LiveReadinessGuard
+from app.services.policy_service import PolicyService
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,21 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                 }[event_type]
                 try:
                     await ledger.record_broker_order_event(dict(payload), event_type)
+                    await ledger.record_execution_receipt(
+                        bot_instance_id=bot_id,
+                        idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
+                        broker=str(payload.get("broker") or payload.get("provider") or "unknown"),
+                        broker_order_id=str(payload.get("broker_order_id") or "") or None,
+                        broker_position_id=str(payload.get("broker_position_id") or "") or None,
+                        broker_deal_id=str(payload.get("broker_deal_id") or "") or None,
+                        submit_status=str(payload.get("submit_status") or ("ACKED" if event_type == "order_filled" else "UNKNOWN")),
+                        fill_status=str(payload.get("fill_status") or mapped_status),
+                        requested_volume=_safe_float(payload.get("requested_volume"), _safe_float(payload.get("volume"), 0.0)),
+                        filled_volume=_safe_float(payload.get("filled_volume"), _safe_float(payload.get("volume"), 0.0)),
+                        avg_fill_price=_safe_float(payload.get("avg_fill_price"), _safe_float(payload.get("price"), 0.0)),
+                        commission=_safe_float(payload.get("commission"), 0.0),
+                        raw_response=dict(payload.get("raw_response") or {}),
+                    )
                     await ledger.update_order_attempt(
                         bot_instance_id=bot_id,
                         idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
@@ -368,6 +384,11 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                 for r in rows
             ]
 
+    async def get_policy_approval_status() -> bool:
+        async with AsyncSessionLocal() as db:
+            svc = PolicyService(db)
+            return await svc.is_policy_approved_for_live(bot_id)
+
     async def close_db_trade(trade_id: str) -> None:
         async with AsyncSessionLocal() as db:
             row = (
@@ -418,6 +439,7 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
         "get_daily_state": get_daily_state,
         "refresh_daily_state_from_broker": refresh_daily_state_from_broker,
         "get_db_open_trades": get_db_open_trades,
+        "get_policy_approval_status": get_policy_approval_status,
         "close_db_trade": close_db_trade,
         "on_reconciliation_result": on_reconciliation_result,
         "on_reconciliation_incident": on_reconciliation_incident,
@@ -506,6 +528,7 @@ async def create_runtime_for_bot(
             get_daily_state=hooks["get_daily_state"],
             refresh_daily_state_from_broker=hooks["refresh_daily_state_from_broker"],
             get_db_open_trades=hooks["get_db_open_trades"],
+            get_policy_approval_status=hooks["get_policy_approval_status"],
             close_db_trade=hooks["close_db_trade"],
             on_reconciliation_result=hooks["on_reconciliation_result"],
             on_reconciliation_incident=hooks["on_reconciliation_incident"],

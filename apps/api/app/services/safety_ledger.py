@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
 from app.models import (
+    BrokerExecutionReceipt,
     BrokerOrderAttempt,
     BrokerOrderEvent,
     BrokerReconciliationRun,
@@ -252,6 +253,57 @@ class SafetyLedgerService:
             .all()
         )
 
+    async def record_execution_receipt(
+        self,
+        *,
+        bot_instance_id: str,
+        idempotency_key: str,
+        broker: str,
+        broker_order_id: str | None,
+        broker_position_id: str | None,
+        broker_deal_id: str | None,
+        submit_status: str,
+        fill_status: str,
+        requested_volume: float,
+        filled_volume: float,
+        avg_fill_price: float | None,
+        commission: float,
+        raw_response: dict[str, Any] | None = None,
+    ) -> BrokerExecutionReceipt:
+        row = BrokerExecutionReceipt(
+            bot_instance_id=bot_instance_id,
+            idempotency_key=idempotency_key,
+            broker=broker,
+            broker_order_id=broker_order_id,
+            broker_position_id=broker_position_id,
+            broker_deal_id=broker_deal_id,
+            submit_status=submit_status,
+            fill_status=fill_status,
+            requested_volume=float(requested_volume or 0.0),
+            filled_volume=float(filled_volume or 0.0),
+            avg_fill_price=avg_fill_price,
+            commission=float(commission or 0.0),
+            raw_response=raw_response or {},
+        )
+        self.db.add(row)
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
+
+    async def list_execution_receipts(self, bot_instance_id: str, limit: int = 100) -> list[BrokerExecutionReceipt]:
+        return (
+            (
+                await self.db.execute(
+                    select(BrokerExecutionReceipt)
+                    .where(BrokerExecutionReceipt.bot_instance_id == bot_instance_id)
+                    .order_by(BrokerExecutionReceipt.created_at.desc())
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
 
     async def record_reconciliation_run(self, payload: dict[str, Any]) -> BrokerReconciliationRun:
         row = BrokerReconciliationRun(
@@ -348,6 +400,7 @@ class SafetyLedgerService:
         ).scalars().all()
         attempts = await self.list_order_attempts(bot_instance_id, limit)
         transitions = await self.list_order_state_transitions(bot_instance_id, limit)
+        receipts = await self.list_execution_receipts(bot_instance_id, limit)
         incidents = (
             await self.db.execute(
                 select(TradingIncident)
@@ -362,6 +415,7 @@ class SafetyLedgerService:
             "order_events": orders,
             "order_attempts": attempts,
             "order_state_transitions": transitions,
+            "execution_receipts": receipts,
             "incidents": incidents,
         }
 
