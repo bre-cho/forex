@@ -11,6 +11,11 @@ import {
 } from '@/hooks/useBots';
 import { useBotWebSocket } from '@/hooks/useWebSocket';
 import { workspaceApi } from '@/lib/api';
+import { DailyLockPanel } from '@/components/live/DailyLockPanel';
+import { ExecutionReceiptDrawer } from '@/components/live/ExecutionReceiptDrawer';
+import { LiveReadinessPanel } from '@/components/live/LiveReadinessPanel';
+import { ReconciliationTimeline } from '@/components/live/ReconciliationTimeline';
+import { UnknownOrdersPanel } from '@/components/live/UnknownOrdersPanel';
 
 function toVietnameseStatus(status?: string): string {
   const map: Record<string, string> = {
@@ -239,6 +244,18 @@ export default function BotDetailPage() {
                 {actionError}
               </div>
             ) : null}
+          </div>
+        ) : null}
+
+        {isLive && workspaceId ? (
+          <div className="md:col-span-2 grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <LiveReadinessPanel workspaceId={workspaceId} botId={botId} />
+            <DailyLockPanel workspaceId={workspaceId} botId={botId} />
+            <UnknownOrdersPanel workspaceId={workspaceId} botId={botId} />
+            <ReconciliationTimeline workspaceId={workspaceId} botId={botId} />
+            <div className="xl:col-span-2">
+              <ExecutionReceiptDrawer workspaceId={workspaceId} botId={botId} />
+            </div>
           </div>
         ) : null}
 
