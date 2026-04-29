@@ -25,6 +25,8 @@ function statusClass(status: string): string {
 export default function LiveControlCenterPage() {
   const [workspaceId, setWorkspaceId] = useState<string>('');
   const [bots, setBots] = useState<BotRow[]>([]);
+  const [meta, setMeta] = useState<Record<string, { incidents: number; reconStatus: string; dailyLocked: boolean }>>({});
+  const [actionMsg, setActionMsg] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -46,6 +48,27 @@ export default function LiveControlCenterPage() {
         if (!mounted) return;
         const rows = (botResp.data || []) as BotRow[];
         setBots(rows);
+        const liveRows = rows.filter((b) => String(b.mode).toLowerCase() === 'live');
+        const entries = await Promise.all(
+          liveRows.map(async (bot) => {
+            try {
+              const [incResp, recResp, dailyResp] = await Promise.all([
+                botApi.incidents(ws.id, bot.id, 20),
+                botApi.reconciliationRuns(ws.id, bot.id, 1),
+                botApi.dailyState(ws.id, bot.id),
+              ]);
+              const incidents = ((incResp.data || []) as Array<{ status?: string }>).filter((x) => String(x.status || '').toLowerCase() !== 'resolved').length;
+              const recStatus = ((recResp.data || []) as Array<{ status?: string }>)[0]?.status || 'n/a';
+              const dailyLocked = Boolean((dailyResp.data || {}).locked);
+              return [bot.id, { incidents, reconStatus: String(recStatus), dailyLocked }] as const;
+            } catch {
+              return [bot.id, { incidents: 0, reconStatus: 'n/a', dailyLocked: false }] as const;
+            }
+          })
+        );
+        if (mounted) {
+          setMeta(Object.fromEntries(entries));
+        }
       } catch (err: any) {
         if (!mounted) return;
         setError(String(err?.response?.data?.detail || err?.message || 'Không tải được Live Control Center'));
@@ -62,6 +85,19 @@ export default function LiveControlCenterPage() {
   const liveBots = useMemo(() => bots.filter((b) => String(b.mode).toLowerCase() === 'live'), [bots]);
   const runningCount = useMemo(() => liveBots.filter((b) => String(b.status).toLowerCase() === 'running').length, [liveBots]);
   const errorCount = useMemo(() => liveBots.filter((b) => String(b.status).toLowerCase() === 'error').length, [liveBots]);
+
+  const runAction = async (botId: string, action: 'reconcile' | 'kill' | 'unkill') => {
+    if (!workspaceId) return;
+    setActionMsg('');
+    try {
+      if (action === 'reconcile') await botApi.reconcileNow(workspaceId, botId);
+      if (action === 'kill') await botApi.killSwitch(workspaceId, botId);
+      if (action === 'unkill') await botApi.resetKillSwitch(workspaceId, botId);
+      setActionMsg(`Action ${action} thành công cho bot ${botId}`);
+    } catch (err: any) {
+      setActionMsg(String(err?.response?.data?.detail || err?.message || `Action ${action} thất bại`));
+    }
+  };
 
   return (
     <div>
@@ -90,6 +126,7 @@ export default function LiveControlCenterPage() {
 
       {loading ? <p className='text-gray-400'>Đang tải dữ liệu...</p> : null}
       {error ? <div className='rounded-lg border border-red-800 bg-red-950/60 px-3 py-2 text-sm text-red-300 mb-4'>{error}</div> : null}
+      {actionMsg ? <div className='rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-sm text-slate-200 mb-4'>{actionMsg}</div> : null}
 
       {!loading && !error && liveBots.length === 0 ? (
         <div className='rounded-xl border border-slate-800 bg-slate-950/40 p-4 text-gray-400'>
@@ -109,6 +146,9 @@ export default function LiveControlCenterPage() {
                 <div className='text-sm text-gray-400 mt-1'>
                   {bot.symbol} · {bot.timeframe} · {bot.mode}
                 </div>
+                <div className='text-xs text-gray-500 mt-2'>
+                  recon: {meta[bot.id]?.reconStatus || 'n/a'} · incidents mở: {meta[bot.id]?.incidents ?? 0} · daily lock: {meta[bot.id]?.dailyLocked ? 'on' : 'off'}
+                </div>
               </div>
               <div className='flex flex-wrap gap-2'>
                 <Link href={`/bots/${bot.id}`} className='px-3 py-2 rounded-lg bg-blue-800 hover:bg-blue-700 text-white text-sm font-medium'>
@@ -120,6 +160,15 @@ export default function LiveControlCenterPage() {
                 <Link href='/live-orders' className='px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-sm font-medium'>
                   Live orders
                 </Link>
+                <button onClick={() => runAction(bot.id, 'reconcile')} className='px-3 py-2 rounded-lg bg-emerald-800 hover:bg-emerald-700 text-white text-sm font-medium'>
+                  Reconcile now
+                </button>
+                <button onClick={() => runAction(bot.id, 'kill')} className='px-3 py-2 rounded-lg bg-red-800 hover:bg-red-700 text-white text-sm font-medium'>
+                  Kill switch
+                </button>
+                <button onClick={() => runAction(bot.id, 'unkill')} className='px-3 py-2 rounded-lg bg-amber-700 hover:bg-amber-600 text-white text-sm font-medium'>
+                  Reset kill
+                </button>
               </div>
             </div>
           </div>

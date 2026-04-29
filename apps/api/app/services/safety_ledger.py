@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
 from app.models import (
+    BrokerOrderAttempt,
     BrokerOrderEvent,
     BrokerReconciliationRun,
     DailyTradingState,
@@ -130,6 +131,85 @@ class SafetyLedgerService:
         await self.db.refresh(row)
         return row
 
+    async def create_or_get_order_attempt(
+        self,
+        *,
+        bot_instance_id: str,
+        signal_id: str,
+        brain_cycle_id: str | None,
+        idempotency_key: str,
+        broker: str,
+        symbol: str,
+        side: str,
+        volume: float,
+        request_payload: dict[str, Any],
+        status: str = "PENDING_SUBMIT",
+    ) -> BrokerOrderAttempt:
+        stmt = select(BrokerOrderAttempt).where(
+            BrokerOrderAttempt.bot_instance_id == bot_instance_id,
+            BrokerOrderAttempt.idempotency_key == idempotency_key,
+        )
+        existing = (await self.db.execute(stmt.limit(1))).scalar_one_or_none()
+        if existing is not None:
+            return existing
+
+        row = BrokerOrderAttempt(
+            bot_instance_id=bot_instance_id,
+            signal_id=signal_id,
+            brain_cycle_id=brain_cycle_id,
+            idempotency_key=idempotency_key,
+            broker=broker,
+            symbol=symbol,
+            side=side,
+            volume=volume,
+            request_payload=request_payload,
+            status=status,
+        )
+        self.db.add(row)
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
+
+    async def update_order_attempt(
+        self,
+        *,
+        bot_instance_id: str,
+        idempotency_key: str,
+        status: str,
+        broker_order_id: str | None = None,
+        error_message: str | None = None,
+    ) -> BrokerOrderAttempt | None:
+        stmt = select(BrokerOrderAttempt).where(
+            BrokerOrderAttempt.bot_instance_id == bot_instance_id,
+            BrokerOrderAttempt.idempotency_key == idempotency_key,
+        )
+        row = (await self.db.execute(stmt.limit(1))).scalar_one_or_none()
+        if row is None:
+            return None
+        row.status = str(status or row.status)
+        if broker_order_id is not None:
+            row.broker_order_id = broker_order_id
+        if error_message is not None:
+            row.error_message = error_message
+        row.updated_at = datetime.now(timezone.utc)
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
+
+    async def list_order_attempts(self, bot_instance_id: str, limit: int = 100) -> list[BrokerOrderAttempt]:
+        return (
+            (
+                await self.db.execute(
+                    select(BrokerOrderAttempt)
+                    .where(BrokerOrderAttempt.bot_instance_id == bot_instance_id)
+                    .order_by(BrokerOrderAttempt.created_at.desc())
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
 
     async def record_reconciliation_run(self, payload: dict[str, Any]) -> BrokerReconciliationRun:
         row = BrokerReconciliationRun(
@@ -224,6 +304,7 @@ class SafetyLedgerService:
                 .limit(limit)
             )
         ).scalars().all()
+        attempts = await self.list_order_attempts(bot_instance_id, limit)
         incidents = (
             await self.db.execute(
                 select(TradingIncident)
@@ -236,5 +317,34 @@ class SafetyLedgerService:
             "decisions": decisions,
             "gate_events": gates,
             "order_events": orders,
+            "order_attempts": attempts,
             "incidents": incidents,
         }
+
+    async def list_reconciliation_runs(self, bot_instance_id: str, limit: int = 100) -> list[BrokerReconciliationRun]:
+        return (
+            (
+                await self.db.execute(
+                    select(BrokerReconciliationRun)
+                    .where(BrokerReconciliationRun.bot_instance_id == bot_instance_id)
+                    .order_by(BrokerReconciliationRun.started_at.desc())
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    async def list_incidents(self, bot_instance_id: str, limit: int = 100) -> list[TradingIncident]:
+        return (
+            (
+                await self.db.execute(
+                    select(TradingIncident)
+                    .where(TradingIncident.bot_instance_id == bot_instance_id)
+                    .order_by(TradingIncident.created_at.desc())
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )

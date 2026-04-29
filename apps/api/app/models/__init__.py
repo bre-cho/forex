@@ -406,6 +406,29 @@ class BrokerOrderEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
+class BrokerOrderAttempt(Base):
+    __tablename__ = "broker_order_attempts"
+    __table_args__ = (
+        UniqueConstraint("bot_instance_id", "idempotency_key", name="uq_broker_attempt_bot_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    signal_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    brain_cycle_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    broker: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    volume: Mapped[float] = mapped_column(Float, nullable=False)
+    request_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(32), default="PENDING_SUBMIT")
+    broker_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
 class BrokerReconciliationRun(Base):
     __tablename__ = "broker_reconciliation_runs"
 

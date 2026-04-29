@@ -9,11 +9,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.db import Base, get_db
 from app.dependencies.auth import get_current_user
-from app.models import BotInstance, DailyTradingState, TradingIncident, User
+from app.models import BotInstance, BrokerReconciliationRun, DailyTradingState, TradingIncident, User
 from app.routers import live_trading
 
 
 class _FakeRuntime:
+    def __init__(self) -> None:
+        self.state = type("State", (), {"metadata": {}, "error_message": ""})()
+
     async def reconcile_now(self) -> dict:
         return {
             "bot_instance_id": "bot-1",
@@ -86,6 +89,16 @@ async def test_live_trading_action_endpoints() -> None:
             )
         )
         session.add(
+            BrokerReconciliationRun(
+                bot_instance_id="bot-1",
+                status="ok",
+                open_positions_broker=1,
+                open_positions_db=1,
+                mismatches=[],
+                repaired=0,
+            )
+        )
+        session.add(
             TradingIncident(
                 bot_instance_id="bot-1",
                 incident_type="reconciliation_mismatch_persists",
@@ -101,6 +114,10 @@ async def test_live_trading_action_endpoints() -> None:
         assert rec.status_code == 200
         assert rec.json()["status"] == "ok"
 
+        rec_runs = await client.get("/v1/workspaces/ws-1/bots/bot-1/reconciliation-runs")
+        assert rec_runs.status_code == 200
+        assert rec_runs.json()
+
         incidents = await client.get("/v1/workspaces/ws-1/bots/bot-1/incidents")
         incident_id = incidents.json()[0]["id"]
 
@@ -111,3 +128,11 @@ async def test_live_trading_action_endpoints() -> None:
         reset = await client.post("/v1/workspaces/ws-1/bots/bot-1/daily-state/reset-lock")
         assert reset.status_code == 200
         assert reset.json()["locked"] is False
+
+        kill = await client.post("/v1/workspaces/ws-1/bots/bot-1/kill-switch")
+        assert kill.status_code == 200
+        assert kill.json()["kill_switch"] is True
+
+        unkill = await client.post("/v1/workspaces/ws-1/bots/bot-1/reset-kill-switch")
+        assert unkill.status_code == 200
+        assert unkill.json()["kill_switch"] is False

@@ -162,6 +162,42 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                     await ledger.record_gate_event(dict(payload))
                 except Exception as exc:
                     logger.warning("record_gate_event failed [%s]: %s", bot_id, exc)
+                if str(payload.get("gate_action", "")).upper() == "ALLOW":
+                    try:
+                        await ledger.create_or_get_order_attempt(
+                            bot_instance_id=bot_id,
+                            signal_id=str(payload.get("signal_id") or ""),
+                            brain_cycle_id=str(payload.get("brain_cycle_id") or "") or None,
+                            idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
+                            broker=str(payload.get("broker") or ""),
+                            symbol=str(payload.get("symbol") or ""),
+                            side=str(payload.get("side") or ""),
+                            volume=_safe_float(payload.get("volume"), 0.0),
+                            request_payload=dict(payload.get("request_payload") or payload),
+                            status="PENDING_SUBMIT",
+                        )
+                    except Exception as exc:
+                        if bot_mode == "live":
+                            raise RuntimeError(f"create_order_attempt_failed:{exc}") from exc
+                        logger.warning("create_order_attempt failed [%s]: %s", bot_id, exc)
+            elif event_type in {"order_filled", "order_rejected", "order_unknown"}:
+                mapped_status = {
+                    "order_filled": "FILLED",
+                    "order_rejected": "REJECTED",
+                    "order_unknown": "UNKNOWN",
+                }[event_type]
+                try:
+                    await ledger.update_order_attempt(
+                        bot_instance_id=bot_id,
+                        idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
+                        status=mapped_status,
+                        broker_order_id=str(payload.get("broker_order_id") or "") or None,
+                        error_message=str(payload.get("error_message") or "") or None,
+                    )
+                except Exception as exc:
+                    if bot_mode == "live":
+                        raise RuntimeError(f"update_order_attempt_failed:{exc}") from exc
+                    logger.warning("update_order_attempt failed [%s]: %s", bot_id, exc)
         await _publish_bot_event_safe(bot_id, event_type, payload)
 
     async def reserve_idempotency(
@@ -211,6 +247,25 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
             state = await svc.get_or_create(bot_id)
             if state is None:
                 return None
+            return {
+                "daily_profit_amount": float(state.daily_profit_amount or 0.0),
+                "daily_loss_pct": float(state.daily_loss_pct or 0.0),
+                "consecutive_losses": int(state.consecutive_losses or 0),
+                "locked": bool(state.locked),
+                "lock_reason": state.lock_reason or "",
+                "starting_equity": float(state.starting_equity or 0.0),
+                "current_equity": float(state.current_equity or 0.0),
+                "updated_at": state.updated_at.isoformat() if state.updated_at else None,
+            }
+
+    async def refresh_daily_state_from_broker(equity: float | None) -> dict | None:
+        async with AsyncSessionLocal() as db:
+            daily = DailyTradingStateService(db)
+            value = _safe_float(equity, 0.0)
+            if value <= 0:
+                return None
+            state = await daily.recompute_from_broker_equity(bot_id, value)
+            await db.commit()
             return {
                 "daily_profit_amount": float(state.daily_profit_amount or 0.0),
                 "daily_loss_pct": float(state.daily_loss_pct or 0.0),
@@ -291,6 +346,7 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
         "verify_idempotency_reservation": verify_idempotency_reservation,
         "set_idempotency_status": set_idempotency_status,
         "get_daily_state": get_daily_state,
+        "refresh_daily_state_from_broker": refresh_daily_state_from_broker,
         "get_db_open_trades": get_db_open_trades,
         "close_db_trade": close_db_trade,
         "on_reconciliation_result": on_reconciliation_result,
@@ -378,6 +434,7 @@ async def create_runtime_for_bot(
             verify_idempotency_reservation=hooks["verify_idempotency_reservation"],
             set_idempotency_status=hooks["set_idempotency_status"],
             get_daily_state=hooks["get_daily_state"],
+            refresh_daily_state_from_broker=hooks["refresh_daily_state_from_broker"],
             get_db_open_trades=hooks["get_db_open_trades"],
             close_db_trade=hooks["close_db_trade"],
             on_reconciliation_result=hooks["on_reconciliation_result"],

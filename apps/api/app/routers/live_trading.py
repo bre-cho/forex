@@ -84,8 +84,19 @@ async def get_incidents(
     current_user: User = Depends(get_current_user),
 ):
     svc = SafetyLedgerService(db)
-    timeline = await svc.timeline(bot_id, limit)
-    return timeline["incidents"]
+    return await svc.list_incidents(bot_id, limit)
+
+
+@router.get("/reconciliation-runs")
+async def get_reconciliation_runs(
+    workspace_id: str,
+    bot_id: str,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    svc = SafetyLedgerService(db)
+    return await svc.list_reconciliation_runs(bot_id, limit)
 
 
 @router.post("/reconcile-now")
@@ -153,3 +164,43 @@ async def reset_daily_state_lock(
         "locked": bool(state.locked),
         "lock_reason": state.lock_reason,
     }
+
+
+@router.post("/kill-switch")
+async def set_kill_switch(
+    workspace_id: str,
+    bot_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    registry = _get_registry(request)
+    runtime = registry.get(bot_id) if registry is not None else None
+    if runtime is None:
+        raise HTTPException(status_code=404, detail="Runtime not found")
+    state_obj = getattr(runtime, "state", None)
+    metadata = getattr(state_obj, "metadata", {})
+    if not isinstance(metadata, dict):
+        raise HTTPException(status_code=500, detail="Runtime metadata unavailable")
+    metadata["kill_switch"] = True
+    if state_obj is not None:
+        state_obj.error_message = "kill_switch_enabled_by_operator"
+    return {"bot_instance_id": bot_id, "kill_switch": True}
+
+
+@router.post("/reset-kill-switch")
+async def reset_kill_switch(
+    workspace_id: str,
+    bot_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    registry = _get_registry(request)
+    runtime = registry.get(bot_id) if registry is not None else None
+    if runtime is None:
+        raise HTTPException(status_code=404, detail="Runtime not found")
+    state_obj = getattr(runtime, "state", None)
+    metadata = getattr(state_obj, "metadata", {})
+    if not isinstance(metadata, dict):
+        raise HTTPException(status_code=500, detail="Runtime metadata unavailable")
+    metadata["kill_switch"] = False
+    return {"bot_instance_id": bot_id, "kill_switch": False}

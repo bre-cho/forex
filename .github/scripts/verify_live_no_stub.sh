@@ -44,6 +44,18 @@ if ! grep -Eq 'live execution adapter unavailable|_execution_adapter\.available'
   errors=$((errors+1))
 fi
 
+# 6) Idempotency unique constraint must exist in model or migration.
+if ! grep -Eq 'uq_order_idempotency_bot_key|UniqueConstraint\("bot_instance_id", "idempotency_key"' apps/api/app/models/__init__.py apps/api/alembic/versions/0004_order_idempotency_reservations.py; then
+  echo "[verify_live_no_stub] missing idempotency unique constraint"
+  errors=$((errors+1))
+fi
+
+# 7) Daily TP/loss tests must be present.
+if [[ ! -f apps/api/tests/test_daily_trading_state.py ]]; then
+  echo "[verify_live_no_stub] missing daily trading state test"
+  errors=$((errors+1))
+fi
+
 if [[ "$errors" -gt 0 ]]; then
   echo "[verify_live_no_stub] FAILED with $errors issue(s)"
   exit 1

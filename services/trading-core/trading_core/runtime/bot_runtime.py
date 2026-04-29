@@ -59,6 +59,7 @@ class BotRuntime:
         verify_idempotency_reservation: Optional[Callable[[str, str, str | None], Awaitable[bool]]] = None,
         set_idempotency_status: Optional[Callable[[str, str, str | None], Awaitable[bool]]] = None,
         get_daily_state: Optional[Callable[[], Awaitable[Dict[str, Any] | None]]] = None,
+        refresh_daily_state_from_broker: Optional[Callable[[float | None], Awaitable[Dict[str, Any] | None]]] = None,
         get_db_open_trades: Optional[Callable[[], Awaitable[list[Dict[str, Any]]]]] = None,
         close_db_trade: Optional[Callable[[str], Awaitable[None]]] = None,
         on_reconciliation_result: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
@@ -84,6 +85,7 @@ class BotRuntime:
         self._verify_idempotency_reservation = verify_idempotency_reservation
         self._set_idempotency_status = set_idempotency_status
         self._get_daily_state = get_daily_state
+        self._refresh_daily_state_from_broker = refresh_daily_state_from_broker
         self._get_db_open_trades = get_db_open_trades
         self._close_db_trade = close_db_trade
         self._on_reconciliation_result = on_reconciliation_result
@@ -497,6 +499,24 @@ class BotRuntime:
             rr = abs((float(signal.tp) - entry) / (entry - sl)) if abs(entry - sl) > 0 else 0.0
             spread_pips = float(getattr(self.broker_provider, "spread_pips", 0.0))
             idempotency_key = str(signal.signal_id)
+            if self.runtime_mode == "live":
+                account_info_fn = getattr(self.broker_provider, "get_account_info", None)
+                if not callable(account_info_fn):
+                    self.state.error_message = "broker_account_info_unavailable"
+                    return
+                try:
+                    account = await account_info_fn()
+                    equity = float(getattr(account, "equity", 0.0) or 0.0)
+                except Exception as exc:
+                    self.state.error_message = f"broker_account_info_fetch_failed:{exc}"
+                    return
+                if self._refresh_daily_state_from_broker is None:
+                    self.state.error_message = "daily_state_refresh_service_unavailable"
+                    return
+                refreshed = await self._refresh_daily_state_from_broker(equity)
+                if refreshed is None:
+                    self.state.error_message = "daily_state_refresh_failed"
+                    return
             daily_state = await self._get_daily_state() if self._get_daily_state else None
             if self.runtime_mode == "live" and daily_state is None:
                 self.state.error_message = "daily_state_unavailable"
@@ -541,6 +561,20 @@ class BotRuntime:
                 "gate_action": gate_result.action,
                 "gate_reason": gate_result.reason,
                 "gate_details": gate_result.details,
+                "brain_cycle_id": str(getattr(signal, "meta", {}).get("brain_cycle_id", "") or ""),
+                "broker": str(getattr(self.broker_provider, "provider_name", "")),
+                "symbol": str(signal.symbol),
+                "side": str(signal.direction).upper(),
+                "volume": float(signal.lot_size),
+                "request_payload": {
+                    "symbol": request.symbol,
+                    "side": request.side,
+                    "volume": request.volume,
+                    "order_type": request.order_type,
+                    "price": request.price,
+                    "stop_loss": request.stop_loss,
+                    "take_profit": request.take_profit,
+                },
             }
             if self._on_event:
                 await self._safe_hook(self._on_event("gate_evaluated", gate_event), "gate_event")
@@ -617,9 +651,26 @@ class BotRuntime:
             await self._set_idempotency_status(command.idempotency_key, "broker_submitted", command.brain_cycle_id or None)
         try:
             result = await self._execution_engine.place_order(command)
-        except Exception:
+        except Exception as exc:
             if self._set_idempotency_status is not None:
                 await self._set_idempotency_status(command.idempotency_key, "broker_unknown", command.brain_cycle_id or None)
+            unknown_payload = {
+                "bot_instance_id": self.bot_instance_id,
+                "signal_id": signal.signal_id,
+                "idempotency_key": command.idempotency_key,
+                "brain_cycle_id": command.brain_cycle_id,
+                "broker_order_id": "",
+                "symbol": request.symbol,
+                "side": request.side.upper(),
+                "order_type": request.order_type,
+                "volume": request.volume,
+                "price": request.price,
+                "status": "unknown",
+                "error_message": str(exc),
+            }
+            await self._emit_event("order_unknown", unknown_payload)
+            if self.runtime_mode == "live" and self._reconciliation_worker is not None:
+                await self._reconciliation_worker.run_once()
             raise
         order_payload = {
             "bot_instance_id": self.bot_instance_id,
@@ -733,6 +784,20 @@ class BotRuntime:
         }
         if signal["direction"] not in {"BUY", "SELL"}:
             raise RuntimeError("direction must be BUY or SELL")
+
+        if self.runtime_mode == "live":
+            # Live manual actions are operator intents and must run through brain + final gate.
+            generated = await self._generate_signal(df, wave)
+            generated["signal_id"] = signal["signal_id"]
+            generated["manual_intent"] = {
+                "requested_direction": signal["direction"],
+                "requested_confidence": signal["confidence"],
+            }
+            await self._persist_signal(generated)
+            if generated.get("direction") in {"BUY", "SELL"}:
+                trade_signal = self._build_trade_signal(generated, df)
+                await self._execute_signal(trade_signal)
+            return generated
 
         await self._persist_signal(signal)
         trade_signal = self._build_trade_signal(signal, df)
