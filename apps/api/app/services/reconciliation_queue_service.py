@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ReconciliationQueueItem
+
+# Seconds before an unknown order is escalated to dead-letter / critical incident
+_DEADLINE_SECONDS = 300  # 5 minutes
+_MAX_ATTEMPTS = 3
 
 
 class ReconciliationQueueService:
@@ -50,6 +54,8 @@ class ReconciliationQueueService:
             idempotency_key=idempotency_key,
             status="pending",
             attempts=0,
+            max_attempts=_MAX_ATTEMPTS,
+            deadline_at=datetime.now(timezone.utc) + timedelta(seconds=_DEADLINE_SECONDS),
             payload=payload or {},
         )
         self.db.add(row)
@@ -165,3 +171,60 @@ class ReconciliationQueueService:
         )
         row = (await self.db.execute(stmt.limit(1))).scalar_one_or_none()
         return row is not None
+
+    async def list_all_pending_due(self, limit: int = 200) -> list[ReconciliationQueueItem]:
+        """Return all pending/retry items due for processing across all bots.
+
+        Used by the daemon worker which is independent of any specific bot runtime.
+        """
+        now = datetime.now(timezone.utc)
+        return (
+            (
+                await self.db.execute(
+                    select(ReconciliationQueueItem)
+                    .where(
+                        ReconciliationQueueItem.status.in_(["pending", "retry"]),
+                        (
+                            ReconciliationQueueItem.next_retry_at.is_(None)
+                            | (ReconciliationQueueItem.next_retry_at <= now)
+                        ),
+                    )
+                    .order_by(ReconciliationQueueItem.created_at.asc())
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    async def move_to_dead_letter(
+        self,
+        bot_instance_id: str,
+        idempotency_key: str,
+        *,
+        error: str,
+    ) -> bool:
+        """Mark item as dead_letter (max retries exceeded or deadline passed)."""
+        row = (
+            (
+                await self.db.execute(
+                    select(ReconciliationQueueItem)
+                    .where(
+                        ReconciliationQueueItem.bot_instance_id == bot_instance_id,
+                        ReconciliationQueueItem.idempotency_key == idempotency_key,
+                    )
+                    .limit(1)
+                )
+            )
+            .scalar_one_or_none()
+        )
+        if row is None:
+            return False
+        row.status = "dead_letter"
+        row.last_error = str(error or "dead_letter")
+        row.next_retry_at = None
+        row.lease_owner = None
+        row.leased_until = None
+        row.updated_at = datetime.now(timezone.utc)
+        await self.db.commit()
+        return True

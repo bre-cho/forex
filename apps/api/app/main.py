@@ -41,9 +41,31 @@ async def lifespan(app: FastAPI):
         import sentry_sdk
         sentry_sdk.init(dsn=settings.sentry_dsn, environment=settings.app_env)
 
+    # Start Unknown Order Daemon (P0.5)
+    import asyncio as _asyncio
+    from app.workers.reconciliation_daemon import run_reconciliation_daemon
+    _daemon_stop = _asyncio.Event()
+    _daemon_task = _asyncio.create_task(
+        run_reconciliation_daemon(stop_event=_daemon_stop),
+        name="reconciliation_daemon",
+    )
+    app.state.daemon_stop = _daemon_stop
+    app.state.daemon_task = _daemon_task
+
     yield
 
     logger.info("Shutting down Forex API")
+    # Stop daemon gracefully
+    _daemon_stop = getattr(app.state, "daemon_stop", None)
+    _daemon_task = getattr(app.state, "daemon_task", None)
+    if _daemon_stop is not None:
+        _daemon_stop.set()
+    if _daemon_task is not None:
+        try:
+            await _asyncio.wait_for(_daemon_task, timeout=5.0)
+        except (_asyncio.TimeoutError, _asyncio.CancelledError):
+            _daemon_task.cancel()
+
     registry = getattr(app.state, "registry", None)
     if registry:
         await registry.stop_all()
