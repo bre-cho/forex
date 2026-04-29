@@ -346,7 +346,6 @@ class TradingDecisionLedger(Base):
 
 class PreExecutionGateEvent(Base):
     __tablename__ = "pre_execution_gate_events"
-    __table_args__ = (UniqueConstraint("bot_instance_id", "idempotency_key", name="uq_gate_event_idempotency"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
@@ -356,6 +355,22 @@ class PreExecutionGateEvent(Base):
     gate_reason: Mapped[str] = mapped_column(String(128), nullable=False)
     gate_details: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class OrderIdempotencyReservation(Base):
+    __tablename__ = "order_idempotency_reservations"
+    __table_args__ = (
+        UniqueConstraint("bot_instance_id", "idempotency_key", name="uq_order_idempotency_bot_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    signal_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    brain_cycle_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="reserved")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 
 
 class DailyTradingState(Base):

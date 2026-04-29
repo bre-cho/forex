@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import select
@@ -11,6 +11,7 @@ from app.models import (
     BrokerOrderEvent,
     BrokerReconciliationRun,
     DailyTradingState,
+    OrderIdempotencyReservation,
     PreExecutionGateEvent,
     TradingDecisionLedger,
     TradingIncident,
@@ -45,14 +46,14 @@ class SafetyLedgerService:
         bot_instance_id: str,
         signal_id: str,
         idempotency_key: str,
+        brain_cycle_id: str | None = None,
     ) -> bool:
-        row = PreExecutionGateEvent(
+        row = OrderIdempotencyReservation(
             bot_instance_id=bot_instance_id,
             signal_id=signal_id,
             idempotency_key=idempotency_key,
-            gate_action="RESERVED",
-            gate_reason="idempotency_reserved",
-            gate_details={},
+            brain_cycle_id=brain_cycle_id,
+            status="reserved",
         )
         self.db.add(row)
         try:
@@ -127,6 +128,29 @@ class SafetyLedgerService:
         await self.db.commit()
         await self.db.refresh(row)
         return row
+
+    async def resolve_incident(self, incident_id: int) -> TradingIncident | None:
+        result = await self.db.execute(
+            select(TradingIncident).where(TradingIncident.id == incident_id).limit(1)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        row.status = "resolved"
+        row.resolved_at = datetime.now(timezone.utc)
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
+
+    async def reset_daily_lock(self, bot_instance_id: str) -> DailyTradingState | None:
+        state = await self.get_daily_state(bot_instance_id)
+        if state is None:
+            return None
+        state.locked = False
+        state.lock_reason = None
+        await self.db.commit()
+        await self.db.refresh(state)
+        return state
 
     async def get_daily_state(self, bot_instance_id: str, trading_day: Optional[date] = None) -> Optional[DailyTradingState]:
         trading_day = trading_day or date.today()

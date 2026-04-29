@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -41,6 +41,38 @@ class AccountInfo:
     margin_level: float
     currency: str
 
+
+
+
+@dataclass
+class PreExecutionContext:
+    bot_instance_id: str
+    runtime_mode: str
+    provider_mode: str
+    broker_connected: bool
+    market_data_ok: bool
+    data_age_seconds: float
+    spread_pips: float
+    confidence: float
+    rr: float
+    open_positions: int
+    daily_profit_amount: float
+    daily_loss_pct: float
+    consecutive_losses: int
+    daily_locked: bool
+    kill_switch: bool
+    idempotency_key: str
+    brain_cycle_id: str
+    policy_snapshot: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ExecutionCommand:
+    request: OrderRequest
+    intent: Dict[str, Any]
+    pre_execution_context: PreExecutionContext
+    idempotency_key: str
+    brain_cycle_id: str
 
 class BrokerProvider(ABC):
     """Abstract broker provider — all concrete providers must implement this."""

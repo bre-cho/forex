@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from .account_sync import AccountSync
 from .order_router import OrderRouter
-from .providers.base import BrokerProvider, OrderRequest, OrderResult
+from .providers.base import BrokerProvider, ExecutionCommand, OrderRequest, OrderResult, PreExecutionContext
 from trading_core.runtime.pre_execution_gate import PreExecutionGate
 
 logger = logging.getLogger(__name__)
@@ -57,26 +57,107 @@ class ExecutionEngine:
     def _on_account_update(self, info: Dict[str, Any]) -> None:
         self._last_account_info = info
 
-    async def place_order(self, request: OrderRequest) -> OrderResult:
-        # P0: Execution-layer gate to prevent bypassing runtime-only checks.
-        provider_mode = str(getattr(self._provider, "mode", "stub"))
-        connected = bool(getattr(self._provider, "is_connected", False))
-        gate_ctx = {
-            "provider_mode": provider_mode,
-            "runtime_mode": self._runtime_mode,
-            "broker_connected": connected,
-            "market_data_ok": True,
-            "data_age_seconds": 0,
-            "daily_profit_amount": 0,
-            "daily_loss_pct": 0,
-            "consecutive_losses": 0,
-            "spread_pips": 0,
-            "confidence": 1,
-            "rr": 2,
-            "open_positions": 0,
-            "idempotency_exists": False,
-            "kill_switch": False,
-        }
+    async def place_order(self, payload: Union[OrderRequest, ExecutionCommand]) -> OrderResult:
+        if isinstance(payload, ExecutionCommand):
+            request = payload.request
+            ctx = payload.pre_execution_context
+            if self._runtime_mode == "live":
+                if not payload.brain_cycle_id:
+                    return OrderResult(
+                        order_id="",
+                        symbol=request.symbol,
+                        side=request.side,
+                        volume=request.volume,
+                        fill_price=float(request.price or 0.0),
+                        commission=0.0,
+                        success=False,
+                        error_message="execution_gate_blocked:missing_brain_cycle_id",
+                    )
+                if not payload.idempotency_key:
+                    return OrderResult(
+                        order_id="",
+                        symbol=request.symbol,
+                        side=request.side,
+                        volume=request.volume,
+                        fill_price=float(request.price or 0.0),
+                        commission=0.0,
+                        success=False,
+                        error_message="execution_gate_blocked:missing_idempotency_key",
+                    )
+                if ctx is None:
+                    return OrderResult(
+                        order_id="",
+                        symbol=request.symbol,
+                        side=request.side,
+                        volume=request.volume,
+                        fill_price=float(request.price or 0.0),
+                        commission=0.0,
+                        success=False,
+                        error_message="execution_gate_blocked:missing_pre_execution_context",
+                    )
+                gate_ctx = {
+                    "provider_mode": ctx.provider_mode,
+                    "runtime_mode": ctx.runtime_mode,
+                    "broker_connected": ctx.broker_connected,
+                    "market_data_ok": ctx.market_data_ok,
+                    "data_age_seconds": ctx.data_age_seconds,
+                    "daily_profit_amount": ctx.daily_profit_amount,
+                    "daily_loss_pct": ctx.daily_loss_pct,
+                    "consecutive_losses": ctx.consecutive_losses,
+                    "spread_pips": ctx.spread_pips,
+                    "confidence": ctx.confidence,
+                    "rr": ctx.rr,
+                    "open_positions": ctx.open_positions,
+                    "idempotency_exists": False,
+                    "kill_switch": bool(ctx.kill_switch or ctx.daily_locked),
+                }
+            else:
+                gate_ctx = {
+                    "provider_mode": str(getattr(self._provider, "mode", "stub")),
+                    "runtime_mode": self._runtime_mode,
+                    "broker_connected": bool(getattr(self._provider, "is_connected", False)),
+                    "market_data_ok": True,
+                    "data_age_seconds": 0,
+                    "daily_profit_amount": 0,
+                    "daily_loss_pct": 0,
+                    "consecutive_losses": 0,
+                    "spread_pips": 0,
+                    "confidence": 1,
+                    "rr": 2,
+                    "open_positions": 0,
+                    "idempotency_exists": False,
+                    "kill_switch": False,
+                }
+        else:
+            request = payload
+            if self._runtime_mode == "live":
+                return OrderResult(
+                    order_id="",
+                    symbol=request.symbol,
+                    side=request.side,
+                    volume=request.volume,
+                    fill_price=float(request.price or 0.0),
+                    commission=0.0,
+                    success=False,
+                    error_message="execution_gate_blocked:execution_command_required",
+                )
+            gate_ctx = {
+                "provider_mode": str(getattr(self._provider, "mode", "stub")),
+                "runtime_mode": self._runtime_mode,
+                "broker_connected": bool(getattr(self._provider, "is_connected", False)),
+                "market_data_ok": True,
+                "data_age_seconds": 0,
+                "daily_profit_amount": 0,
+                "daily_loss_pct": 0,
+                "consecutive_losses": 0,
+                "spread_pips": 0,
+                "confidence": 1,
+                "rr": 2,
+                "open_positions": 0,
+                "idempotency_exists": False,
+                "kill_switch": False,
+            }
+
         gate_result = self._gate.evaluate(gate_ctx)
         if gate_result.action != "ALLOW":
             return OrderResult(

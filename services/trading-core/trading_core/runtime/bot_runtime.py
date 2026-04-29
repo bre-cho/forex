@@ -243,6 +243,14 @@ class BotRuntime:
             if self.state.status == RuntimeStatus.PAUSED:
                 self.state.status = RuntimeStatus.RUNNING
 
+    async def reconcile_now(self) -> Dict[str, Any]:
+        if self.runtime_mode != "live":
+            raise RuntimeError("reconcile_now_supported_for_live_only")
+        if self._reconciliation_worker is None:
+            raise RuntimeError("reconciliation_worker_not_running")
+        result = await self._reconciliation_worker.run_once()
+        return result.to_dict()
+
     # ── Runtime loop ───────────────────────────────────────────────────── #
 
     async def _run_loop(self) -> None:
@@ -405,7 +413,12 @@ class BotRuntime:
             lot_size=max(0.01, lot_size),
             entry_mode="runtime_auto",
             priority=5,
-            meta={"wave_state": signal.get("wave_state", "")},
+            meta={
+                "wave_state": signal.get("wave_state", ""),
+                "confidence": float(signal.get("confidence", 0.0)),
+                "brain_cycle_id": str(signal.get("brain_cycle_id", "")),
+                "policy_snapshot": self.state.metadata.get("last_brain_cycle", {}).get("policy_snapshot", {}),
+            },
         )
 
     async def _persist_signal(self, signal: Dict[str, Any]) -> None:
@@ -499,7 +512,39 @@ class BotRuntime:
                 return
         # ── end gate ───────────────────────────────────────────────────
 
-        result = await self._execution_engine.place_order(request)
+        from execution_service.providers.base import ExecutionCommand, PreExecutionContext
+        pre_ctx = PreExecutionContext(
+            bot_instance_id=self.bot_instance_id,
+            runtime_mode=self.runtime_mode,
+            provider_mode=str(getattr(self.broker_provider, "mode", "stub")),
+            broker_connected=bool(getattr(self.broker_provider, "is_connected", False)),
+            market_data_ok=bool(self.state.metadata.get("market_data_ok", False)),
+            data_age_seconds=float(self.state.metadata.get("data_age_seconds", 10**9)),
+            spread_pips=float(getattr(self.broker_provider, "spread_pips", 0.0)),
+            confidence=float(getattr(signal, "meta", {}).get("confidence", 1.0)),
+            rr=float(rr),
+            open_positions=int(self.state.open_trades),
+            daily_profit_amount=float((daily_state or {}).get("daily_profit_amount", self._daily_profit_amount)),
+            daily_loss_pct=float((daily_state or {}).get("daily_loss_pct", self._daily_loss_pct)),
+            consecutive_losses=int((daily_state or {}).get("consecutive_losses", self._consecutive_losses)),
+            daily_locked=bool((daily_state or {}).get("locked", False)),
+            kill_switch=bool(self.state.metadata.get("kill_switch", False)),
+            idempotency_key=str(signal.signal_id),
+            brain_cycle_id=str(getattr(signal, "meta", {}).get("brain_cycle_id", "")),
+            policy_snapshot=getattr(signal, "meta", {}).get("policy_snapshot", {}),
+        )
+        command = ExecutionCommand(
+            request=request,
+            intent={
+                "side": signal.direction,
+                "symbol": signal.symbol,
+                "lot_size": float(signal.lot_size),
+            },
+            pre_execution_context=pre_ctx,
+            idempotency_key=str(signal.signal_id),
+            brain_cycle_id=str(getattr(signal, "meta", {}).get("brain_cycle_id", "")),
+        )
+        result = await self._execution_engine.place_order(command)
         order_payload = {
             "bot_instance_id": self.bot_instance_id,
             "signal_id": signal.signal_id,
@@ -809,8 +854,17 @@ class BotRuntime:
     async def _start_reconciliation_worker(self) -> None:
         if self._reconciliation_worker is not None:
             return
-        if not self._get_db_open_trades or not self._close_db_trade:
-            return
+        missing_hooks = []
+        if not self._get_db_open_trades:
+            missing_hooks.append("get_db_open_trades")
+        if not self._close_db_trade:
+            missing_hooks.append("close_db_trade")
+        if not self._on_reconciliation_result:
+            missing_hooks.append("on_reconciliation_result")
+        if not self._on_reconciliation_incident:
+            missing_hooks.append("on_reconciliation_incident")
+        if missing_hooks:
+            raise RuntimeError(f"missing_reconciliation_hooks:{','.join(missing_hooks)}")
         try:
             from execution_service.reconciliation_worker import ReconciliationWorker
         except ImportError as exc:
