@@ -77,6 +77,18 @@ async def get_execution_receipts(
     return await svc.list_execution_receipts(bot_id, limit)
 
 
+@router.get("/account-snapshots")
+async def get_account_snapshots(
+    workspace_id: str,
+    bot_id: str,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    svc = SafetyLedgerService(db)
+    return await svc.list_broker_account_snapshots(bot_id, limit)
+
+
 @router.get("/daily-state")
 async def get_daily_state(
     workspace_id: str,

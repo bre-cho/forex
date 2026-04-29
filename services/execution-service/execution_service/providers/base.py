@@ -89,6 +89,9 @@ class PreExecutionContext:
     account_exposure_pct: float = 0.0
     symbol_exposure_pct: float = 0.0
     correlated_usd_exposure_pct: float = 0.0
+    portfolio_daily_loss_pct: float = 0.0
+    portfolio_open_positions: int = 0
+    portfolio_kill_switch: bool = False
     policy_snapshot: Dict[str, Any] = field(default_factory=dict)
 
 

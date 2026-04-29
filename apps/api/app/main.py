@@ -77,6 +77,7 @@ from app.routers import (
     billing,
     broker_connections,
     bots,
+    experiments,
     incidents,
     legacy,
     live_trading,
@@ -108,6 +109,7 @@ app.include_router(ws.router)
 app.include_router(incidents.router)
 app.include_router(live_trading.router)
 app.include_router(risk_policy.router)
+app.include_router(experiments.router)
 app.include_router(legacy.router)
 
 

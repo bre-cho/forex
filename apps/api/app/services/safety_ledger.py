@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
 from app.models import (
+    BrokerAccountSnapshot,
     BrokerExecutionReceipt,
     BrokerOrderAttempt,
     BrokerOrderEvent,
@@ -337,6 +338,55 @@ class SafetyLedgerService:
             .all()
         )
 
+    async def record_broker_account_snapshot(
+        self,
+        *,
+        bot_instance_id: str,
+        broker: str,
+        account_id: str | None,
+        balance: float | None,
+        equity: float | None,
+        margin: float | None,
+        free_margin: float | None,
+        margin_level: float | None,
+        currency: str | None,
+        raw_response: dict[str, Any] | None = None,
+    ) -> BrokerAccountSnapshot:
+        row = BrokerAccountSnapshot(
+            bot_instance_id=bot_instance_id,
+            broker=broker,
+            account_id=account_id,
+            balance=balance,
+            equity=equity,
+            margin=margin,
+            free_margin=free_margin,
+            margin_level=margin_level,
+            currency=currency,
+            raw_response=raw_response or {},
+        )
+        self.db.add(row)
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
+
+    async def list_broker_account_snapshots(
+        self,
+        bot_instance_id: str,
+        limit: int = 100,
+    ) -> list[BrokerAccountSnapshot]:
+        return (
+            (
+                await self.db.execute(
+                    select(BrokerAccountSnapshot)
+                    .where(BrokerAccountSnapshot.bot_instance_id == bot_instance_id)
+                    .order_by(BrokerAccountSnapshot.created_at.desc())
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
 
     async def record_reconciliation_run(self, payload: dict[str, Any]) -> BrokerReconciliationRun:
         row = BrokerReconciliationRun(
@@ -434,6 +484,7 @@ class SafetyLedgerService:
         attempts = await self.list_order_attempts(bot_instance_id, limit)
         transitions = await self.list_order_state_transitions(bot_instance_id, limit)
         receipts = await self.list_execution_receipts(bot_instance_id, limit)
+        account_snapshots = await self.list_broker_account_snapshots(bot_instance_id, limit)
         incidents = (
             await self.db.execute(
                 select(TradingIncident)
@@ -449,6 +500,7 @@ class SafetyLedgerService:
             "order_attempts": attempts,
             "order_state_transitions": transitions,
             "execution_receipts": receipts,
+            "broker_account_snapshots": account_snapshots,
             "incidents": incidents,
         }
 

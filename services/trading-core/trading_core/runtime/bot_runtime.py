@@ -61,6 +61,7 @@ class BotRuntime:
         get_daily_state: Optional[Callable[[], Awaitable[Dict[str, Any] | None]]] = None,
         refresh_daily_state_from_broker: Optional[Callable[[float | None], Awaitable[Dict[str, Any] | None]]] = None,
         evaluate_daily_profit_lock: Optional[Callable[[float], Awaitable[Dict[str, Any] | None]]] = None,
+        get_portfolio_risk_snapshot: Optional[Callable[[], Awaitable[Dict[str, Any] | None]]] = None,
         get_db_open_trades: Optional[Callable[[], Awaitable[list[Dict[str, Any]]]]] = None,
         get_policy_approval_status: Optional[Callable[[], Awaitable[bool]]] = None,
         close_db_trade: Optional[Callable[[str], Awaitable[None]]] = None,
@@ -89,6 +90,7 @@ class BotRuntime:
         self._get_daily_state = get_daily_state
         self._refresh_daily_state_from_broker = refresh_daily_state_from_broker
         self._evaluate_daily_profit_lock = evaluate_daily_profit_lock
+        self._get_portfolio_risk_snapshot = get_portfolio_risk_snapshot
         self._get_db_open_trades = get_db_open_trades
         self._get_policy_approval_status = get_policy_approval_status
         self._close_db_trade = close_db_trade
@@ -314,7 +316,25 @@ class BotRuntime:
             timeframe=timeframe,
             limit=200,
         )
-        self.state.metadata["market_data_ok"] = bool(df is not None and not df.empty)
+        quality_reason = "ok"
+        quality_details: Dict[str, Any] = {}
+        quality_ok = bool(df is not None and not df.empty)
+        if quality_ok:
+            try:
+                from trading_core.data import MarketDataQualityEngine
+
+                result = MarketDataQualityEngine().evaluate(df)
+                quality_ok = bool(result.ok)
+                quality_reason = str(result.reason)
+                quality_details = dict(result.details)
+            except Exception as exc:
+                quality_ok = False
+                quality_reason = f"quality_engine_failed:{exc}"
+        self.state.metadata["market_data_ok"] = bool(quality_ok)
+        self.state.metadata["market_data_quality_reason"] = quality_reason
+        self.state.metadata["market_data_quality_details"] = quality_details
+        if not quality_ok:
+            return None
         if df is not None and not df.empty:
             last_idx = df.index[-1]
             try:
@@ -536,9 +556,52 @@ class BotRuntime:
                 except Exception as exc:
                     self.state.error_message = f"broker_account_info_fetch_failed:{exc}"
                     return
+                await self._emit_event(
+                    "broker_account_snapshot",
+                    {
+                        "bot_instance_id": self.bot_instance_id,
+                        "broker": str(getattr(self.broker_provider, "provider_name", "unknown")),
+                        "account_id": str(getattr(account, "account_id", "") or "") or None,
+                        "balance": float(getattr(account, "balance", 0.0) or 0.0),
+                        "equity": float(getattr(account, "equity", 0.0) or 0.0),
+                        "margin": float(getattr(account, "margin", 0.0) or 0.0),
+                        "free_margin": float(getattr(account, "free_margin", 0.0) or 0.0),
+                        "margin_level": float(getattr(account, "margin_level", 0.0) or 0.0),
+                        "currency": str(getattr(account, "currency", "") or "") or None,
+                    },
+                )
                 if self._refresh_daily_state_from_broker is None:
                     self.state.error_message = "daily_state_refresh_service_unavailable"
                     return
+
+                try:
+                    from trading_core.risk import PositionSizingInput, calculate_position_size, pip_size_for_symbol, pip_value_per_lot
+
+                    sizing = calculate_position_size(
+                        PositionSizingInput(
+                            equity=float(equity),
+                            risk_pct=float(self.risk_config.get("risk_pct", 0.5)) if isinstance(self.risk_config, dict) else 0.5,
+                            entry_price=float(signal.entry_price),
+                            stop_loss=float(signal.sl),
+                            pip_size=pip_size_for_symbol(str(signal.symbol)),
+                            pip_value_per_lot=pip_value_per_lot(str(signal.symbol)),
+                            min_lot=float(self.risk_config.get("min_lot", 0.01) or 0.01) if isinstance(self.risk_config, dict) else 0.01,
+                            max_lot=float(self.risk_config.get("max_lot", 100.0) or 100.0) if isinstance(self.risk_config, dict) else 100.0,
+                            lot_step=float(self.risk_config.get("lot_step", 0.01) or 0.01) if isinstance(self.risk_config, dict) else 0.01,
+                        )
+                    )
+                    approved_lot = float(sizing.lot or 0.0)
+                    requested_lot = float(signal.lot_size)
+                    if approved_lot <= 0:
+                        self.state.error_message = "position_sizing_failed"
+                        return
+                    if requested_lot > approved_lot + 1e-9:
+                        self.state.error_message = "position_size_policy_violation"
+                        return
+                except Exception as exc:
+                    self.state.error_message = f"position_sizing_enforcement_failed:{exc}"
+                    return
+
                 refreshed = await self._refresh_daily_state_from_broker(equity)
                 if refreshed is None:
                     self.state.error_message = "daily_state_refresh_failed"
@@ -548,6 +611,16 @@ class BotRuntime:
                     if bool((lock_result or {}).get("locked", False)):
                         self.state.metadata["daily_lock"] = dict(lock_result or {})
                         self.state.error_message = str((lock_result or {}).get("reason") or "daily_locked")
+                        if str((lock_result or {}).get("event") or ""):
+                            await self._emit_event(
+                                str((lock_result or {}).get("event") or "daily_tp_hit"),
+                                {
+                                    "bot_instance_id": self.bot_instance_id,
+                                    "reason": str((lock_result or {}).get("reason") or "daily_take_profit_hit"),
+                                    "lock_action": str((lock_result or {}).get("lock_action") or "stop_new_orders"),
+                                    "target": float((lock_result or {}).get("target") or 0.0),
+                                },
+                            )
                         return
             daily_state = await self._get_daily_state() if self._get_daily_state else None
             if self.runtime_mode == "live" and daily_state is None:
@@ -598,6 +671,20 @@ class BotRuntime:
             }
             if self.runtime_mode == "live" and self._get_policy_approval_status is not None:
                 gate_ctx["policy_version_approved"] = bool(await self._get_policy_approval_status())
+            if self.runtime_mode == "live" and self._get_portfolio_risk_snapshot is not None:
+                try:
+                    portfolio_snapshot = await self._get_portfolio_risk_snapshot()
+                    if isinstance(portfolio_snapshot, dict):
+                        gate_ctx.update(
+                            {
+                                "portfolio_daily_loss_pct": float(portfolio_snapshot.get("portfolio_daily_loss_pct", 0.0) or 0.0),
+                                "portfolio_open_positions": int(portfolio_snapshot.get("portfolio_open_positions", 0) or 0),
+                                "portfolio_kill_switch": bool(portfolio_snapshot.get("portfolio_kill_switch", False)),
+                            }
+                        )
+                except Exception as exc:
+                    self.state.error_message = f"portfolio_risk_snapshot_failed:{exc}"
+                    return
 
             risk_ctx = None
             if self.runtime_mode == "live":
@@ -725,6 +812,9 @@ class BotRuntime:
             account_exposure_pct=float((gate_ctx or {}).get("account_exposure_pct", 0.0)),
             symbol_exposure_pct=float((gate_ctx or {}).get("symbol_exposure_pct", 0.0)),
             correlated_usd_exposure_pct=float((gate_ctx or {}).get("correlated_usd_exposure_pct", 0.0)),
+            portfolio_daily_loss_pct=float((gate_ctx or {}).get("portfolio_daily_loss_pct", 0.0)),
+            portfolio_open_positions=int((gate_ctx or {}).get("portfolio_open_positions", 0)),
+            portfolio_kill_switch=bool((gate_ctx or {}).get("portfolio_kill_switch", False)),
         )
         command = ExecutionCommand(
             request=request,

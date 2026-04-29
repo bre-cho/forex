@@ -477,6 +477,23 @@ class BrokerExecutionReceipt(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
+class BrokerAccountSnapshot(Base):
+    __tablename__ = "broker_account_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    broker: Mapped[str] = mapped_column(String(32), nullable=False)
+    account_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    margin: Mapped[float | None] = mapped_column(Float, nullable=True)
+    free_margin: Mapped[float | None] = mapped_column(Float, nullable=True)
+    margin_level: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    raw_response: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
 class BrokerReconciliationRun(Base):
     __tablename__ = "broker_reconciliation_runs"
 
@@ -532,3 +549,23 @@ class PolicyApproval(Base):
     actor_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     note: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class StrategyExperiment(Base):
+    __tablename__ = "strategy_experiments"
+    __table_args__ = (
+        UniqueConstraint("bot_instance_id", "version", name="uq_strategy_experiments_bot_version"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    stage: Mapped[str] = mapped_column(String(32), default="DRAFT")
+    strategy_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    policy_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    metrics_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    note: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)

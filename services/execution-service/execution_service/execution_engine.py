@@ -162,6 +162,9 @@ class ExecutionEngine:
                     "account_exposure_pct": float(getattr(ctx, "account_exposure_pct", 0.0) or 0.0),
                     "symbol_exposure_pct": float(getattr(ctx, "symbol_exposure_pct", 0.0) or 0.0),
                     "correlated_usd_exposure_pct": float(getattr(ctx, "correlated_usd_exposure_pct", 0.0) or 0.0),
+                    "portfolio_daily_loss_pct": float(getattr(ctx, "portfolio_daily_loss_pct", 0.0) or 0.0),
+                    "portfolio_open_positions": int(getattr(ctx, "portfolio_open_positions", 0) or 0),
+                    "portfolio_kill_switch": bool(getattr(ctx, "portfolio_kill_switch", False)),
                 }
             else:
                 gate_ctx = {

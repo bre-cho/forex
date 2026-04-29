@@ -21,6 +21,7 @@ from app.models import (
     Signal,
     Trade,
 )
+from app.services.incident_notifier import notify_incident
 from app.services.daily_trading_state import DailyTradingStateService
 from app.services.daily_profit_lock_engine import DailyProfitLockEngine
 from app.services.safety_ledger import SafetyLedgerService
@@ -273,7 +274,7 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                         error_message=str(payload.get("error_message") or "") or None,
                     )
                     to_state = {
-                        "order_filled": "FILLED",
+                        "order_filled": "ACKED",
                         "order_rejected": "REJECTED",
                         "order_unknown": "UNKNOWN",
                     }[event_type]
@@ -286,6 +287,24 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                         detail=str(payload.get("error_message") or ""),
                         payload=dict(payload),
                     )
+                    if event_type == "order_filled":
+                        await _record_transition_with_validation(
+                            ledger,
+                            signal_id=str(payload.get("signal_id") or ""),
+                            idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
+                            next_state="FILLED",
+                            event_type="order_fill_confirmed",
+                            detail="receipt_fill_confirmed",
+                            payload=dict(payload),
+                        )
+                    if event_type == "order_unknown":
+                        await notify_incident(
+                            incident_type="order_unknown",
+                            severity="critical" if bot_mode == "live" else "warning",
+                            title="Order unknown - reconciliation required",
+                            detail=str(payload.get("error_message") or "broker status unknown"),
+                            payload=dict(payload),
+                        )
                 except Exception as exc:
                     if bot_mode == "live":
                         raise RuntimeError(f"update_order_attempt_failed:{exc}") from exc
@@ -318,6 +337,27 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                     next_state="OPEN_POSITION_VERIFIED",
                     event_type=event_type,
                     detail="position_visible_in_runtime",
+                    payload=dict(payload),
+                )
+            elif event_type == "broker_account_snapshot":
+                await ledger.record_broker_account_snapshot(
+                    bot_instance_id=bot_id,
+                    broker=str(payload.get("broker") or "unknown"),
+                    account_id=str(payload.get("account_id") or "") or None,
+                    balance=_safe_float(payload.get("balance"), 0.0),
+                    equity=_safe_float(payload.get("equity"), 0.0),
+                    margin=_safe_float(payload.get("margin"), 0.0),
+                    free_margin=_safe_float(payload.get("free_margin"), 0.0),
+                    margin_level=_safe_float(payload.get("margin_level"), 0.0),
+                    currency=str(payload.get("currency") or "") or None,
+                    raw_response=dict(payload.get("raw_response") or payload),
+                )
+            elif event_type == "daily_tp_hit":
+                await notify_incident(
+                    incident_type="daily_tp_hit",
+                    severity="warning",
+                    title="Daily take-profit lock activated",
+                    detail=str(payload.get("reason") or "daily_take_profit_hit"),
                     payload=dict(payload),
                 )
         await _publish_bot_event_safe(bot_id, event_type, payload)
@@ -434,6 +474,63 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
             svc = PolicyService(db)
             return await svc.is_policy_approved_for_live(bot_id)
 
+    async def get_portfolio_risk_snapshot() -> dict | None:
+        async with AsyncSessionLocal() as db:
+            bot_row = (
+                await db.execute(select(BotInstance).where(BotInstance.id == bot_id).limit(1))
+            ).scalar_one_or_none()
+            if bot_row is None:
+                return None
+
+            workspace_bot_ids = (
+                (
+                    await db.execute(
+                        select(BotInstance.id).where(BotInstance.workspace_id == bot_row.workspace_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not workspace_bot_ids:
+                return {
+                    "portfolio_daily_loss_pct": 0.0,
+                    "portfolio_open_positions": 0,
+                    "portfolio_kill_switch": False,
+                }
+
+            today = datetime.now(timezone.utc).date()
+            states = (
+                (
+                    await db.execute(
+                        select(DailyTradingState).where(
+                            DailyTradingState.bot_instance_id.in_(workspace_bot_ids),
+                            DailyTradingState.trading_day == today,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            portfolio_daily_loss_pct = max((float(s.daily_loss_pct or 0.0) for s in states), default=0.0)
+            portfolio_kill_switch = any(bool(s.locked) for s in states)
+            open_positions = (
+                (
+                    await db.execute(
+                        select(Trade).where(
+                            Trade.bot_instance_id.in_(workspace_bot_ids),
+                            Trade.status.in_(["open", "partial"]),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return {
+                "portfolio_daily_loss_pct": float(portfolio_daily_loss_pct),
+                "portfolio_open_positions": int(len(open_positions)),
+                "portfolio_kill_switch": bool(portfolio_kill_switch),
+            }
+
     async def close_db_trade(trade_id: str) -> None:
         async with AsyncSessionLocal() as db:
             row = (
@@ -470,6 +567,13 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
             # Escalation: lock day so pre-execution gate blocks new orders.
             daily = DailyTradingStateService(db)
             await daily.lock_day(bot_id, "reconciliation_incident")
+            await notify_incident(
+                incident_type=str(payload.get("incident_type") or "reconciliation_incident"),
+                severity=str(payload.get("severity") or "critical"),
+                title=str(payload.get("title") or "Reconciliation incident"),
+                detail=str(payload.get("detail") or ""),
+                payload=dict(payload),
+            )
 
     return {
         "on_signal": on_signal,
@@ -484,6 +588,7 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
         "get_daily_state": get_daily_state,
         "refresh_daily_state_from_broker": refresh_daily_state_from_broker,
         "evaluate_daily_profit_lock": evaluate_daily_profit_lock,
+        "get_portfolio_risk_snapshot": get_portfolio_risk_snapshot,
         "get_db_open_trades": get_db_open_trades,
         "get_policy_approval_status": get_policy_approval_status,
         "close_db_trade": close_db_trade,
@@ -574,6 +679,7 @@ async def create_runtime_for_bot(
             get_daily_state=hooks["get_daily_state"],
             refresh_daily_state_from_broker=hooks["refresh_daily_state_from_broker"],
             evaluate_daily_profit_lock=hooks["evaluate_daily_profit_lock"],
+            get_portfolio_risk_snapshot=hooks["get_portfolio_risk_snapshot"],
             get_db_open_trades=hooks["get_db_open_trades"],
             get_policy_approval_status=hooks["get_policy_approval_status"],
             close_db_trade=hooks["close_db_trade"],

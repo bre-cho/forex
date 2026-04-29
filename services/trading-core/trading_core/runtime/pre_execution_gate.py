@@ -54,6 +54,8 @@ class PreExecutionGate:
         # kill_switch can come from context (runtime signal) or policy (static config)
         if context.get("kill_switch") is True or self.policy.get("kill_switch") is True:
             return GateResult("BLOCK", "kill_switch_enabled", severity="critical", lock_scope="bot", operator_action="reset_required")
+        if context.get("portfolio_kill_switch") is True:
+            return GateResult("BLOCK", "portfolio_kill_switch_enabled", severity="critical", lock_scope="portfolio", operator_action="reset_required")
         if context.get("runtime_mode") == "live" and not context.get("broker_connected"):
             return GateResult("BLOCK", "broker_not_connected", severity="critical", operator_action="broker_check")
         # stub/degraded provider only blocks in live mode
@@ -73,6 +75,8 @@ class PreExecutionGate:
             return GateResult("BLOCK", "market_data_stale", severity="warning", operator_action="review")
         if float(context.get("daily_loss_pct", 0)) >= float(self.policy.get("max_daily_loss_pct", 5)):
             return GateResult("BLOCK", "daily_loss_limit_hit", severity="critical", lock_scope="bot", operator_action="reset_required")
+        if float(context.get("portfolio_daily_loss_pct", 0.0) or 0.0) >= float(self.policy.get("max_portfolio_daily_loss_pct", 10.0)):
+            return GateResult("BLOCK", "portfolio_daily_loss_limit_hit", severity="critical", lock_scope="portfolio", operator_action="reset_required")
         if float(context.get("daily_profit_amount", 0)) >= self._daily_take_profit_target(context):
             return GateResult("BLOCK", "daily_take_profit_hit", severity="warning", lock_scope="bot", operator_action="reset_required")
         if int(context.get("consecutive_losses", 0)) >= int(self.policy.get("max_consecutive_losses", 4)):
@@ -93,6 +97,8 @@ class PreExecutionGate:
             return GateResult("BLOCK", "spread_too_high", severity="warning", operator_action="review")
         if int(context.get("open_positions", 0)) >= int(self.policy.get("max_open_positions", 3)):
             return GateResult("BLOCK", "max_open_positions_hit", severity="warning", operator_action="review")
+        if int(context.get("portfolio_open_positions", 0) or 0) >= int(self.policy.get("max_portfolio_open_positions", 12)):
+            return GateResult("BLOCK", "max_portfolio_open_positions_hit", severity="warning", operator_action="review")
         if context.get("idempotency_exists") is True:
             return GateResult("BLOCK", "duplicate_order_blocked", severity="warning", operator_action="review")
         if float(context.get("confidence", 0)) < float(self.policy.get("min_confidence", 0.65)):

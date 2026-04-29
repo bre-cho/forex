@@ -150,3 +150,16 @@ def test_paper_stub_provider_allowed():
     gate = PreExecutionGate(policy=DEFAULT_POLICY)
     result = gate.evaluate(_ctx(provider_mode="stub", runtime_mode="paper"))
     assert result.action == "ALLOW"
+
+
+def test_portfolio_kill_switch_blocks(gate):
+    result = gate.evaluate(_ctx(portfolio_kill_switch=True))
+    assert result.action == "BLOCK"
+    assert result.reason == "portfolio_kill_switch_enabled"
+
+
+def test_portfolio_daily_loss_blocks():
+    gate = PreExecutionGate(policy={**DEFAULT_POLICY, "max_portfolio_daily_loss_pct": 8.0})
+    result = gate.evaluate(_ctx(portfolio_daily_loss_pct=8.0))
+    assert result.action == "BLOCK"
+    assert result.reason == "portfolio_daily_loss_limit_hit"
