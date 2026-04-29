@@ -13,6 +13,7 @@ from app.models import (
     BrokerReconciliationRun,
     DailyTradingState,
     OrderIdempotencyReservation,
+    OrderStateTransition,
     PreExecutionGateEvent,
     TradingDecisionLedger,
     TradingIncident,
@@ -210,6 +211,47 @@ class SafetyLedgerService:
             .all()
         )
 
+    async def record_order_state_transition(
+        self,
+        *,
+        bot_instance_id: str,
+        signal_id: str,
+        idempotency_key: str,
+        from_state: str | None,
+        to_state: str,
+        event_type: str,
+        detail: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> OrderStateTransition:
+        row = OrderStateTransition(
+            bot_instance_id=bot_instance_id,
+            signal_id=signal_id,
+            idempotency_key=idempotency_key,
+            from_state=from_state,
+            to_state=to_state,
+            event_type=event_type,
+            detail=detail,
+            payload=payload or {},
+        )
+        self.db.add(row)
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
+
+    async def list_order_state_transitions(self, bot_instance_id: str, limit: int = 100) -> list[OrderStateTransition]:
+        return (
+            (
+                await self.db.execute(
+                    select(OrderStateTransition)
+                    .where(OrderStateTransition.bot_instance_id == bot_instance_id)
+                    .order_by(OrderStateTransition.created_at.desc())
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
 
     async def record_reconciliation_run(self, payload: dict[str, Any]) -> BrokerReconciliationRun:
         row = BrokerReconciliationRun(
@@ -305,6 +347,7 @@ class SafetyLedgerService:
             )
         ).scalars().all()
         attempts = await self.list_order_attempts(bot_instance_id, limit)
+        transitions = await self.list_order_state_transitions(bot_instance_id, limit)
         incidents = (
             await self.db.execute(
                 select(TradingIncident)
@@ -318,6 +361,7 @@ class SafetyLedgerService:
             "gate_events": gates,
             "order_events": orders,
             "order_attempts": attempts,
+            "order_state_transitions": transitions,
             "incidents": incidents,
         }
 

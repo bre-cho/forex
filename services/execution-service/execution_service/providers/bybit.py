@@ -67,9 +67,28 @@ class BybitProvider(BrokerProvider):
         normalized = round(round(qty / step) * step, 8)
         return max(min_qty, normalized)
 
+    def _normalize_error(self, payload: Any, default: str = "bybit_error") -> str:
+        if isinstance(payload, BaseException):
+            return f"{default}:{payload}"
+        if isinstance(payload, dict):
+            code = payload.get("retCode")
+            msg = payload.get("retMsg") or payload.get("ret_msg") or payload.get("msg")
+            if code is None and msg is None:
+                return default
+            return f"{default}:{code}:{msg}"
+        return f"{default}:{payload}"
+
+    def _ensure_live_key_not_testnet_like(self) -> None:
+        if self.testnet:
+            return
+        key = str(self.api_key or "").lower()
+        if key.startswith("test") or "testnet" in key:
+            raise RuntimeError("Bybit live mode rejected testnet-like api key")
+
     async def connect(self) -> None:
         if not self.testnet:
             self._require_sdk()
+            self._ensure_live_key_not_testnet_like()
         if not _BYBIT_AVAILABLE:
             logger.warning("pybit SDK unavailable; BybitProvider in stub/paper mode only")
             self._connected = False
@@ -81,10 +100,12 @@ class BybitProvider(BrokerProvider):
         )
         resp = self._session.get_wallet_balance(accountType="UNIFIED")
         if resp.get("retCode") != 0:
-            raise ConnectionError(f"Bybit connect failed: {resp.get('retMsg')}")
+            raise ConnectionError(self._normalize_error(resp, "bybit_connect_failed"))
         info_resp = self._session.get_instruments_info(category="linear", symbol=self.symbol)
         if info_resp.get("retCode") == 0 and info_resp.get("result", {}).get("list"):
             self._instrument_info = info_resp["result"]["list"][0]
+        if not self._instrument_info:
+            raise ConnectionError("bybit_connect_failed:instrument_info_missing")
         self._connected = True
         logger.info("BybitProvider connected: symbol=%s testnet=%s", self.symbol, self.testnet)
 
@@ -96,7 +117,7 @@ class BybitProvider(BrokerProvider):
         self._require_sdk()
         resp = self._session.get_wallet_balance(accountType="UNIFIED")
         if resp.get("retCode") != 0:
-            raise RuntimeError(f"Bybit wallet: {resp.get('retMsg')}")
+            raise RuntimeError(self._normalize_error(resp, "bybit_wallet_failed"))
         wallet = (resp.get("result", {}).get("list") or [{}])[0]
         coins = wallet.get("coin") or []
         usdt = next((c for c in coins if c.get("coin") == "USDT"), {})
@@ -152,10 +173,22 @@ class BybitProvider(BrokerProvider):
             orderLinkId=link_id,
         )
         if resp.get("retCode") != 0:
-            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(qty), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message=f"Bybit order failed: {resp.get('retMsg')}")
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(qty), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message=self._normalize_error(resp, "bybit_order_failed"))
         order_id = str(resp["result"].get("orderId", ""))
+        if not order_id:
+            return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(qty), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message="bybit_order_failed:missing_order_id")
         fill_price = request.price or 0.0
         commission = 0.0
+        # Verify submit state after broker acknowledgement.
+        order_status = None
+        try:
+            verify_resp = self._session.get_open_orders(category="linear", symbol=request.symbol, orderId=order_id, limit=1)
+            if verify_resp.get("retCode") == 0 and verify_resp.get("result", {}).get("list"):
+                order_status = str(verify_resp["result"]["list"][0].get("orderStatus") or "")
+        except Exception:
+            order_status = None
+        if order_status and order_status.lower() in {"rejected", "cancelled", "deactivated"}:
+            return OrderResult(order_id=order_id, symbol=request.symbol, side=request.side, volume=float(qty), fill_price=float(fill_price or 0.0), commission=0.0, success=False, error_message=f"bybit_order_failed:status_{order_status}")
         exec_resp = self._session.get_executions(category="linear", orderId=order_id, limit=1)
         if exec_resp.get("retCode") == 0 and exec_resp.get("result", {}).get("list"):
             exec_row = exec_resp["result"]["list"][0]
@@ -187,7 +220,7 @@ class BybitProvider(BrokerProvider):
             reduceOnly=True,
         )
         if resp.get("retCode") != 0:
-            return OrderResult(order_id=position_id, symbol=pos["symbol"], side="close", volume=float(pos["volume"]), fill_price=0.0, commission=0.0, success=False, error_message=f"Bybit close failed: {resp.get('retMsg')}")
+            return OrderResult(order_id=position_id, symbol=pos["symbol"], side="close", volume=float(pos["volume"]), fill_price=0.0, commission=0.0, success=False, error_message=self._normalize_error(resp, "bybit_close_failed"))
         return OrderResult(order_id=resp["result"]["orderId"], symbol=pos["symbol"], side="close", volume=float(pos["volume"]), fill_price=0.0, commission=0.0, success=True)
 
     async def get_open_positions(self) -> List[Dict[str, Any]]:
@@ -227,4 +260,19 @@ class BybitProvider(BrokerProvider):
             }
             for t in resp["result"]["list"]
         ]
+
+    async def health_check(self) -> Dict[str, Any]:
+        if not self._connected or self._session is None:
+            return {"status": "disconnected", "reason": "provider_not_connected"}
+        if not self.testnet and self.mode != "live":
+            return {"status": "degraded", "reason": "provider_mode_mismatch"}
+        if self.testnet and self.mode != "demo":
+            return {"status": "degraded", "reason": "provider_mode_mismatch"}
+        try:
+            wallet = self._session.get_wallet_balance(accountType="UNIFIED")
+            if wallet.get("retCode") != 0:
+                return {"status": "auth_failed", "reason": self._normalize_error(wallet, "wallet_failed")}
+            return {"status": "healthy", "reason": ""}
+        except Exception as exc:
+            return {"status": "degraded", "reason": self._normalize_error(exc, "health_check_failed")}
 

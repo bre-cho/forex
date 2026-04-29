@@ -96,6 +96,19 @@ def test_daily_take_profit_blocked(gate):
     assert result.reason == "daily_take_profit_hit"
 
 
+def test_daily_take_profit_percent_equity_blocked():
+    gate = PreExecutionGate(
+        policy={
+            **DEFAULT_POLICY,
+            "daily_take_profit_mode": "percent_equity",
+            "daily_take_profit_pct": 2.0,
+        }
+    )
+    result = gate.evaluate(_ctx(starting_equity=10000.0, daily_profit_amount=200.0))
+    assert result.action == "BLOCK"
+    assert result.reason == "daily_take_profit_hit"
+
+
 def test_consecutive_losses_blocked(gate):
     result = gate.evaluate(_ctx(consecutive_losses=4))
     assert result.action == "BLOCK"

@@ -18,6 +18,35 @@ class PreExecutionGate:
     def __init__(self, policy: Dict[str, Any]) -> None:
         self.policy = policy or {}
 
+    def _daily_take_profit_target(self, context: Dict[str, Any]) -> float:
+        mode = str(self.policy.get("daily_take_profit_mode", "fixed_amount") or "fixed_amount").lower()
+        profit = float(context.get("daily_profit_amount", 0.0) or 0.0)
+        starting_equity = float(context.get("starting_equity", 0.0) or 0.0)
+
+        if mode == "percent_equity":
+            pct = float(self.policy.get("daily_take_profit_pct", 0.0) or 0.0)
+            if pct <= 0 or starting_equity <= 0:
+                return float("inf")
+            return starting_equity * pct / 100.0
+
+        if mode == "capital_tier":
+            tiers = self.policy.get("daily_take_profit_tiers", []) or []
+            if not isinstance(tiers, list) or starting_equity <= 0:
+                return float("inf")
+            target = None
+            for tier in tiers:
+                if not isinstance(tier, dict):
+                    continue
+                min_equity = float(tier.get("min_equity", 0.0) or 0.0)
+                amount = float(tier.get("target_amount", 0.0) or 0.0)
+                if starting_equity >= min_equity and amount > 0:
+                    target = amount
+            return float(target) if target is not None else float("inf")
+
+        # fixed_amount default
+        _ = profit
+        return float(self.policy.get("daily_take_profit_amount", 10**18) or 10**18)
+
     def evaluate(self, context: Dict[str, Any]) -> GateResult:
         # kill_switch can come from context (runtime signal) or policy (static config)
         if context.get("kill_switch") is True or self.policy.get("kill_switch") is True:
@@ -33,7 +62,7 @@ class PreExecutionGate:
             return GateResult("BLOCK", "market_data_stale")
         if float(context.get("daily_loss_pct", 0)) >= float(self.policy.get("max_daily_loss_pct", 5)):
             return GateResult("BLOCK", "daily_loss_limit_hit")
-        if float(context.get("daily_profit_amount", 0)) >= float(self.policy.get("daily_take_profit_amount", 10**18)):
+        if float(context.get("daily_profit_amount", 0)) >= self._daily_take_profit_target(context):
             return GateResult("BLOCK", "daily_take_profit_hit")
         if int(context.get("consecutive_losses", 0)) >= int(self.policy.get("max_consecutive_losses", 4)):
             return GateResult("BLOCK", "consecutive_loss_limit_hit")

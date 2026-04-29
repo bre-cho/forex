@@ -53,6 +53,18 @@ async def get_gate_events(
     return timeline["gate_events"]
 
 
+@router.get("/order-state-transitions")
+async def get_order_state_transitions(
+    workspace_id: str,
+    bot_id: str,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    svc = SafetyLedgerService(db)
+    return await svc.list_order_state_transitions(bot_id, limit)
+
+
 @router.get("/daily-state")
 async def get_daily_state(
     workspace_id: str,

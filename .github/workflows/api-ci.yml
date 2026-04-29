@@ -123,6 +123,14 @@ jobs:
         run: |
           .github/scripts/verify_broker_gate_wiring.py
 
+      - name: Verify live import boundary
+        run: |
+          .github/scripts/verify_live_import_boundary.py
+
+      - name: Verify no live stub provider
+        run: |
+          .github/scripts/verify_no_live_stub_provider.py
+
       - name: Verify frontend/API contract
         run: |
           .github/scripts/verify_frontend_api_contract.py

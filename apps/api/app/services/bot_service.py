@@ -180,6 +180,27 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                         if bot_mode == "live":
                             raise RuntimeError(f"create_order_attempt_failed:{exc}") from exc
                         logger.warning("create_order_attempt failed [%s]: %s", bot_id, exc)
+                    await ledger.record_order_state_transition(
+                        bot_instance_id=bot_id,
+                        signal_id=str(payload.get("signal_id") or ""),
+                        idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
+                        from_state="intent_created",
+                        to_state="gate_allowed",
+                        event_type="gate_evaluated",
+                        detail=str(payload.get("gate_reason") or ""),
+                        payload=dict(payload),
+                    )
+                elif str(payload.get("gate_action", "")).upper() == "BLOCK":
+                    await ledger.record_order_state_transition(
+                        bot_instance_id=bot_id,
+                        signal_id=str(payload.get("signal_id") or ""),
+                        idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
+                        from_state="intent_created",
+                        to_state="gate_blocked",
+                        event_type="gate_evaluated",
+                        detail=str(payload.get("gate_reason") or ""),
+                        payload=dict(payload),
+                    )
             elif event_type in {"order_filled", "order_rejected", "order_unknown"}:
                 mapped_status = {
                     "order_filled": "FILLED",
@@ -187,6 +208,7 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                     "order_unknown": "UNKNOWN",
                 }[event_type]
                 try:
+                    await ledger.record_broker_order_event(dict(payload), event_type)
                     await ledger.update_order_attempt(
                         bot_instance_id=bot_id,
                         idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
@@ -194,10 +216,58 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                         broker_order_id=str(payload.get("broker_order_id") or "") or None,
                         error_message=str(payload.get("error_message") or "") or None,
                     )
+                    to_state = {
+                        "order_filled": "filled",
+                        "order_rejected": "rejected",
+                        "order_unknown": "unknown",
+                    }[event_type]
+                    await ledger.record_order_state_transition(
+                        bot_instance_id=bot_id,
+                        signal_id=str(payload.get("signal_id") or ""),
+                        idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
+                        from_state="submitted",
+                        to_state=to_state,
+                        event_type=event_type,
+                        detail=str(payload.get("error_message") or ""),
+                        payload=dict(payload),
+                    )
                 except Exception as exc:
                     if bot_mode == "live":
                         raise RuntimeError(f"update_order_attempt_failed:{exc}") from exc
                     logger.warning("update_order_attempt failed [%s]: %s", bot_id, exc)
+            elif event_type == "order_submitted":
+                await ledger.record_order_state_transition(
+                    bot_instance_id=bot_id,
+                    signal_id=str(payload.get("signal_id") or ""),
+                    idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
+                    from_state="gate_allowed",
+                    to_state="submitted",
+                    event_type=event_type,
+                    detail="broker_submit_requested",
+                    payload=dict(payload),
+                )
+            elif event_type == "order_reserved":
+                await ledger.record_order_state_transition(
+                    bot_instance_id=bot_id,
+                    signal_id=str(payload.get("signal_id") or ""),
+                    idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
+                    from_state="gate_allowed",
+                    to_state="reserved",
+                    event_type=event_type,
+                    detail="idempotency_reserved",
+                    payload=dict(payload),
+                )
+            elif event_type == "open_position_verified":
+                await ledger.record_order_state_transition(
+                    bot_instance_id=bot_id,
+                    signal_id=str(payload.get("signal_id") or ""),
+                    idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
+                    from_state="filled",
+                    to_state="open_position_verified",
+                    event_type=event_type,
+                    detail="position_visible_in_runtime",
+                    payload=dict(payload),
+                )
         await _publish_bot_event_safe(bot_id, event_type, payload)
 
     async def reserve_idempotency(

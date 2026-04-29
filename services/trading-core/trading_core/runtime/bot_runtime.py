@@ -431,6 +431,7 @@ class BotRuntime:
 
     def _build_trade_signal(self, signal: Dict[str, Any], df):
         from trading_core.engines.signal_coordinator import TradeSignal
+        from trading_core.risk import PositionSizingInput, calculate_position_size, pip_size_for_symbol, pip_value_per_lot
 
         entry_price = float(signal.get("entry_price") or df["close"].iloc[-1])
         atr = float((df["high"].tail(14) - df["low"].tail(14)).mean() or 0.0)
@@ -438,7 +439,7 @@ class BotRuntime:
             atr = entry_price * 0.001
 
         direction = str(signal.get("direction") or "HOLD").upper()
-        lot_size = float(self.risk_config.get("lot_size", 0.01)) if isinstance(self.risk_config, dict) else 0.01
+        default_lot = float(self.risk_config.get("lot_size", 0.01)) if isinstance(self.risk_config, dict) else 0.01
         rr = float(self.strategy_config.get("rr", 2.0)) if isinstance(self.strategy_config, dict) else 2.0
         if direction == "BUY":
             sl = entry_price - atr
@@ -446,6 +447,27 @@ class BotRuntime:
         else:
             sl = entry_price + atr
             tp = entry_price - atr * rr
+
+        lot_size = default_lot
+        if isinstance(self.risk_config, dict) and bool(self.risk_config.get("use_risk_position_sizing", True)):
+            equity = float(self.state.equity or 0.0)
+            if equity <= 0:
+                equity = float(self.state.balance or 0.0)
+            sizing = calculate_position_size(
+                PositionSizingInput(
+                    equity=equity,
+                    risk_pct=float(self.risk_config.get("risk_pct", 0.5) or 0.5),
+                    entry_price=entry_price,
+                    stop_loss=float(sl),
+                    pip_size=pip_size_for_symbol(str(signal.get("symbol", "EURUSD"))),
+                    pip_value_per_lot=pip_value_per_lot(str(signal.get("symbol", "EURUSD"))),
+                    min_lot=float(self.risk_config.get("min_lot", 0.01) or 0.01),
+                    max_lot=float(self.risk_config.get("max_lot", 100.0) or 100.0),
+                    lot_step=float(self.risk_config.get("lot_step", 0.01) or 0.01),
+                )
+            )
+            if sizing.lot > 0:
+                lot_size = sizing.lot
 
         return TradeSignal(
             signal_id=str(signal.get("signal_id")),
@@ -607,6 +629,15 @@ class BotRuntime:
                     if self._on_event:
                         await self._safe_hook(self._on_event("gate_evaluated", dup_event), "gate_event")
                     return
+                await self._emit_event(
+                    "order_reserved",
+                    {
+                        "bot_instance_id": self.bot_instance_id,
+                        "signal_id": str(signal.signal_id),
+                        "idempotency_key": idempotency_key,
+                        "brain_cycle_id": str(getattr(signal, "meta", {}).get("brain_cycle_id", "") or ""),
+                    },
+                )
                 if self._set_idempotency_status is not None:
                     brain_cycle_id = str(getattr(signal, "meta", {}).get("brain_cycle_id", "") or "")
                     await self._set_idempotency_status(idempotency_key, "reserved", brain_cycle_id or None)
@@ -649,6 +680,18 @@ class BotRuntime:
         )
         if self._set_idempotency_status is not None:
             await self._set_idempotency_status(command.idempotency_key, "broker_submitted", command.brain_cycle_id or None)
+        await self._emit_event(
+            "order_submitted",
+            {
+                "bot_instance_id": self.bot_instance_id,
+                "signal_id": signal.signal_id,
+                "idempotency_key": command.idempotency_key,
+                "brain_cycle_id": command.brain_cycle_id,
+                "symbol": request.symbol,
+                "side": request.side.upper(),
+                "volume": request.volume,
+            },
+        )
         try:
             result = await self._execution_engine.place_order(command)
         except Exception as exc:
@@ -724,6 +767,16 @@ class BotRuntime:
             await self._safe_hook(self._on_trade(trade_payload), "on_trade")
         await self._emit_event("order_filled", order_payload)
         await self._emit_event("trade_opened", trade_payload)
+        await self._emit_event(
+            "open_position_verified",
+            {
+                "bot_instance_id": self.bot_instance_id,
+                "signal_id": signal.signal_id,
+                "idempotency_key": command.idempotency_key,
+                "broker_trade_id": result.order_id,
+                "symbol": result.symbol,
+            },
+        )
 
     async def _manage_trades(self, signal: Dict[str, Any]) -> None:
         self.state.metadata["last_signal"] = signal

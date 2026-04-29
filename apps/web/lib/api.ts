@@ -82,6 +82,8 @@ export const botApi = {
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/daily-state`),
   incidents: (workspaceId: string, botId: string, limit = 20) =>
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/incidents`, { params: { limit } }),
+  orderStateTransitions: (workspaceId: string, botId: string, limit = 50) =>
+    api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/order-state-transitions`, { params: { limit } }),
   reconciliationRuns: (workspaceId: string, botId: string, limit = 20) =>
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/reconciliation-runs`, { params: { limit } }),
   reconcileNow: (workspaceId: string, botId: string) =>
