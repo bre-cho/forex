@@ -11,6 +11,17 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Alembic creates alembic_version.version_num as VARCHAR(32) by default.
+    # Our revision identifiers are longer than 32 chars, so widen once here
+    # before the runtime updates version_num to this revision id.
+    op.alter_column(
+        "alembic_version",
+        "version_num",
+        existing_type=sa.String(length=32),
+        type_=sa.String(length=64),
+        existing_nullable=False,
+    )
+
     op.create_table(
         "order_idempotency_reservations",
         sa.Column("id", sa.BigInteger, primary_key=True, autoincrement=True),
