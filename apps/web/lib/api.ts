@@ -86,8 +86,12 @@ export const botApi = {
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/order-state-transitions`, { params: { limit } }),
   executionReceipts: (workspaceId: string, botId: string, limit = 50) =>
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/execution-receipts`, { params: { limit } }),
+  accountSnapshots: (workspaceId: string, botId: string, limit = 50) =>
+    api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/account-snapshots`, { params: { limit } }),
   reconciliationRuns: (workspaceId: string, botId: string, limit = 20) =>
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/reconciliation-runs`, { params: { limit } }),
+  operationsDashboard: (workspaceId: string, botId: string) =>
+    api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/operations-dashboard`),
   reconcileNow: (workspaceId: string, botId: string) =>
     api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/reconcile-now`),
   killSwitch: (workspaceId: string, botId: string) =>

@@ -135,6 +135,22 @@ jobs:
         run: |
           .github/scripts/verify_frontend_api_contract.py
 
+      - name: Verify Alembic single head (mandatory)
+        run: |
+          python .github/scripts/verify_alembic_single_head.py
+
+      - name: Verify experiment stage policy (mandatory)
+        run: |
+          python .github/scripts/verify_experiment_stage_policy.py
+
+      - name: Verify parity contract harness (mandatory)
+        run: |
+          PYTHONPATH=/workspaces/forex:services/execution-service pytest -q services/execution-service/tests/test_parity_contract.py
+
+      - name: Verify market data quality failure scenarios (mandatory)
+        run: |
+          bash .github/scripts/verify_market_data_quality_scenarios.sh
+
       - name: Verify production config excludes legacy stack
         run: |
           bash .github/scripts/verify_production_no_legacy_stack.sh
@@ -163,7 +179,6 @@ jobs:
         run: |
           cd apps/api
           alembic check
-        continue-on-error: true
 
   docker-build:
     runs-on: ubuntu-latest

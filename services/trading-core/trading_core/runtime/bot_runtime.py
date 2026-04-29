@@ -538,6 +538,11 @@ class BotRuntime:
             comment=str(signal.signal_id),
         )
 
+        try:
+            from execution_service.parity_contract import validate_order_contract
+        except ImportError:
+            validate_order_contract = None
+
         # ── P0: Pre-execution gate ─────────────────────────────────────
         if self._gate is not None:
             entry = float(signal.entry_price)
@@ -827,6 +832,29 @@ class BotRuntime:
             idempotency_key=str(signal.signal_id),
             brain_cycle_id=str(getattr(signal, "meta", {}).get("brain_cycle_id", "")),
         )
+        if validate_order_contract is not None:
+            pre_contract = validate_order_contract(
+                self.runtime_mode,
+                {
+                    "signal_id": str(signal.signal_id),
+                    "symbol": request.symbol,
+                    "side": request.side.upper(),
+                    "volume": request.volume,
+                    "order_type": request.order_type,
+                    "idempotency_key": command.idempotency_key,
+                    "brain_cycle_id": command.brain_cycle_id,
+                    "pre_execution_context": {"runtime_mode": self.runtime_mode, "provider_mode": pre_ctx.provider_mode},
+                },
+            )
+            self.state.metadata["parity_contract_pre"] = {
+                "ok": bool(pre_contract.ok),
+                "reason": str(pre_contract.reason),
+                "missing": list(pre_contract.missing),
+                "mode": self.runtime_mode,
+            }
+            if self.runtime_mode in {"live", "demo"} and not pre_contract.ok:
+                self.state.error_message = f"parity_contract_pre_failed:{pre_contract.reason}"
+                return
         if self._set_idempotency_status is not None:
             await self._set_idempotency_status(command.idempotency_key, "broker_submitted", command.brain_cycle_id or None)
         await self._emit_event(
@@ -888,6 +916,41 @@ class BotRuntime:
             "status": "filled" if result.success else "rejected",
             "error_message": result.error_message,
         }
+        if validate_order_contract is not None:
+            post_contract = validate_order_contract(
+                self.runtime_mode,
+                {
+                    "signal_id": str(signal.signal_id),
+                    "symbol": result.symbol,
+                    "side": result.side.upper(),
+                    "volume": result.volume,
+                    "order_type": request.order_type,
+                    "idempotency_key": command.idempotency_key,
+                    "brain_cycle_id": command.brain_cycle_id,
+                    "pre_execution_context": {"runtime_mode": self.runtime_mode, "provider_mode": pre_ctx.provider_mode},
+                    "success": bool(result.success),
+                    "submit_status": str(getattr(result, "submit_status", "UNKNOWN") or "UNKNOWN"),
+                    "fill_status": str(getattr(result, "fill_status", "UNKNOWN") or "UNKNOWN"),
+                    "broker_order_id": str(result.order_id or "") or None,
+                },
+            )
+            self.state.metadata["parity_contract_post"] = {
+                "ok": bool(post_contract.ok),
+                "reason": str(post_contract.reason),
+                "missing": list(post_contract.missing),
+                "mode": self.runtime_mode,
+            }
+            if self.runtime_mode == "live" and not post_contract.ok:
+                self.state.error_message = f"parity_contract_post_failed:{post_contract.reason}"
+                await self._emit_event(
+                    "order_unknown",
+                    {
+                        **order_payload,
+                        "status": "unknown",
+                        "error_message": self.state.error_message,
+                    },
+                )
+                return
         self.state.metadata["last_order"] = order_payload
         if self._on_order:
             await self._safe_hook(self._on_order(order_payload), "on_order")

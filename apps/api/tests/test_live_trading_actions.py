@@ -9,7 +9,16 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.db import Base, get_db
 from app.dependencies.auth import get_current_user
-from app.models import BotInstance, BrokerReconciliationRun, DailyTradingState, TradingIncident, User
+from app.models import (
+    BotInstance,
+    BrokerAccountSnapshot,
+    BrokerExecutionReceipt,
+    BrokerReconciliationRun,
+    DailyTradingState,
+    StrategyExperiment,
+    TradingIncident,
+    User,
+)
 from app.routers import live_trading
 
 
@@ -26,6 +35,9 @@ class _FakeRuntime:
             "mismatches": [],
             "repaired": 0,
         }
+
+    async def get_snapshot(self) -> dict:
+        return {"status": "running", "metadata": {"market_data_ok": True}}
 
 
 class _FakeRegistry:
@@ -107,6 +119,47 @@ async def test_live_trading_action_endpoints() -> None:
                 status="open",
             )
         )
+        session.add(
+            BrokerAccountSnapshot(
+                bot_instance_id="bot-1",
+                broker="ctrader",
+                account_id="acc-1",
+                balance=1000.0,
+                equity=1002.0,
+                margin=20.0,
+                free_margin=982.0,
+                margin_level=5010.0,
+                currency="USD",
+                raw_response={},
+            )
+        )
+        session.add(
+            BrokerExecutionReceipt(
+                bot_instance_id="bot-1",
+                idempotency_key="idem-1",
+                broker="ctrader",
+                broker_order_id="ord-1",
+                broker_position_id="pos-1",
+                broker_deal_id="deal-1",
+                submit_status="ACKED",
+                fill_status="FILLED",
+                requested_volume=0.01,
+                filled_volume=0.01,
+                avg_fill_price=1.2,
+                commission=0.0,
+                raw_response={},
+            )
+        )
+        session.add(
+            StrategyExperiment(
+                bot_instance_id="bot-1",
+                version=1,
+                stage="DEMO_TEST",
+                strategy_snapshot={"name": "wave"},
+                policy_snapshot={"risk": 1},
+                metrics_snapshot={"winrate": 0.55},
+            )
+        )
         await session.commit()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -120,6 +173,13 @@ async def test_live_trading_action_endpoints() -> None:
 
         receipts = await client.get("/v1/workspaces/ws-1/bots/bot-1/execution-receipts")
         assert receipts.status_code == 200
+
+        ops = await client.get("/v1/workspaces/ws-1/bots/bot-1/operations-dashboard")
+        assert ops.status_code == 200
+        payload = ops.json()
+        assert payload["runtime"]["status"] == "running"
+        assert payload["latest_account_snapshot"]["currency"] == "USD"
+        assert payload["latest_experiment"]["stage"] == "DEMO_TEST"
 
         incidents = await client.get("/v1/workspaces/ws-1/bots/bot-1/incidents")
         incident_id = incidents.json()[0]["id"]

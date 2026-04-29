@@ -14,6 +14,14 @@ type BotRow = {
   timeframe: string;
 };
 
+type OpsDashboard = {
+  runtime?: { status?: string; error_message?: string; metadata?: Record<string, unknown> };
+  daily_state?: { locked?: boolean; daily_profit_amount?: number; daily_loss_pct?: number; lock_reason?: string };
+  open_incidents?: Array<{ id: number; severity?: string; title?: string }>;
+  latest_account_snapshot?: { equity?: number; free_margin?: number; margin_level?: number; currency?: string };
+  latest_experiment?: { stage?: string; version?: number; updated_at?: string };
+};
+
 function statusClass(status: string): string {
   const value = String(status || '').toLowerCase();
   if (value === 'running') return 'bg-emerald-950 text-emerald-300 border border-emerald-800';
@@ -26,6 +34,7 @@ export default function LiveControlCenterPage() {
   const [workspaceId, setWorkspaceId] = useState<string>('');
   const [bots, setBots] = useState<BotRow[]>([]);
   const [meta, setMeta] = useState<Record<string, { incidents: number; reconStatus: string; dailyLocked: boolean }>>({});
+  const [ops, setOps] = useState<Record<string, OpsDashboard>>({});
   const [actionMsg, setActionMsg] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -52,22 +61,24 @@ export default function LiveControlCenterPage() {
         const entries = await Promise.all(
           liveRows.map(async (bot) => {
             try {
-              const [incResp, recResp, dailyResp] = await Promise.all([
+              const [incResp, recResp, dailyResp, opsResp] = await Promise.all([
                 botApi.incidents(ws.id, bot.id, 20),
                 botApi.reconciliationRuns(ws.id, bot.id, 1),
                 botApi.dailyState(ws.id, bot.id),
+                botApi.operationsDashboard(ws.id, bot.id),
               ]);
               const incidents = ((incResp.data || []) as Array<{ status?: string }>).filter((x) => String(x.status || '').toLowerCase() !== 'resolved').length;
               const recStatus = ((recResp.data || []) as Array<{ status?: string }>)[0]?.status || 'n/a';
               const dailyLocked = Boolean((dailyResp.data || {}).locked);
-              return [bot.id, { incidents, reconStatus: String(recStatus), dailyLocked }] as const;
+              return [bot.id, { incidents, reconStatus: String(recStatus), dailyLocked, ops: (opsResp.data || {}) as OpsDashboard }] as const;
             } catch {
-              return [bot.id, { incidents: 0, reconStatus: 'n/a', dailyLocked: false }] as const;
+              return [bot.id, { incidents: 0, reconStatus: 'n/a', dailyLocked: false, ops: {} as OpsDashboard }] as const;
             }
           })
         );
         if (mounted) {
-          setMeta(Object.fromEntries(entries));
+          setMeta(Object.fromEntries(entries.map(([id, item]) => [id, { incidents: item.incidents, reconStatus: item.reconStatus, dailyLocked: item.dailyLocked }])));
+          setOps(Object.fromEntries(entries.map(([id, item]) => [id, item.ops])));
         }
       } catch (err: any) {
         if (!mounted) return;
@@ -148,6 +159,15 @@ export default function LiveControlCenterPage() {
                 </div>
                 <div className='text-xs text-gray-500 mt-2'>
                   recon: {meta[bot.id]?.reconStatus || 'n/a'} · incidents mở: {meta[bot.id]?.incidents ?? 0} · daily lock: {meta[bot.id]?.dailyLocked ? 'on' : 'off'}
+                </div>
+                <div className='text-xs text-gray-500 mt-1'>
+                  runtime: {String(ops[bot.id]?.runtime?.status || 'n/a')} · stage: {String(ops[bot.id]?.latest_experiment?.stage || 'DRAFT')} v{String(ops[bot.id]?.latest_experiment?.version || '-')}
+                </div>
+                <div className='text-xs text-gray-500 mt-1'>
+                  equity: {ops[bot.id]?.latest_account_snapshot?.equity ?? 'n/a'} {ops[bot.id]?.latest_account_snapshot?.currency || ''} · free margin: {ops[bot.id]?.latest_account_snapshot?.free_margin ?? 'n/a'}
+                </div>
+                <div className='text-xs text-gray-500 mt-1'>
+                  daily pnl: {ops[bot.id]?.daily_state?.daily_profit_amount ?? 'n/a'} · daily loss %: {ops[bot.id]?.daily_state?.daily_loss_pct ?? 'n/a'} · lock reason: {ops[bot.id]?.daily_state?.lock_reason || '—'}
                 </div>
               </div>
               <div className='flex flex-wrap gap-2'>

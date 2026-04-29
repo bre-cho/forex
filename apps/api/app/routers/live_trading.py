@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
 from app.models import AuditLog, User
+from app.services.experiment_registry_service import ExperimentRegistryService
 from app.services.safety_ledger import SafetyLedgerService
 
 router = APIRouter(prefix="/v1/workspaces/{workspace_id}/bots/{bot_id}", tags=["live-trading"])
@@ -25,6 +26,49 @@ async def get_timeline(
 ):
     svc = SafetyLedgerService(db)
     return await svc.timeline(bot_id, limit)
+
+
+@router.get("/operations-dashboard")
+async def get_operations_dashboard(
+    workspace_id: str,
+    bot_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    svc = SafetyLedgerService(db)
+    exps = ExperimentRegistryService(db)
+    registry = _get_registry(request)
+    runtime = registry.get(bot_id) if registry is not None else None
+
+    runtime_snapshot = None
+    if runtime is not None and hasattr(runtime, "get_snapshot"):
+        try:
+            runtime_snapshot = await runtime.get_snapshot()
+        except Exception as exc:
+            runtime_snapshot = {"status": "error", "error_message": str(exc)}
+
+    receipts = await svc.list_execution_receipts(bot_id, 10)
+    transitions = await svc.list_order_state_transitions(bot_id, 10)
+    account_snapshots = await svc.list_broker_account_snapshots(bot_id, 10)
+    reconciliation_runs = await svc.list_reconciliation_runs(bot_id, 10)
+    incidents = await svc.list_incidents(bot_id, 20)
+    daily_state = await svc.get_daily_state(bot_id)
+    experiments = await exps.list_experiments(bot_id, 10)
+
+    return {
+        "bot_id": bot_id,
+        "workspace_id": workspace_id,
+        "runtime": runtime_snapshot,
+        "daily_state": daily_state,
+        "open_incidents": [i for i in incidents if str(getattr(i, "status", "")).lower() != "resolved"],
+        "latest_reconciliation": reconciliation_runs[0] if reconciliation_runs else None,
+        "latest_receipts": receipts,
+        "latest_transitions": transitions,
+        "latest_account_snapshot": account_snapshots[0] if account_snapshots else None,
+        "latest_experiment": experiments[0] if experiments else None,
+        "experiments": experiments,
+    }
 
 
 @router.get("/decision-ledger")

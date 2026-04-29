@@ -38,6 +38,8 @@ expected_fragments = [
     "/gate-events",
     "/daily-state",
     "/incidents",
+    "/account-snapshots",
+    "/operations-dashboard",
 ]
 for frag in expected_fragments:
     if frag not in src_router:
