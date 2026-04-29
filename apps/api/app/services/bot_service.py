@@ -22,9 +22,11 @@ from app.models import (
     Trade,
 )
 from app.services.daily_trading_state import DailyTradingStateService
+from app.services.daily_profit_lock_engine import DailyProfitLockEngine
 from app.services.safety_ledger import SafetyLedgerService
 from app.services.live_readiness_guard import LiveReadinessGuard
 from app.services.policy_service import PolicyService
+from execution_service.order_state_machine import validate_transition
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,41 @@ def _safe_upper(value: Any, default: str = "") -> str:
 
 
 def _runtime_hooks(bot_id: str, bot_mode: str):
+    async def _record_transition_with_validation(
+        ledger: SafetyLedgerService,
+        *,
+        signal_id: str,
+        idempotency_key: str,
+        next_state: str,
+        event_type: str,
+        detail: str | None,
+        payload: dict,
+    ) -> None:
+        attempt = await ledger.get_order_attempt(bot_id, idempotency_key)
+        current_state = str(getattr(attempt, "current_state", "") or "INTENT_CREATED")
+        decision = validate_transition(current_state, next_state)
+        if not decision.ok:
+            if bot_mode == "live":
+                raise RuntimeError(decision.reason)
+            logger.warning("invalid_order_transition [%s] %s", bot_id, decision.reason)
+            return
+        await ledger.record_order_state_transition(
+            bot_instance_id=bot_id,
+            signal_id=signal_id,
+            idempotency_key=idempotency_key,
+            from_state=current_state,
+            to_state=str(next_state or "").upper(),
+            event_type=event_type,
+            detail=detail,
+            payload=dict(payload),
+        )
+        await ledger.update_order_attempt(
+            bot_instance_id=bot_id,
+            idempotency_key=idempotency_key,
+            status=str(getattr(attempt, "status", "PENDING_SUBMIT") if attempt is not None else "PENDING_SUBMIT"),
+            current_state=str(next_state or "").upper(),
+        )
+
     async def on_signal(payload: dict) -> None:
         async with AsyncSessionLocal() as db:
             db.add(
@@ -164,12 +201,14 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                 except Exception as exc:
                     logger.warning("record_gate_event failed [%s]: %s", bot_id, exc)
                 if str(payload.get("gate_action", "")).upper() == "ALLOW":
+                    idem = str(payload.get("idempotency_key") or payload.get("signal_id") or "")
+                    sig = str(payload.get("signal_id") or "")
                     try:
                         await ledger.create_or_get_order_attempt(
                             bot_instance_id=bot_id,
-                            signal_id=str(payload.get("signal_id") or ""),
+                            signal_id=sig,
                             brain_cycle_id=str(payload.get("brain_cycle_id") or "") or None,
-                            idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
+                            idempotency_key=idem,
                             broker=str(payload.get("broker") or ""),
                             symbol=str(payload.get("symbol") or ""),
                             side=str(payload.get("side") or ""),
@@ -181,23 +220,23 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                         if bot_mode == "live":
                             raise RuntimeError(f"create_order_attempt_failed:{exc}") from exc
                         logger.warning("create_order_attempt failed [%s]: %s", bot_id, exc)
-                    await ledger.record_order_state_transition(
-                        bot_instance_id=bot_id,
-                        signal_id=str(payload.get("signal_id") or ""),
-                        idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
-                        from_state="intent_created",
-                        to_state="gate_allowed",
+                    await _record_transition_with_validation(
+                        ledger,
+                        signal_id=sig,
+                        idempotency_key=idem,
+                        next_state="GATE_ALLOWED",
                         event_type="gate_evaluated",
                         detail=str(payload.get("gate_reason") or ""),
                         payload=dict(payload),
                     )
                 elif str(payload.get("gate_action", "")).upper() == "BLOCK":
-                    await ledger.record_order_state_transition(
-                        bot_instance_id=bot_id,
-                        signal_id=str(payload.get("signal_id") or ""),
-                        idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
-                        from_state="intent_created",
-                        to_state="gate_blocked",
+                    idem = str(payload.get("idempotency_key") or payload.get("signal_id") or "")
+                    sig = str(payload.get("signal_id") or "")
+                    await _record_transition_with_validation(
+                        ledger,
+                        signal_id=sig,
+                        idempotency_key=idem,
+                        next_state="GATE_BLOCKED",
                         event_type="gate_evaluated",
                         detail=str(payload.get("gate_reason") or ""),
                         payload=dict(payload),
@@ -229,20 +268,20 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                         bot_instance_id=bot_id,
                         idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
                         status=mapped_status,
+                        current_state=mapped_status,
                         broker_order_id=str(payload.get("broker_order_id") or "") or None,
                         error_message=str(payload.get("error_message") or "") or None,
                     )
                     to_state = {
-                        "order_filled": "filled",
-                        "order_rejected": "rejected",
-                        "order_unknown": "unknown",
+                        "order_filled": "FILLED",
+                        "order_rejected": "REJECTED",
+                        "order_unknown": "UNKNOWN",
                     }[event_type]
-                    await ledger.record_order_state_transition(
-                        bot_instance_id=bot_id,
+                    await _record_transition_with_validation(
+                        ledger,
                         signal_id=str(payload.get("signal_id") or ""),
                         idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
-                        from_state="submitted",
-                        to_state=to_state,
+                        next_state=to_state,
                         event_type=event_type,
                         detail=str(payload.get("error_message") or ""),
                         payload=dict(payload),
@@ -252,34 +291,31 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                         raise RuntimeError(f"update_order_attempt_failed:{exc}") from exc
                     logger.warning("update_order_attempt failed [%s]: %s", bot_id, exc)
             elif event_type == "order_submitted":
-                await ledger.record_order_state_transition(
-                    bot_instance_id=bot_id,
+                await _record_transition_with_validation(
+                    ledger,
                     signal_id=str(payload.get("signal_id") or ""),
                     idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
-                    from_state="gate_allowed",
-                    to_state="submitted",
+                    next_state="SUBMITTED",
                     event_type=event_type,
                     detail="broker_submit_requested",
                     payload=dict(payload),
                 )
             elif event_type == "order_reserved":
-                await ledger.record_order_state_transition(
-                    bot_instance_id=bot_id,
+                await _record_transition_with_validation(
+                    ledger,
                     signal_id=str(payload.get("signal_id") or ""),
                     idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
-                    from_state="gate_allowed",
-                    to_state="reserved",
+                    next_state="RESERVED",
                     event_type=event_type,
                     detail="idempotency_reserved",
                     payload=dict(payload),
                 )
             elif event_type == "open_position_verified":
-                await ledger.record_order_state_transition(
-                    bot_instance_id=bot_id,
+                await _record_transition_with_validation(
+                    ledger,
                     signal_id=str(payload.get("signal_id") or ""),
                     idempotency_key=str(payload.get("idempotency_key") or payload.get("signal_id") or ""),
-                    from_state="filled",
-                    to_state="open_position_verified",
+                    next_state="OPEN_POSITION_VERIFIED",
                     event_type=event_type,
                     detail="position_visible_in_runtime",
                     payload=dict(payload),
@@ -363,6 +399,15 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                 "updated_at": state.updated_at.isoformat() if state.updated_at else None,
             }
 
+    async def evaluate_daily_profit_lock(equity: float) -> dict | None:
+        async with AsyncSessionLocal() as db:
+            engine = DailyProfitLockEngine(db)
+            result = await engine.evaluate_and_apply(
+                bot_instance_id=bot_id,
+                equity=_safe_float(equity, 0.0),
+            )
+            return dict(result)
+
 
     async def get_db_open_trades() -> list[dict]:
         async with AsyncSessionLocal() as db:
@@ -438,6 +483,7 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
         "set_idempotency_status": set_idempotency_status,
         "get_daily_state": get_daily_state,
         "refresh_daily_state_from_broker": refresh_daily_state_from_broker,
+        "evaluate_daily_profit_lock": evaluate_daily_profit_lock,
         "get_db_open_trades": get_db_open_trades,
         "get_policy_approval_status": get_policy_approval_status,
         "close_db_trade": close_db_trade,
@@ -527,6 +573,7 @@ async def create_runtime_for_bot(
             set_idempotency_status=hooks["set_idempotency_status"],
             get_daily_state=hooks["get_daily_state"],
             refresh_daily_state_from_broker=hooks["refresh_daily_state_from_broker"],
+            evaluate_daily_profit_lock=hooks["evaluate_daily_profit_lock"],
             get_db_open_trades=hooks["get_db_open_trades"],
             get_policy_approval_status=hooks["get_policy_approval_status"],
             close_db_trade=hooks["close_db_trade"],

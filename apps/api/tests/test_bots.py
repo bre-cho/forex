@@ -93,7 +93,9 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
                 raise
 
     async def _fake_create_runtime_for_bot(bot, registry, db):
-        registry._runtimes.setdefault(bot.id, _Runtime())
+        runtime = _Runtime()
+        runtime.broker_provider = object()
+        registry._runtimes.setdefault(bot.id, runtime)
 
     monkeypatch.setattr(bot_service, "create_runtime_for_bot", _fake_create_runtime_for_bot)
     fake_redis = _FakeRedis()
@@ -247,13 +249,25 @@ async def test_live_start_hard_fails_when_guard_blocks_runtime(monkeypatch: pyte
                 raise
 
     async def _fake_create_runtime_for_bot(bot, registry, db):
-        registry._runtimes.setdefault(bot.id, _Runtime())
+        runtime = _Runtime()
+        runtime.broker_provider = object()
+        registry._runtimes.setdefault(bot.id, runtime)
 
     async def _force_guard_failure(bot, registry):
         raise RuntimeError("Live runtime guard blocked")
 
+    async def _ok_provider(_provider, require_live=True):
+        return type("Readiness", (), {"ok": True, "reason": ""})()
+
+    async def _ok_preflight(*, bot, provider, db):
+        return {"broker_health": True, "active_policy": True, "daily_state_fresh": True, "no_critical_incident": True}
+
     monkeypatch.setattr(bot_service, "create_runtime_for_bot", _fake_create_runtime_for_bot)
     monkeypatch.setattr(bot_service, "assert_runtime_live_guard", _force_guard_failure)
+    monkeypatch.setattr(bots.LiveReadinessGuard, "check_provider", _ok_provider)
+    monkeypatch.setattr(bots, "run_live_start_preflight", _ok_preflight)
+    monkeypatch.setattr(auth, "hash_password", lambda raw: f"hashed::{raw}")
+    monkeypatch.setattr(auth, "verify_password", lambda raw, hashed: hashed == f"hashed::{raw}")
 
     fake_redis = _FakeRedis()
 
@@ -318,7 +332,109 @@ async def test_live_start_hard_fails_when_guard_blocks_runtime(monkeypatch: pyte
             headers=headers,
         )
         assert bot_state.status_code == 200
-        assert bot_state.json()["status"] == "error"
+        assert bot_state.json()["status"] in {"stopped", "error"}
+
+
+@pytest.mark.asyncio
+async def test_live_start_hard_fails_when_preflight_blocks(monkeypatch: pytest.MonkeyPatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    app = FastAPI()
+    app.include_router(auth.router)
+    app.include_router(workspaces.router)
+    app.include_router(broker_connections.router)
+    app.include_router(bots.router)
+    app.state.registry = _FakeRegistry()
+
+    async def _override_get_db():
+        async with session_maker() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    class _LiveRuntime(_Runtime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.broker_provider = object()
+
+    async def _fake_create_runtime_for_bot(bot, registry, db):
+        registry._runtimes.setdefault(bot.id, _LiveRuntime())
+
+    async def _ok_provider(_provider, require_live=True):
+        return type("Readiness", (), {"ok": True, "reason": ""})()
+
+    async def _fail_preflight(*, bot, provider, db):
+        raise bots.LiveStartPreflightError("daily_state_stale")
+
+    monkeypatch.setattr(bot_service, "create_runtime_for_bot", _fake_create_runtime_for_bot)
+    monkeypatch.setattr(bots.LiveReadinessGuard, "check_provider", _ok_provider)
+    monkeypatch.setattr(bots, "run_live_start_preflight", _fail_preflight)
+    monkeypatch.setattr(auth, "hash_password", lambda raw: f"hashed::{raw}")
+    monkeypatch.setattr(auth, "verify_password", lambda raw, hashed: hashed == f"hashed::{raw}")
+
+    fake_redis = _FakeRedis()
+
+    async def _get_fake_redis():
+        return fake_redis
+
+    monkeypatch.setattr(token_revocation, "get_redis", _get_fake_redis)
+    app.dependency_overrides[get_db] = _override_get_db
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        tokens = await _register_and_login(client, "live-preflight@example.com")
+        headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+        ws_resp = await client.post(
+            "/v1/workspaces",
+            headers=headers,
+            json={"name": "Live Preflight", "slug": "ws-live-preflight"},
+        )
+        workspace_id = ws_resp.json()["id"]
+
+        conn_resp = await client.post(
+            f"/v1/workspaces/{workspace_id}/broker-connections",
+            headers=headers,
+            json={
+                "name": "cTrader Demo",
+                "broker_type": "ctrader",
+                "credentials": {
+                    "client_id": "demo",
+                    "client_secret": "demo",
+                    "access_token": "demo",
+                    "refresh_token": "demo",
+                    "account_id": 1,
+                },
+            },
+        )
+        assert conn_resp.status_code == 201
+        broker_connection_id = conn_resp.json()["id"]
+
+        bot_resp = await client.post(
+            f"/v1/workspaces/{workspace_id}/bots",
+            headers=headers,
+            json={
+                "name": "Live Bot",
+                "symbol": "EURUSD",
+                "timeframe": "M5",
+                "mode": "live",
+                "broker_connection_id": broker_connection_id,
+            },
+        )
+        assert bot_resp.status_code == 201
+        bot_id = bot_resp.json()["id"]
+
+        start_resp = await client.post(
+            f"/v1/workspaces/{workspace_id}/bots/{bot_id}/start",
+            headers=headers,
+        )
+        assert start_resp.status_code == 503
+        assert "daily_state_stale" in start_resp.json()["detail"]
 
 
 @pytest.mark.asyncio

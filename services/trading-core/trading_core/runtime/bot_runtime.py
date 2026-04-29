@@ -60,6 +60,7 @@ class BotRuntime:
         set_idempotency_status: Optional[Callable[[str, str, str | None], Awaitable[bool]]] = None,
         get_daily_state: Optional[Callable[[], Awaitable[Dict[str, Any] | None]]] = None,
         refresh_daily_state_from_broker: Optional[Callable[[float | None], Awaitable[Dict[str, Any] | None]]] = None,
+        evaluate_daily_profit_lock: Optional[Callable[[float], Awaitable[Dict[str, Any] | None]]] = None,
         get_db_open_trades: Optional[Callable[[], Awaitable[list[Dict[str, Any]]]]] = None,
         get_policy_approval_status: Optional[Callable[[], Awaitable[bool]]] = None,
         close_db_trade: Optional[Callable[[str], Awaitable[None]]] = None,
@@ -87,6 +88,7 @@ class BotRuntime:
         self._set_idempotency_status = set_idempotency_status
         self._get_daily_state = get_daily_state
         self._refresh_daily_state_from_broker = refresh_daily_state_from_broker
+        self._evaluate_daily_profit_lock = evaluate_daily_profit_lock
         self._get_db_open_trades = get_db_open_trades
         self._get_policy_approval_status = get_policy_approval_status
         self._close_db_trade = close_db_trade
@@ -541,6 +543,12 @@ class BotRuntime:
                 if refreshed is None:
                     self.state.error_message = "daily_state_refresh_failed"
                     return
+                if self._evaluate_daily_profit_lock is not None:
+                    lock_result = await self._evaluate_daily_profit_lock(equity)
+                    if bool((lock_result or {}).get("locked", False)):
+                        self.state.metadata["daily_lock"] = dict(lock_result or {})
+                        self.state.error_message = str((lock_result or {}).get("reason") or "daily_locked")
+                        return
             daily_state = await self._get_daily_state() if self._get_daily_state else None
             if self.runtime_mode == "live" and daily_state is None:
                 self.state.error_message = "daily_state_unavailable"
@@ -590,6 +598,37 @@ class BotRuntime:
             }
             if self.runtime_mode == "live" and self._get_policy_approval_status is not None:
                 gate_ctx["policy_version_approved"] = bool(await self._get_policy_approval_status())
+
+            risk_ctx = None
+            if self.runtime_mode == "live":
+                try:
+                    from trading_core.risk import RiskContextBuilder
+
+                    open_positions_fn = getattr(self.broker_provider, "get_open_positions", None)
+                    open_positions = await open_positions_fn() if callable(open_positions_fn) else []
+                    risk_ctx = RiskContextBuilder.build(
+                        account_info=account,
+                        open_positions=open_positions or [],
+                        symbol=str(signal.symbol),
+                        entry_price=float(signal.entry_price),
+                        stop_loss=float(signal.sl),
+                        requested_volume=float(signal.lot_size),
+                        risk_pct=float(self.risk_config.get("risk_pct", 0.5)) if isinstance(self.risk_config, dict) else 0.5,
+                    )
+                except Exception as exc:
+                    self.state.error_message = f"risk_context_build_failed:{exc}"
+                    return
+
+            if risk_ctx is not None:
+                gate_ctx.update(
+                    {
+                        "margin_usage_pct": float(risk_ctx.margin_usage_pct),
+                        "free_margin_after_order": float(risk_ctx.free_margin_after_order),
+                        "account_exposure_pct": float(risk_ctx.account_exposure_pct),
+                        "symbol_exposure_pct": float(risk_ctx.symbol_exposure_pct),
+                        "correlated_usd_exposure_pct": float(risk_ctx.correlated_usd_exposure_pct),
+                    }
+                )
             gate_result = self._gate.evaluate(gate_ctx)
             gate_event = {
                 "bot_instance_id": self.bot_instance_id,
@@ -681,6 +720,11 @@ class BotRuntime:
             idempotency_key=str(signal.signal_id),
             brain_cycle_id=str(getattr(signal, "meta", {}).get("brain_cycle_id", "")),
             policy_snapshot=getattr(signal, "meta", {}).get("policy_snapshot", {}),
+            margin_usage_pct=float((gate_ctx or {}).get("margin_usage_pct", 0.0)),
+            free_margin_after_order=float((gate_ctx or {}).get("free_margin_after_order", 0.0)),
+            account_exposure_pct=float((gate_ctx or {}).get("account_exposure_pct", 0.0)),
+            symbol_exposure_pct=float((gate_ctx or {}).get("symbol_exposure_pct", 0.0)),
+            correlated_usd_exposure_pct=float((gate_ctx or {}).get("correlated_usd_exposure_pct", 0.0)),
         )
         command = ExecutionCommand(
             request=request,

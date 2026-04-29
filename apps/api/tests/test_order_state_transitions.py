@@ -41,4 +41,4 @@ async def test_record_and_list_order_state_transitions() -> None:
 
         rows = await svc.list_order_state_transitions("bot-1", limit=10)
         assert len(rows) == 2
-        assert rows[0].to_state in {"submitted", "gate_allowed"}
+        assert rows[0].to_state in {"submitted", "gate_allowed", "SUBMITTED", "GATE_ALLOWED"}

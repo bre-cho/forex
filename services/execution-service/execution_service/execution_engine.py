@@ -157,6 +157,11 @@ class ExecutionEngine:
                     "open_positions": ctx.open_positions,
                     "idempotency_exists": False,
                     "kill_switch": bool(ctx.kill_switch or ctx.daily_locked),
+                    "margin_usage_pct": float(getattr(ctx, "margin_usage_pct", 0.0) or 0.0),
+                    "free_margin_after_order": float(getattr(ctx, "free_margin_after_order", 0.0) or 0.0),
+                    "account_exposure_pct": float(getattr(ctx, "account_exposure_pct", 0.0) or 0.0),
+                    "symbol_exposure_pct": float(getattr(ctx, "symbol_exposure_pct", 0.0) or 0.0),
+                    "correlated_usd_exposure_pct": float(getattr(ctx, "correlated_usd_exposure_pct", 0.0) or 0.0),
                 }
             else:
                 gate_ctx = {

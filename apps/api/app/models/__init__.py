@@ -423,10 +423,23 @@ class BrokerOrderAttempt(Base):
     volume: Mapped[float] = mapped_column(Float, nullable=False)
     request_payload: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(32), default="PENDING_SUBMIT")
+    current_state: Mapped[str] = mapped_column(String(64), default="INTENT_CREATED")
     broker_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class DailyLockEvent(Base):
+    __tablename__ = "daily_lock_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)  # daily_tp_hit | daily_loss_hit | manual_reset
+    lock_action: Mapped[str] = mapped_column(String(64), nullable=False)  # stop_new_orders | close_all_and_stop
+    reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
 class OrderStateTransition(Base):

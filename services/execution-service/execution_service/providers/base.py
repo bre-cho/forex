@@ -84,6 +84,11 @@ class PreExecutionContext:
     kill_switch: bool
     idempotency_key: str
     brain_cycle_id: str
+    margin_usage_pct: float = 0.0
+    free_margin_after_order: float = 0.0
+    account_exposure_pct: float = 0.0
+    symbol_exposure_pct: float = 0.0
+    correlated_usd_exposure_pct: float = 0.0
     policy_snapshot: Dict[str, Any] = field(default_factory=dict)
 
 

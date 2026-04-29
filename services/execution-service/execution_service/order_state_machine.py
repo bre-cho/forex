@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+_ALLOWED: dict[str, set[str]] = {
+    "INTENT_CREATED": {"GATE_ALLOWED", "GATE_BLOCKED"},
+    "GATE_ALLOWED": {"RESERVED"},
+    "RESERVED": {"SUBMITTED"},
+    "SUBMITTED": {"ACKED", "FILLED", "PARTIAL", "REJECTED", "UNKNOWN"},
+    "ACKED": {"FILLED", "PARTIAL", "UNKNOWN"},
+    "PARTIAL": {"OPEN_POSITION_VERIFIED", "UNKNOWN", "CLOSED"},
+    "UNKNOWN": {"RECONCILING"},
+    "RECONCILING": {"FILLED", "REJECTED", "FAILED_NEEDS_OPERATOR"},
+    "FILLED": {"OPEN_POSITION_VERIFIED", "CLOSED"},
+    "OPEN_POSITION_VERIFIED": {"PARTIAL", "CLOSED"},
+}
+
+
+@dataclass(frozen=True)
+class TransitionDecision:
+    ok: bool
+    reason: str = ""
+
+
+def validate_transition(current_state: str | None, next_state: str) -> TransitionDecision:
+    src = str(current_state or "INTENT_CREATED").upper()
+    dst = str(next_state or "").upper()
+    if not dst:
+        return TransitionDecision(False, "missing_next_state")
+    allowed = _ALLOWED.get(src, set())
+    if dst in allowed:
+        return TransitionDecision(True, "ok")
+    if src == dst:
+        return TransitionDecision(True, "idempotent")
+    return TransitionDecision(False, f"invalid_transition:{src}->{dst}")

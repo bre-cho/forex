@@ -13,6 +13,7 @@ from app.models import (
     BrokerOrderEvent,
     BrokerReconciliationRun,
     DailyTradingState,
+    DailyLockEvent,
     OrderIdempotencyReservation,
     OrderStateTransition,
     PreExecutionGateEvent,
@@ -166,11 +167,19 @@ class SafetyLedgerService:
             volume=volume,
             request_payload=request_payload,
             status=status,
+            current_state="INTENT_CREATED",
         )
         self.db.add(row)
         await self.db.commit()
         await self.db.refresh(row)
         return row
+
+    async def get_order_attempt(self, bot_instance_id: str, idempotency_key: str) -> BrokerOrderAttempt | None:
+        stmt = select(BrokerOrderAttempt).where(
+            BrokerOrderAttempt.bot_instance_id == bot_instance_id,
+            BrokerOrderAttempt.idempotency_key == idempotency_key,
+        )
+        return (await self.db.execute(stmt.limit(1))).scalar_one_or_none()
 
     async def update_order_attempt(
         self,
@@ -178,6 +187,7 @@ class SafetyLedgerService:
         bot_instance_id: str,
         idempotency_key: str,
         status: str,
+        current_state: str | None = None,
         broker_order_id: str | None = None,
         error_message: str | None = None,
     ) -> BrokerOrderAttempt | None:
@@ -189,11 +199,34 @@ class SafetyLedgerService:
         if row is None:
             return None
         row.status = str(status or row.status)
+        if current_state is not None:
+            row.current_state = str(current_state or row.current_state)
         if broker_order_id is not None:
             row.broker_order_id = broker_order_id
         if error_message is not None:
             row.error_message = error_message
         row.updated_at = datetime.now(timezone.utc)
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
+
+    async def record_daily_lock_event(
+        self,
+        *,
+        bot_instance_id: str,
+        event_type: str,
+        lock_action: str,
+        reason: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> DailyLockEvent:
+        row = DailyLockEvent(
+            bot_instance_id=bot_instance_id,
+            event_type=event_type,
+            lock_action=lock_action,
+            reason=reason,
+            payload=payload or {},
+        )
+        self.db.add(row)
         await self.db.commit()
         await self.db.refresh(row)
         return row
