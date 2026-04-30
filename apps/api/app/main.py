@@ -14,6 +14,9 @@ from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal
 from app.core.middleware import RequestIDMiddleware
 from app.core.registry import set_registry
+from app.services.environment_runtime_policy import allow_stub_runtime, production_like_env
+from app.services.reconciliation_daemon_health_service import ReconciliationDaemonHealthService
+from app.services.submit_outbox_recovery_health_service import SubmitOutboxRecoveryHealthService
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -32,7 +35,9 @@ async def lifespan(app: FastAPI):
         registry = RuntimeRegistry()
         app.state.registry = registry
         set_registry(registry)
-    except ImportError:
+    except ImportError as exc:
+        if production_like_env():
+            raise RuntimeError("trading_core_required_in_staging_or_production") from exc
         logger.warning("trading_core not available - RuntimeRegistry skipped")
         app.state.registry = None
         set_registry(None)
@@ -263,6 +268,40 @@ async def health_deep():
     }
     return {
         "status": "ok" if all(checks.values()) else "degraded",
+        "env": settings.app_env,
+        "checks": checks,
+    }
+
+
+@app.get("/v1/runtime/production-boundary")
+async def runtime_production_boundary():
+    daemon_enabled = bool(getattr(app.state, "daemon_enabled", False))
+    daemon_task = getattr(app.state, "daemon_task", None)
+    daemon_running = bool(daemon_task is not None and not daemon_task.done())
+    outbox_enabled = bool(getattr(app.state, "submit_outbox_recovery_enabled", False))
+    outbox_task = getattr(app.state, "submit_outbox_recovery_task", None)
+    outbox_running = bool(outbox_task is not None and not outbox_task.done())
+
+    async with AsyncSessionLocal() as db:
+        reconciliation_healthy = await ReconciliationDaemonHealthService.is_healthy(db)
+        outbox_recovery_healthy = await SubmitOutboxRecoveryHealthService.is_healthy(db)
+
+    workers_healthy = bool(reconciliation_healthy and outbox_recovery_healthy)
+    no_stub_runtime = not bool(production_like_env() and allow_stub_runtime())
+    registry_loaded = bool(getattr(app.state, "registry", None) is not None)
+
+    checks = {
+        "legacy_routes_disabled": not bool(settings.enable_legacy_routes),
+        "runtime_registry_loaded": registry_loaded,
+        "no_stub_runtime": no_stub_runtime,
+        "reconciliation_daemon": (daemon_running if daemon_enabled else True),
+        "submit_outbox_recovery_worker": (outbox_running if outbox_enabled else True),
+        "reconciliation_worker_heartbeat": reconciliation_healthy,
+        "submit_outbox_worker_heartbeat": outbox_recovery_healthy,
+        "workers_healthy": workers_healthy,
+    }
+    return {
+        "status": "ok" if all(checks.values()) else "blocked",
         "env": settings.app_env,
         "checks": checks,
     }

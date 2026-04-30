@@ -104,10 +104,21 @@ class Settings(BaseSettings):
     @classmethod
     def check_secrets_not_empty(cls, v: str, info) -> str:
         import os
-        if os.getenv("APP_ENV") == "production" and not v:
-            raise ValueError(
-                f"'{info.field_name}' must be set to a secure value in production"
-            )
+        if os.getenv("APP_ENV") == "production":
+            value = str(v or "").strip()
+            lowered = value.lower()
+            if not value:
+                raise ValueError(
+                    f"'{info.field_name}' must be set to a secure value in production"
+                )
+            if "change_me" in lowered:
+                raise ValueError(
+                    f"'{info.field_name}' must not use placeholder values in production"
+                )
+            if len(value) < 32:
+                raise ValueError(
+                    f"'{info.field_name}' must be at least 32 characters in production"
+                )
         return v
 
 
