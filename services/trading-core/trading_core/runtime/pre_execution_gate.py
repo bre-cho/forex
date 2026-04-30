@@ -186,6 +186,16 @@ class PreExecutionGate:
             return GateResult("BLOCK", "provider_not_live_capable", severity="critical", operator_action="broker_check")
         if context.get("runtime_mode") == "live" and context.get("policy_version_approved") is False:
             return GateResult("BLOCK", "policy_version_unapproved", severity="critical", operator_action="review")
+        if context.get("runtime_mode") == "live":
+            policy_hash = str(context.get("policy_hash", "") or "")
+            if not policy_hash or policy_hash == "policy_hash_unknown":
+                return GateResult("BLOCK", "policy_hash_missing", severity="critical", operator_action="review")
+            if str(context.get("instrument_spec_hash", "") or "") == "":
+                return GateResult("BLOCK", "instrument_spec_hash_missing", severity="critical", operator_action="broker_check")
+            if str(context.get("quote_id", "") or "") == "":
+                return GateResult("BLOCK", "quote_id_missing", severity="critical", operator_action="broker_check")
+            if float(context.get("quote_timestamp", 0.0) or 0.0) <= 0.0:
+                return GateResult("BLOCK", "quote_timestamp_invalid", severity="critical", operator_action="broker_check")
         # P0.3: SL required in live mode when explicitly configured or provided in context.
         # This keeps backwards compatibility for legacy tests/contexts that do not include stop_loss.
         if context.get("runtime_mode") == "live":

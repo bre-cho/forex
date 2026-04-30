@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import AsyncSessionLocal
+from app.core.registry import get_registry
 from app.models import ReconciliationQueueItem, TradingIncident
 from app.services.daily_trading_state import DailyTradingStateService
 from app.services.reconciliation_lease_service import ReconciliationLeaseService
@@ -110,6 +111,46 @@ async def _create_critical_incident(
     )
 
 
+async def _attempt_broker_reconcile(item: ReconciliationQueueItem) -> bool:
+    """Try broker-side UNKNOWN reconciliation for a queue item.
+
+    Returns True if broker status is conclusively resolved (filled/rejected)
+    and queue item can be marked resolved.
+    """
+    try:
+        registry = get_registry()
+        if registry is None or not hasattr(registry, "get"):
+            return False
+        runtime = registry.get(str(item.bot_instance_id))
+        if runtime is None:
+            return False
+        provider = getattr(runtime, "broker_provider", None)
+        if provider is None:
+            return False
+
+        from execution_service.unknown_order_reconciler import UnknownOrderReconciler
+
+        reconciler = UnknownOrderReconciler(
+            provider=provider,
+            max_retries=1,
+            retry_interval_seconds=0.0,
+        )
+        result = await reconciler.resolve_unknown_order(
+            bot_instance_id=str(item.bot_instance_id),
+            idempotency_key=str(item.idempotency_key),
+            signal_id=str(item.signal_id or ""),
+        )
+        return str(result.outcome or "").lower() in {"filled", "rejected"}
+    except Exception as exc:
+        logger.warning(
+            "reconciliation_daemon: broker reconcile failed item=%s bot=%s: %s",
+            getattr(item, "id", None),
+            getattr(item, "bot_instance_id", None),
+            exc,
+        )
+        return False
+
+
 async def _process_item(
     db: AsyncSession,
     item: ReconciliationQueueItem,
@@ -134,6 +175,18 @@ async def _process_item(
             and item.deadline_at.replace(tzinfo=timezone.utc) <= now
         )
         max_attempts_exceeded = attempts >= max_attempts
+
+        # Try broker source-of-truth reconciliation before applying retry/escalation.
+        if age_seconds >= _RETRY_AFTER_AGE_SECONDS:
+            broker_resolved = await _attempt_broker_reconcile(item)
+            if broker_resolved:
+                await queue_svc.mark_resolved(item.bot_instance_id, item.idempotency_key)
+                logger.info(
+                    "reconciliation_daemon: resolved via broker item %d bot=%s",
+                    item.id,
+                    item.bot_instance_id,
+                )
+                return
 
         if deadline_passed or max_attempts_exceeded:
             # Escalate: dead-letter + critical incident + lock bot

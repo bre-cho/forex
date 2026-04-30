@@ -13,6 +13,7 @@ from sqlalchemy import text
 from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal
 from app.core.middleware import RequestIDMiddleware
+from app.core.registry import set_registry
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -30,9 +31,11 @@ async def lifespan(app: FastAPI):
         from trading_core.runtime import RuntimeRegistry
         registry = RuntimeRegistry()
         app.state.registry = registry
+        set_registry(registry)
     except ImportError:
         logger.warning("trading_core not available - RuntimeRegistry skipped")
         app.state.registry = None
+        set_registry(None)
 
     # Warm up Redis
     try:
@@ -81,6 +84,7 @@ async def lifespan(app: FastAPI):
     registry = getattr(app.state, "registry", None)
     if registry:
         await registry.stop_all()
+    set_registry(None)
     from app.core.cache import close_redis
     await close_redis()
 

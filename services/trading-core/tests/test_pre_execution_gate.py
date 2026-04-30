@@ -33,6 +33,10 @@ def _ctx(**kwargs) -> dict:
         "open_positions": 0,
         "idempotency_exists": False,
         "kill_switch": False,
+        "policy_hash": "policy_hash_1",
+        "quote_id": "q-1",
+        "quote_timestamp": 1.0,
+        "instrument_spec_hash": "spec_hash_1",
     }
     base.update(kwargs)
     return base
@@ -44,8 +48,41 @@ def gate():
 
 
 def test_allow_clean_context(gate):
-    result = gate.evaluate(_ctx())
+    result = gate.evaluate(
+        _ctx(
+            policy_hash="policy_hash_1",
+            quote_id="q-1",
+            quote_timestamp=1.0,
+            instrument_spec_hash="spec_hash_1",
+        )
+    )
     assert result.action == "ALLOW"
+
+
+def test_live_missing_policy_hash_blocked(gate):
+    result = gate.evaluate(
+        _ctx(
+            policy_hash="",
+            quote_id="q-1",
+            quote_timestamp=1.0,
+            instrument_spec_hash="spec_hash_1",
+        )
+    )
+    assert result.action == "BLOCK"
+    assert result.reason == "policy_hash_missing"
+
+
+def test_live_missing_quote_binding_blocked(gate):
+    result = gate.evaluate(
+        _ctx(
+            policy_hash="policy_hash_1",
+            instrument_spec_hash="spec_hash_1",
+            quote_id="",
+            quote_timestamp=0.0,
+        )
+    )
+    assert result.action == "BLOCK"
+    assert result.reason in {"quote_id_missing", "quote_timestamp_invalid"}
 
 
 def test_kill_switch_blocks(gate):

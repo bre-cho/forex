@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import hashlib
+import json
 import logging
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional
@@ -16,6 +18,11 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 from .runtime_state import RuntimeState, RuntimeStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _stable_hash_payload(payload: Dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 SignalHook = Callable[[Dict[str, Any]], Awaitable[None]]
 OrderHook = Callable[[Dict[str, Any]], Awaitable[None]]
@@ -565,10 +572,25 @@ class BotRuntime:
             sl = float(signal.sl)
             rr = abs((float(signal.tp) - entry) / (entry - sl)) if abs(entry - sl) > 0 else 0.0
             spread_pips = float(getattr(self.broker_provider, "spread_pips", 0.0))
+            quote_id = ""
+            quote_timestamp = 0.0
+            instrument_spec_hash = ""
+            policy_meta = getattr(signal, "meta", {}) or {}
+            policy_snapshot = policy_meta.get("policy_snapshot", {})
             policy_version = str(
                 (getattr(signal, "meta", {}) or {}).get("policy_version")
                 or (getattr(signal, "meta", {}) or {}).get("policy_version_id")
                 or ""
+            )
+            policy_hash = str(
+                policy_meta.get("policy_hash")
+                or self.state.metadata.get("policy_hash")
+                or _stable_hash_payload(
+                    {
+                        "policy_version": policy_version,
+                        "policy_snapshot": policy_snapshot if isinstance(policy_snapshot, dict) else {},
+                    }
+                )
             )
             if self.runtime_mode == "live" and not policy_version:
                 self.state.error_message = "missing_policy_version"
@@ -599,6 +621,21 @@ class BotRuntime:
                     spread_pips = (ask - bid) / pip_size
                 else:
                     self.state.error_message = "live_quote_missing_spread"
+                    return
+                quote_id = str(
+                    live_quote.get("quote_id")
+                    or live_quote.get("id")
+                    or live_quote.get("tick_id")
+                    or f"{signal.symbol}:{int(time.time() * 1000)}"
+                )
+                quote_timestamp = float(
+                    live_quote.get("timestamp")
+                    or live_quote.get("ts")
+                    or live_quote.get("server_time")
+                    or time.time()
+                )
+                if quote_timestamp <= 0:
+                    self.state.error_message = "live_quote_timestamp_invalid"
                     return
                 account_info_fn = getattr(self.broker_provider, "get_account_info", None)
                 if not callable(account_info_fn):
@@ -646,6 +683,20 @@ class BotRuntime:
                             self.state.error_message = "instrument_spec_missing_live"
                             return
                     if broker_spec_payload:
+                        instrument_spec_hash = _stable_hash_payload(
+                            {
+                                "symbol": str(signal.symbol),
+                                "spec": {
+                                    "pip_size": broker_spec_payload.get("pip_size"),
+                                    "pip_value_per_lot": broker_spec_payload.get("pip_value_per_lot"),
+                                    "contract_size": broker_spec_payload.get("contract_size"),
+                                    "margin_rate": broker_spec_payload.get("margin_rate"),
+                                    "min_lot": broker_spec_payload.get("min_lot"),
+                                    "max_lot": broker_spec_payload.get("max_lot"),
+                                    "lot_step": broker_spec_payload.get("lot_step"),
+                                },
+                            }
+                        )
                         instrument_spec = InstrumentSpec(
                             symbol=str(signal.symbol),
                             pip_size=float(broker_spec_payload.get("pip_size", 0.0001) or 0.0001),
@@ -658,6 +709,20 @@ class BotRuntime:
                         )
                     elif self.runtime_mode != "live":
                         instrument_spec = get_fallback_spec(str(signal.symbol))
+                        instrument_spec_hash = _stable_hash_payload(
+                            {
+                                "symbol": str(signal.symbol),
+                                "spec": {
+                                    "pip_size": instrument_spec.pip_size,
+                                    "pip_value_per_lot_usd": instrument_spec.pip_value_per_lot_usd,
+                                    "contract_size": instrument_spec.contract_size,
+                                    "margin_rate": instrument_spec.margin_rate,
+                                    "min_lot": instrument_spec.min_lot,
+                                    "max_lot": instrument_spec.max_lot,
+                                    "lot_step": instrument_spec.lot_step,
+                                },
+                            }
+                        )
 
                     spec_pip_size = instrument_spec.pip_size if instrument_spec else pip_size_for_symbol(str(signal.symbol))
                     spec_pip_value = instrument_spec.pip_value_per_lot(float(signal.entry_price)) if instrument_spec else pip_value_per_lot(str(signal.symbol))
@@ -715,6 +780,14 @@ class BotRuntime:
                                 },
                             )
                         return
+            if not instrument_spec_hash:
+                instrument_spec_hash = str(self.state.metadata.get("instrument_spec_hash") or "")
+            self.state.metadata["policy_hash"] = policy_hash
+            self.state.metadata["instrument_spec_hash"] = instrument_spec_hash
+            if quote_id:
+                self.state.metadata["quote_id"] = quote_id
+            if quote_timestamp > 0:
+                self.state.metadata["quote_timestamp"] = quote_timestamp
             daily_state = await self._get_daily_state() if self._get_daily_state else None
             if self.runtime_mode == "live" and daily_state is None:
                 self.state.error_message = "daily_state_unavailable"
@@ -776,10 +849,10 @@ class BotRuntime:
                 "slippage_pips": 0.0,  # updated after live quote if available
                 "policy_version": policy_version,
                 "idempotency_key": idempotency_key,
-                "quote_id": "",
-                "quote_timestamp": 0.0,
-                "instrument_spec_hash": str(self.state.metadata.get("instrument_spec_hash") or ""),
-                "policy_hash": str(self.state.metadata.get("policy_hash") or "policy_hash_unknown"),
+                "quote_id": str(quote_id or self.state.metadata.get("quote_id") or ""),
+                "quote_timestamp": float(quote_timestamp or self.state.metadata.get("quote_timestamp") or 0.0),
+                "instrument_spec_hash": str(instrument_spec_hash or self.state.metadata.get("instrument_spec_hash") or ""),
+                "policy_hash": str(policy_hash),
                 "approved_volume": float(signal.lot_size or 0.0),
                 "margin_required": 0.0,
                 "portfolio_exposure_after_trade": 0.0,

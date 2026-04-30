@@ -117,12 +117,14 @@ async def test_process_item_retries_when_old():
     lease_svc.release = AsyncMock()
 
     queue_svc = AsyncMock()
+    queue_svc.mark_resolved = AsyncMock()
     queue_svc.mark_retry = AsyncMock(return_value=True)
     queue_svc.move_to_dead_letter = AsyncMock()
 
     with (
         patch("app.workers.reconciliation_daemon.ReconciliationLeaseService", return_value=lease_svc),
         patch("app.workers.reconciliation_daemon.ReconciliationQueueService", return_value=queue_svc),
+        patch("app.workers.reconciliation_daemon._attempt_broker_reconcile", new=AsyncMock(return_value=False)),
     ):
         await _process_item(db, item, "worker_test")
 
@@ -132,6 +134,39 @@ async def test_process_item_retries_when_old():
         error="unknown_order_unresolved",
         retry_after_seconds=15.0,  # base * 2^0
     )
+    queue_svc.move_to_dead_letter.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_item_marks_resolved_when_broker_reconciles():
+    from app.workers.reconciliation_daemon import _process_item
+
+    item = _make_item(
+        created_at_offset=-60.0,
+        deadline_at_offset=240.0,
+        attempts=0,
+        max_attempts=3,
+    )
+
+    db = AsyncMock()
+    lease_svc = AsyncMock()
+    lease_svc.try_acquire = AsyncMock(return_value=True)
+    lease_svc.release = AsyncMock()
+
+    queue_svc = AsyncMock()
+    queue_svc.mark_resolved = AsyncMock(return_value=True)
+    queue_svc.mark_retry = AsyncMock()
+    queue_svc.move_to_dead_letter = AsyncMock()
+
+    with (
+        patch("app.workers.reconciliation_daemon.ReconciliationLeaseService", return_value=lease_svc),
+        patch("app.workers.reconciliation_daemon.ReconciliationQueueService", return_value=queue_svc),
+        patch("app.workers.reconciliation_daemon._attempt_broker_reconcile", new=AsyncMock(return_value=True)),
+    ):
+        await _process_item(db, item, "worker_test")
+
+    queue_svc.mark_resolved.assert_called_once_with(item.bot_instance_id, item.idempotency_key)
+    queue_svc.mark_retry.assert_not_called()
     queue_svc.move_to_dead_letter.assert_not_called()
 
 
@@ -153,11 +188,13 @@ async def test_process_item_escalates_on_deadline_passed():
     lease_svc.release = AsyncMock()
 
     queue_svc = AsyncMock()
+    queue_svc.mark_resolved = AsyncMock()
     queue_svc.move_to_dead_letter = AsyncMock(return_value=True)
 
     with (
         patch("app.workers.reconciliation_daemon.ReconciliationLeaseService", return_value=lease_svc),
         patch("app.workers.reconciliation_daemon.ReconciliationQueueService", return_value=queue_svc),
+        patch("app.workers.reconciliation_daemon._attempt_broker_reconcile", new=AsyncMock(return_value=False)),
         patch("app.workers.reconciliation_daemon._create_critical_incident", new=AsyncMock()),
         patch("app.workers.reconciliation_daemon._lock_bot_daily_state", new=AsyncMock()),
     ):
@@ -188,11 +225,13 @@ async def test_process_item_escalates_on_max_attempts():
     lease_svc.release = AsyncMock()
 
     queue_svc = AsyncMock()
+    queue_svc.mark_resolved = AsyncMock()
     queue_svc.move_to_dead_letter = AsyncMock(return_value=True)
 
     with (
         patch("app.workers.reconciliation_daemon.ReconciliationLeaseService", return_value=lease_svc),
         patch("app.workers.reconciliation_daemon.ReconciliationQueueService", return_value=queue_svc),
+        patch("app.workers.reconciliation_daemon._attempt_broker_reconcile", new=AsyncMock(return_value=False)),
         patch("app.workers.reconciliation_daemon._create_critical_incident", new=AsyncMock()),
         patch("app.workers.reconciliation_daemon._lock_bot_daily_state", new=AsyncMock()),
     ):
@@ -217,6 +256,7 @@ async def test_process_item_skips_when_lease_unavailable():
     with (
         patch("app.workers.reconciliation_daemon.ReconciliationLeaseService", return_value=lease_svc),
         patch("app.workers.reconciliation_daemon.ReconciliationQueueService", return_value=queue_svc),
+        patch("app.workers.reconciliation_daemon._attempt_broker_reconcile", new=AsyncMock(return_value=False)),
     ):
         await _process_item(db, item, "worker_test")
 
@@ -242,12 +282,14 @@ async def test_process_item_within_grace_period_noop():
     lease_svc.release = AsyncMock()
 
     queue_svc = AsyncMock()
+    queue_svc.mark_resolved = AsyncMock()
     queue_svc.mark_retry = AsyncMock()
     queue_svc.move_to_dead_letter = AsyncMock()
 
     with (
         patch("app.workers.reconciliation_daemon.ReconciliationLeaseService", return_value=lease_svc),
         patch("app.workers.reconciliation_daemon.ReconciliationQueueService", return_value=queue_svc),
+        patch("app.workers.reconciliation_daemon._attempt_broker_reconcile", new=AsyncMock(return_value=False)),
     ):
         await _process_item(db, item, "worker_test")
 

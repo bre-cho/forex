@@ -33,8 +33,10 @@ class CTraderProvider(BrokerProvider):
         symbol: str = "EURUSD",
         timeframe: str = "M5",
         live: bool = False,
+        *,
+        _allow_live_override: bool = False,
     ) -> None:
-        if bool(live):
+        if bool(live) and not bool(_allow_live_override):
             raise ValueError("CTraderProvider is demo-only; use CTraderLiveProvider for live mode")
         self._client_id = client_id
         self._client_secret = client_secret
@@ -44,7 +46,7 @@ class CTraderProvider(BrokerProvider):
         self.symbol = symbol
         self.timeframe = timeframe
         self.provider_name = "ctrader"
-        self.live = False
+        self.live = bool(live)
         self._provider = None
         self._execution_adapter = CTraderUnavailableExecutionAdapter("execution_adapter_not_initialized")
         self._market_data_adapter = CTraderMarketDataAdapter(None)
