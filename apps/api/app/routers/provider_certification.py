@@ -26,12 +26,12 @@ async def get_provider_certification_status(
     current_user: User = Depends(get_current_user),
 ):
     svc = ProviderCertificationService(db)
-    row = await svc.get_latest(
+    gate = await svc.get_live_gate_status(
         bot_instance_id=bot_id,
         provider=provider,
-        mode=mode,
         account_id=account_id,
     )
+    row = gate.get("record")
     if row is None:
         return {
             "bot_instance_id": bot_id,
@@ -39,14 +39,16 @@ async def get_provider_certification_status(
             "mode": mode,
             "live_certified": False,
             "status": "missing",
+            "gate_reason": str(gate.get("reason") or "provider_certification_missing"),
             "record": None,
         }
     return {
         "bot_instance_id": bot_id,
         "provider": provider,
         "mode": mode,
-        "live_certified": bool(row.live_certified),
-        "status": "ok",
+        "live_certified": bool(gate.get("ok", False)),
+        "status": "ok" if bool(gate.get("ok", False)) else "blocked",
+        "gate_reason": str(gate.get("reason") or "ok"),
         "record": row,
     }
 
@@ -101,6 +103,7 @@ async def record_provider_certification(
         symbol=(str(payload.get("symbol")) if payload.get("symbol") else None),
         checks=(checks or {}),
         evidence=(evidence or {}),
+        ttl_seconds=(int(payload.get("ttl_seconds")) if payload.get("ttl_seconds") is not None else None),
         required_checks=required_checks,
         actor_user_id=str(getattr(current_user, "id", "") or "") or None,
     )
@@ -111,5 +114,40 @@ async def record_provider_certification(
         "mode": mode,
         "live_certified": bool(row.live_certified),
         "certification_hash": row.certification_hash,
+        "record": row,
+    }
+
+
+@router.post("/revoke")
+async def revoke_provider_certification(
+    workspace_id: str,
+    bot_id: str,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not bool(getattr(current_user, "is_superuser", False)):
+        raise HTTPException(status_code=403, detail="Admin permission required")
+
+    provider = str(payload.get("provider") or "").strip()
+    if not provider:
+        raise HTTPException(status_code=400, detail="provider is required")
+    reason = str(payload.get("reason") or "revoked_by_operator").strip() or "revoked_by_operator"
+    account_id = str(payload.get("account_id") or "").strip() or None
+
+    svc = ProviderCertificationService(db)
+    row = await svc.revoke_latest(
+        bot_instance_id=bot_id,
+        provider=provider,
+        reason=reason,
+        actor_user_id=str(getattr(current_user, "id", "") or "") or None,
+        account_id=account_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="provider certification record not found")
+    return {
+        "status": "revoked",
+        "bot_instance_id": bot_id,
+        "provider": provider,
         "record": row,
     }

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from sqlalchemy import select
@@ -58,6 +58,7 @@ class ProviderCertificationService:
         symbol: str | None,
         checks: dict[str, Any] | None,
         evidence: dict[str, Any] | None,
+        ttl_seconds: int | None = None,
         required_checks: Iterable[str] | None = None,
         actor_user_id: str | None = None,
     ) -> ProviderCertification:
@@ -78,6 +79,8 @@ class ProviderCertificationService:
         }
         cert_hash = self._canonical_hash(proof_payload)
         now = datetime.now(timezone.utc)
+        ttl = int(ttl_seconds) if ttl_seconds is not None else 24 * 60 * 60
+        expires_at = now.replace(microsecond=0) + timedelta(seconds=max(0, ttl))
 
         row = ProviderCertification(
             bot_instance_id=str(bot_instance_id),
@@ -93,6 +96,7 @@ class ProviderCertificationService:
             evidence=dict(evidence or {}),
             actor_user_id=(str(actor_user_id) if actor_user_id else None),
             certified_at=(now if live_certified else None),
+            expires_at=(expires_at if live_certified else None),
         )
         self.db.add(row)
         await self.db.commit()
@@ -128,13 +132,64 @@ class ProviderCertificationService:
         provider: str,
         account_id: str | None = None,
     ) -> bool:
+        status = await self.get_live_gate_status(
+            bot_instance_id=bot_instance_id,
+            provider=provider,
+            account_id=account_id,
+        )
+        return status["ok"]
+
+    async def get_live_gate_status(
+        self,
+        *,
+        bot_instance_id: str,
+        provider: str,
+        account_id: str | None = None,
+    ) -> dict[str, Any]:
         row = await self.get_latest(
             bot_instance_id=bot_instance_id,
             provider=provider,
             mode="live",
             account_id=account_id,
         )
-        return bool(row and row.live_certified)
+        if row is None:
+            return {"ok": False, "reason": "provider_certification_missing", "record": None}
+        if not bool(row.live_certified):
+            return {"ok": False, "reason": "provider_not_live_certified", "record": row}
+        now = datetime.now(timezone.utc)
+        if getattr(row, "revoked_at", None) is not None:
+            return {"ok": False, "reason": "provider_certification_revoked", "record": row}
+        expires_at = getattr(row, "expires_at", None)
+        if expires_at is not None and expires_at <= now:
+            return {"ok": False, "reason": "provider_certification_expired", "record": row}
+        return {"ok": True, "reason": "ok", "record": row}
+
+    async def revoke_latest(
+        self,
+        *,
+        bot_instance_id: str,
+        provider: str,
+        reason: str,
+        actor_user_id: str | None = None,
+        account_id: str | None = None,
+    ) -> ProviderCertification | None:
+        row = await self.get_latest(
+            bot_instance_id=bot_instance_id,
+            provider=provider,
+            mode="live",
+            account_id=account_id,
+        )
+        if row is None:
+            return None
+        now = datetime.now(timezone.utc)
+        row.revoked_at = now
+        row.revoke_reason = str(reason or "revoked_by_operator")
+        row.live_certified = False
+        if actor_user_id:
+            row.actor_user_id = str(actor_user_id)
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
 
     async def list_for_bot(self, *, bot_instance_id: str, limit: int = 50) -> list[ProviderCertification]:
         stmt = (

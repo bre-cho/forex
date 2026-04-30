@@ -83,7 +83,7 @@ async def test_preflight_fails_closed_if_equity_sync_raises():
          patch("app.services.live_start_preflight.LiveReadinessGuard.assert_live_provider_contract", AsyncMock(return_value=readiness_contract_ok)), \
          patch("app.services.live_start_preflight.LiveReadinessGuard.require_capability_proof", AsyncMock(return_value=readiness_proof_ok)), \
          patch("app.services.live_start_preflight.BrokerCapabilityProofService.record_proof", AsyncMock(return_value="hash")), \
-            patch("app.services.live_start_preflight.ProviderCertificationService.is_live_certified", AsyncMock(return_value=True)), \
+             patch("app.services.live_start_preflight.ProviderCertificationService.get_live_gate_status", AsyncMock(return_value={"ok": True, "reason": "ok", "record": None})), \
          patch("app.services.live_start_preflight.ReconciliationDaemonHealthService.is_healthy", AsyncMock(return_value=True)), \
             patch("app.services.live_start_preflight.SubmitOutboxRecoveryHealthService.is_healthy", AsyncMock(return_value=True)), \
          patch("app.services.live_start_preflight.PolicyService", return_value=policy_mock):
@@ -118,7 +118,7 @@ async def test_preflight_fails_if_equity_is_zero():
          patch("app.services.live_start_preflight.LiveReadinessGuard.assert_live_provider_contract", AsyncMock(return_value=readiness_contract_ok)), \
          patch("app.services.live_start_preflight.LiveReadinessGuard.require_capability_proof", AsyncMock(return_value=readiness_proof_ok)), \
          patch("app.services.live_start_preflight.BrokerCapabilityProofService.record_proof", AsyncMock(return_value="hash")), \
-            patch("app.services.live_start_preflight.ProviderCertificationService.is_live_certified", AsyncMock(return_value=True)), \
+             patch("app.services.live_start_preflight.ProviderCertificationService.get_live_gate_status", AsyncMock(return_value={"ok": True, "reason": "ok", "record": None})), \
          patch("app.services.live_start_preflight.ReconciliationDaemonHealthService.is_healthy", AsyncMock(return_value=True)), \
             patch("app.services.live_start_preflight.SubmitOutboxRecoveryHealthService.is_healthy", AsyncMock(return_value=True)), \
          patch("app.services.live_start_preflight.PolicyService", return_value=policy_mock):
@@ -165,7 +165,7 @@ async def test_preflight_blocks_when_unknown_orders_unresolved():
          patch("app.services.live_start_preflight.LiveReadinessGuard.assert_live_provider_contract", AsyncMock(return_value=readiness_contract_ok)), \
          patch("app.services.live_start_preflight.LiveReadinessGuard.require_capability_proof", AsyncMock(return_value=readiness_proof_ok)), \
          patch("app.services.live_start_preflight.BrokerCapabilityProofService.record_proof", AsyncMock(return_value="hash")), \
-            patch("app.services.live_start_preflight.ProviderCertificationService.is_live_certified", AsyncMock(return_value=True)), \
+             patch("app.services.live_start_preflight.ProviderCertificationService.get_live_gate_status", AsyncMock(return_value={"ok": True, "reason": "ok", "record": None})), \
          patch("app.services.live_start_preflight.ReconciliationDaemonHealthService.is_healthy", AsyncMock(return_value=True)), \
             patch("app.services.live_start_preflight.SubmitOutboxRecoveryHealthService.is_healthy", AsyncMock(return_value=True)), \
          patch("app.services.live_start_preflight.PolicyService", return_value=policy_mock), \
@@ -196,6 +196,32 @@ async def test_preflight_blocks_when_provider_not_live_certified():
          patch("app.services.live_start_preflight.LiveReadinessGuard.assert_live_provider_contract", AsyncMock(return_value=readiness_contract_ok)), \
          patch("app.services.live_start_preflight.LiveReadinessGuard.require_capability_proof", AsyncMock(return_value=readiness_proof_ok)), \
          patch("app.services.live_start_preflight.BrokerCapabilityProofService.record_proof", AsyncMock(return_value="hash")), \
-         patch("app.services.live_start_preflight.ProviderCertificationService.is_live_certified", AsyncMock(return_value=False)):
+         patch("app.services.live_start_preflight.ProviderCertificationService.get_live_gate_status", AsyncMock(return_value={"ok": False, "reason": "provider_not_live_certified", "record": None})):
         with pytest.raises(LiveStartPreflightError, match="provider_not_live_certified"):
+            await run_live_start_preflight(bot=bot, provider=provider, db=db)
+
+
+@pytest.mark.asyncio
+async def test_preflight_blocks_when_provider_certification_expired():
+    bot = MagicMock()
+    bot.id = "bot-5"
+
+    acct = MagicMock()
+    acct.equity = 1000.0
+    provider = MagicMock()
+    provider.provider_name = "ctrader_live"
+    provider.get_account_info = AsyncMock(return_value=acct)
+
+    db = AsyncMock(spec=AsyncSession)
+
+    readiness_ok = MagicMock(ok=True)
+    readiness_contract_ok = MagicMock(ok=True)
+    readiness_proof_ok = MagicMock(ok=True, details={"proof": "ok"})
+
+    with patch("app.services.live_start_preflight.LiveReadinessGuard.check_provider", AsyncMock(return_value=readiness_ok)), \
+         patch("app.services.live_start_preflight.LiveReadinessGuard.assert_live_provider_contract", AsyncMock(return_value=readiness_contract_ok)), \
+         patch("app.services.live_start_preflight.LiveReadinessGuard.require_capability_proof", AsyncMock(return_value=readiness_proof_ok)), \
+         patch("app.services.live_start_preflight.BrokerCapabilityProofService.record_proof", AsyncMock(return_value="hash")), \
+         patch("app.services.live_start_preflight.ProviderCertificationService.get_live_gate_status", AsyncMock(return_value={"ok": False, "reason": "provider_certification_expired", "record": None})):
+        with pytest.raises(LiveStartPreflightError, match="provider_certification_expired"):
             await run_live_start_preflight(bot=bot, provider=provider, db=db)

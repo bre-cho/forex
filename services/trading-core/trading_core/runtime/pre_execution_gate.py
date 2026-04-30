@@ -7,6 +7,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict
 
+from trading_core.runtime.live_no_fallback_guard import LiveNoFallbackGuard
 from trading_core.risk.daily_profit_policy import resolve_daily_take_profit_target
 
 
@@ -225,6 +226,9 @@ class PreExecutionGate:
         if context.get("runtime_mode") == "live" and context.get("policy_version_approved") is False:
             return GateResult("BLOCK", "policy_version_unapproved", severity="critical", operator_action="review")
         if context.get("runtime_mode") == "live":
+            fallback_check = LiveNoFallbackGuard.evaluate(context)
+            if not fallback_check.ok:
+                return GateResult("BLOCK", fallback_check.reason, severity="critical", operator_action="broker_check")
             if str(context.get("schema_version", "") or "") != "gate_context_v2":
                 return GateResult("BLOCK", "gate_context_schema_v2_required", severity="critical", operator_action="review")
             policy_hash = str(context.get("policy_hash", "") or "")

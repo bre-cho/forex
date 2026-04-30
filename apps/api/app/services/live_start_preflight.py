@@ -98,14 +98,14 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
 
     provider_name = str(getattr(provider, "provider_name", type(provider).__name__) or "")
     cert_svc = ProviderCertificationService(db)
-    certified = await cert_svc.is_live_certified(
+    cert_gate = await cert_svc.get_live_gate_status(
         bot_instance_id=str(bot.id),
         provider=provider_name,
         account_id=account_id or None,
     )
-    checks["provider_certified"] = bool(certified)
-    if not certified:
-        raise LiveStartPreflightError("provider_not_live_certified")
+    checks["provider_certified"] = bool(cert_gate.get("ok", False))
+    if not cert_gate.get("ok", False):
+        raise LiveStartPreflightError(str(cert_gate.get("reason") or "provider_not_live_certified"))
 
     daemon_healthy = await ReconciliationDaemonHealthService.is_healthy(db)
     checks["reconciliation_daemon_healthy"] = bool(daemon_healthy)

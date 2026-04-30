@@ -30,11 +30,18 @@ if model.exists():
     src = model.read_text()
     check("class ProviderCertification" in src, "ProviderCertification model exists")
     check('"provider_certifications"' in src or "'provider_certifications'" in src, "provider_certifications table mapped")
+    check("expires_at" in src, "ProviderCertification has expires_at")
+    check("revoked_at" in src, "ProviderCertification has revoked_at")
 
 if preflight.exists():
     src = preflight.read_text()
     check("ProviderCertificationService" in src, "live_start_preflight imports ProviderCertificationService")
     check("provider_not_live_certified" in src, "live_start_preflight blocks when provider is not certified")
+
+if svc.exists():
+    svc_src = svc.read_text()
+    check("provider_certification_expired" in svc_src, "provider certification service handles expired certification")
+    check("provider_certification_revoked" in svc_src, "provider certification service handles revoked certification")
 
 if main_py.exists():
     src = main_py.read_text()

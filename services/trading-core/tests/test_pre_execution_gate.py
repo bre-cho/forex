@@ -107,6 +107,18 @@ def test_live_stub_provider_blocked(gate):
     assert result.reason == "provider_not_live_capable"
 
 
+def test_live_fallback_instrument_spec_blocked(gate):
+    result = gate.evaluate(_ctx(instrument_spec_source="fallback"))
+    assert result.action == "BLOCK"
+    assert result.reason == "instrument_spec_source_fallback_forbidden_in_live"
+
+
+def test_live_fallback_quote_blocked(gate):
+    result = gate.evaluate(_ctx(quote_source="fallback"))
+    assert result.action == "BLOCK"
+    assert result.reason == "quote_source_fallback_forbidden_in_live"
+
+
 def test_live_degraded_provider_blocked(gate):
     result = gate.evaluate(_ctx(provider_mode="degraded"))
     assert result.action == "BLOCK"
