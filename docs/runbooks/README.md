@@ -1,5 +1,9 @@
 # Operational Runbooks
 
+## Runbook Index
+
+- [Integrity Worker Runbook](integrity-worker.md)
+
 ## Starting the Platform
 
 ```bash
@@ -31,6 +35,21 @@ alembic downgrade -1
 - Prometheus: http://localhost:9090
 - Grafana: http://localhost:3100 (admin/admin)
 - API logs: `docker compose logs api -f`
+
+## Integrity Worker
+
+```bash
+# Worker logs
+docker compose -f infra/docker/docker-compose.prod.yml logs -f integrity-worker
+
+# Run one-shot integrity check inside API container
+docker compose -f infra/docker/docker-compose.prod.yml exec api \
+	python -m app.workers.verify_order_ledger_integrity
+```
+
+Chi tiết biến môi trường, override lịch và xử lý incident:
+
+- [Integrity Worker Runbook](integrity-worker.md)
 
 ## Incident Response
 
