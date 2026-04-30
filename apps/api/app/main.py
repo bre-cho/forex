@@ -67,6 +67,22 @@ async def lifespan(app: FastAPI):
         app.state.daemon_task = None
         logger.info("Reconciliation daemon disabled by config")
 
+    app.state.submit_outbox_recovery_enabled = bool(settings.enable_submit_outbox_recovery_worker)
+    if app.state.submit_outbox_recovery_enabled:
+        from app.workers.submit_outbox_recovery_worker import run_submit_outbox_recovery_worker
+
+        _outbox_stop = _asyncio.Event()
+        _outbox_task = _asyncio.create_task(
+            run_submit_outbox_recovery_worker(stop_event=_outbox_stop),
+            name="submit_outbox_recovery_worker",
+        )
+        app.state.submit_outbox_recovery_stop = _outbox_stop
+        app.state.submit_outbox_recovery_task = _outbox_task
+    else:
+        app.state.submit_outbox_recovery_stop = None
+        app.state.submit_outbox_recovery_task = None
+        logger.info("Submit outbox recovery worker disabled by config")
+
     yield
 
     logger.info("Shutting down Forex API")
@@ -80,6 +96,16 @@ async def lifespan(app: FastAPI):
             await _asyncio.wait_for(_daemon_task, timeout=5.0)
         except (_asyncio.TimeoutError, _asyncio.CancelledError):
             _daemon_task.cancel()
+
+    _outbox_stop = getattr(app.state, "submit_outbox_recovery_stop", None)
+    _outbox_task = getattr(app.state, "submit_outbox_recovery_task", None)
+    if _outbox_stop is not None:
+        _outbox_stop.set()
+    if _outbox_task is not None:
+        try:
+            await _asyncio.wait_for(_outbox_task, timeout=5.0)
+        except (_asyncio.TimeoutError, _asyncio.CancelledError):
+            _outbox_task.cancel()
 
     registry = getattr(app.state, "registry", None)
     if registry:
@@ -184,11 +210,16 @@ async def health_live():
     daemon_task = getattr(app.state, "daemon_task", None)
     daemon_enabled = bool(getattr(app.state, "daemon_enabled", False))
     daemon_running = bool(daemon_task is not None and not daemon_task.done())
+    outbox_task = getattr(app.state, "submit_outbox_recovery_task", None)
+    outbox_enabled = bool(getattr(app.state, "submit_outbox_recovery_enabled", False))
+    outbox_running = bool(outbox_task is not None and not outbox_task.done())
     return {
         "status": "ok",
         "env": settings.app_env,
         "daemon_enabled": daemon_enabled,
         "daemon_running": daemon_running,
+        "submit_outbox_recovery_enabled": outbox_enabled,
+        "submit_outbox_recovery_running": outbox_running,
         "legacy_routes_enabled": bool(settings.enable_legacy_routes),
     }
 
@@ -217,11 +248,15 @@ async def health_deep():
     daemon_task = getattr(app.state, "daemon_task", None)
     daemon_enabled = bool(getattr(app.state, "daemon_enabled", False))
     daemon_running = bool(daemon_task is not None and not daemon_task.done())
+    outbox_task = getattr(app.state, "submit_outbox_recovery_task", None)
+    outbox_enabled = bool(getattr(app.state, "submit_outbox_recovery_enabled", False))
+    outbox_running = bool(outbox_task is not None and not outbox_task.done())
 
     checks = {
         "db": db_ok,
         "redis": redis_ok,
         "reconciliation_daemon": (daemon_running if daemon_enabled else True),
+        "submit_outbox_recovery_worker": (outbox_running if outbox_enabled else True),
         "legacy_routes_disabled": not bool(settings.enable_legacy_routes),
     }
     return {

@@ -132,6 +132,7 @@ async def test_process_item_retries_when_old():
         item.bot_instance_id,
         item.idempotency_key,
         error="unknown_order_unresolved",
+        resolution_code="unknown",
         retry_after_seconds=15.0,  # base * 2^0
     )
     queue_svc.move_to_dead_letter.assert_not_called()
@@ -204,6 +205,7 @@ async def test_process_item_escalates_on_deadline_passed():
         item.bot_instance_id,
         item.idempotency_key,
         error="deadline_passed",
+        resolution_code="unknown",
     )
 
 

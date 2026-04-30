@@ -94,12 +94,43 @@ export const botApi = {
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/operations-dashboard`),
   reconcileNow: (workspaceId: string, botId: string) =>
     api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/reconcile-now`),
+  resolveReconciliationItem: (
+    workspaceId: string,
+    botId: string,
+    queueItemId: number,
+    data: {
+      outcome: 'filled' | 'rejected';
+      broker_proof: {
+        provider: string;
+        evidence_ref: string;
+        observed_at: string;
+        payload_hash?: string;
+        raw_response_hash?: string;
+        broker_order_id?: string;
+        broker_deal_id?: string;
+        broker_position_id?: string;
+      };
+    }
+  ) =>
+    api.post(
+      `/v1/workspaces/${workspaceId}/bots/${botId}/reconciliation/${queueItemId}/resolve`,
+      data
+    ),
   killSwitch: (workspaceId: string, botId: string) =>
     api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/kill-switch`),
   resetKillSwitch: (workspaceId: string, botId: string) =>
     api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/reset-kill-switch`),
-  resetDailyLock: (workspaceId: string, botId: string, reason: string) =>
-    api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/daily-state/reset-lock`, { reason }),
+  resetDailyLock: (
+    workspaceId: string,
+    botId: string,
+    reason: string,
+    options?: { scope?: 'bot' | 'portfolio'; acknowledgeOperatorAction?: boolean }
+  ) =>
+    api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/daily-state/reset-lock`, {
+      reason,
+      scope: options?.scope ?? 'bot',
+      acknowledge_operator_action: Boolean(options?.acknowledgeOperatorAction),
+    }),
   resolveIncident: (workspaceId: string, botId: string, incidentId: number) =>
     api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/incidents/${incidentId}/resolve`),
   signals: (workspaceId: string, botId: string) =>

@@ -6,7 +6,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import DailyTradingState
+from app.models import BotInstance, DailyTradingState
 from app.services.trading_day_resolver import TradingDayResolver
 
 # Default resolver: Forex rollover at 22:00 UTC (NY close).
@@ -97,3 +97,54 @@ class DailyTradingStateService:
         await self.db.commit()
         await self.db.refresh(state)
         return state
+
+    async def lock_workspace_day(
+        self,
+        workspace_id: str,
+        reason: str,
+        trading_day: Optional[date] = None,
+    ) -> list[DailyTradingState]:
+        trading_day = trading_day or self._current_trading_day()
+        bot_ids = (
+            (
+                await self.db.execute(
+                    select(BotInstance.id).where(BotInstance.workspace_id == workspace_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        rows: list[DailyTradingState] = []
+        for bot_id in bot_ids:
+            state = await self.get_or_create(str(bot_id), trading_day=trading_day)
+            state.locked = True
+            state.lock_reason = reason
+            state.updated_at = datetime.now(timezone.utc)
+            rows.append(state)
+        await self.db.commit()
+        return rows
+
+    async def reset_workspace_locks(
+        self,
+        workspace_id: str,
+        trading_day: Optional[date] = None,
+    ) -> list[DailyTradingState]:
+        trading_day = trading_day or self._current_trading_day()
+        bot_ids = (
+            (
+                await self.db.execute(
+                    select(BotInstance.id).where(BotInstance.workspace_id == workspace_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        rows: list[DailyTradingState] = []
+        for bot_id in bot_ids:
+            state = await self.get_or_create(str(bot_id), trading_day=trading_day)
+            state.locked = False
+            state.lock_reason = None
+            state.updated_at = datetime.now(timezone.utc)
+            rows.append(state)
+        await self.db.commit()
+        return rows

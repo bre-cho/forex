@@ -42,6 +42,7 @@ class OrderLifecycleUnitOfWork:
                 side=side,
                 volume=volume,
                 request_payload=request_payload,
+                frozen_context_id=str(request_payload.get("frozen_context_id") or "") or None,
                 gate_context_hash=gate_context_hash,
                 status="PENDING_SUBMIT",
                 auto_commit=False,
@@ -80,11 +81,18 @@ class OrderLifecycleUnitOfWork:
             "order_unknown": "UNKNOWN",
         }[event_type]
 
+        payload_frozen_context_id = str(payload.get("frozen_context_id") or "") or None
+
         async with self.db.begin():
+            attempt_before = await self.ledger.get_order_attempt(bot_instance_id, idempotency_key)
+            if payload_frozen_context_id is None and attempt_before is not None:
+                payload_frozen_context_id = str(getattr(attempt_before, "frozen_context_id", "") or "") or None
+
             receipt = await self.ledger.record_execution_receipt(
                 bot_instance_id=bot_instance_id,
                 idempotency_key=idempotency_key,
                 client_order_id=str(payload.get("client_order_id") or idempotency_key),
+                frozen_context_id=payload_frozen_context_id,
                 broker=broker,
                 broker_order_id=str(payload.get("broker_order_id") or "") or None,
                 broker_position_id=str(payload.get("broker_position_id") or "") or None,
@@ -109,6 +117,7 @@ class OrderLifecycleUnitOfWork:
                 current_state=mapped_status,
                 broker_order_id=str(payload.get("broker_order_id") or "") or None,
                 error_message=str(payload.get("error_message") or "") or None,
+                frozen_context_id=payload_frozen_context_id,
                 auto_commit=False,
             )
             if attempt is not None:

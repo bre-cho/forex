@@ -121,3 +121,50 @@ def test_risk_context_builder_raises_if_no_equity():
             risk_pct=1.0,
             runtime_mode="paper",
         )
+
+
+def test_risk_context_builder_normalizes_exposure_to_account_currency():
+    class JPYAccount(MockAccountInfo):
+        def __init__(self):
+            super().__init__(equity=100000.0, free_margin=90000.0, margin=10000.0)
+            self.currency = "JPY"
+
+    info = JPYAccount()
+    spec = InstrumentSpec("EURUSD", "forex", 100000, 0.0001, 0.00001, 0.01, 500.0, 0.01, 0.01, "USD", "EUR")
+    ctx = RiskContextBuilder.build(
+        account_info=info,
+        open_positions=[],
+        symbol="EURUSD",
+        entry_price=1.10,
+        stop_loss=1.09,
+        requested_volume=0.1,
+        risk_pct=1.0,
+        instrument_spec=spec,
+        runtime_mode="live",
+        broker_margin_required=1000.0,
+        quote_snapshots={"USDJPY": {"bid": 150.0, "ask": 150.0}},
+    )
+    assert ctx.account_exposure_pct == pytest.approx(1650.0, abs=1.0)
+
+
+def test_risk_context_builder_includes_commission_and_slippage_in_max_loss():
+    info = MockAccountInfo(equity=10000.0, free_margin=8000.0, margin=2000.0)
+    spec = InstrumentSpec("EURUSD", "forex", 100000, 0.0001, 0.00001, 0.01, 500.0, 0.01, 0.01, "USD", "EUR")
+    ctx = RiskContextBuilder.build(
+        account_info=info,
+        open_positions=[],
+        symbol="EURUSD",
+        entry_price=1.1000,
+        stop_loss=1.0990,
+        requested_volume=0.1,
+        risk_pct=1.0,
+        instrument_spec=spec,
+        runtime_mode="live",
+        broker_margin_required=100.0,
+        slippage_pips=2.0,
+        commission_per_lot=7.0,
+    )
+    # Price/SL loss: 10 pips * $10 * 0.1 = 10
+    # Slippage:     2 pips * $10 * 0.1 = 2
+    # Commission:   $7 * 0.1 = 0.7
+    assert ctx.max_loss_amount_if_sl_hit == pytest.approx(12.7, abs=1e-6)

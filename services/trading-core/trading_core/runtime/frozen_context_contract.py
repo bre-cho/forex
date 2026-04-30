@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import hmac
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,9 +48,21 @@ def validate_frozen_context_bindings(*, request: Any, context: Any, provider_nam
         "broker_account_snapshot_hash",
         "risk_context_hash",
         "policy_hash",
+        "frozen_context_id",
+        "context_signature",
     ):
         if str(gate_ctx.get(key, "") or "") == "":
             return FrozenContextValidationResult(False, f"missing_gate_context_{key}")
+
+    if str(getattr(context, "frozen_context_id", "") or "") == "":
+        return FrozenContextValidationResult(False, "missing_frozen_context_id")
+    if str(getattr(context, "context_signature", "") or "") == "":
+        return FrozenContextValidationResult(False, "missing_context_signature")
+
+    if str(getattr(context, "frozen_context_id", "") or "") != str(gate_ctx.get("frozen_context_id", "") or ""):
+        return FrozenContextValidationResult(False, "frozen_context_id_mismatch")
+    if str(getattr(context, "context_signature", "") or "") != str(gate_ctx.get("context_signature", "") or ""):
+        return FrozenContextValidationResult(False, "context_signature_mismatch")
 
     ctx_idempotency = str(getattr(context, "idempotency_key", "") or "")
     gate_idempotency = str(gate_ctx.get("idempotency_key", "") or "")
@@ -109,10 +124,23 @@ def validate_frozen_context_bindings(*, request: Any, context: Any, provider_nam
 
     stored_hash = str(getattr(context, "context_hash", "") or "")
     if stored_hash:
-        from trading_core.runtime.pre_execution_gate import hash_gate_context
+        from trading_core.runtime.pre_execution_gate import hash_gate_context, build_frozen_context_id
 
         computed_hash = hash_gate_context(gate_ctx)
         if computed_hash != stored_hash:
             return FrozenContextValidationResult(False, "gate_context_hash_mismatch")
+        computed_frozen_id = build_frozen_context_id(gate_ctx)
+        if computed_frozen_id != str(getattr(context, "frozen_context_id", "") or ""):
+            return FrozenContextValidationResult(False, "frozen_context_id_hash_mismatch")
+
+    secret = str(os.getenv("FROZEN_CONTEXT_HMAC_SECRET") or os.getenv("APP_SECRET_KEY") or "")
+    if secret:
+        expected = hmac.new(
+            secret.encode("utf-8"),
+            str(stored_hash).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if expected != str(getattr(context, "context_signature", "") or ""):
+            return FrozenContextValidationResult(False, "context_signature_invalid")
 
     return FrozenContextValidationResult(True, "ok")

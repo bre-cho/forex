@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
     enable_reconciliation_daemon: bool = True
+    enable_submit_outbox_recovery_worker: bool = True
     enable_legacy_routes: bool = False
 
     # JWT

@@ -6,8 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
-from app.models import AuditLog, ReconciliationQueueItem, User
+from app.models import AuditLog, BotInstance, ReconciliationAttemptEvent, ReconciliationQueueItem, TradingIncident, User
 from app.services.experiment_registry_service import ExperimentRegistryService
+from app.services.daily_trading_state import DailyTradingStateService
 from app.services.order_ledger_service import OrderLedgerService
 from app.services.reconciliation_queue_service import ReconciliationQueueService
 from app.services.safety_ledger import SafetyLedgerService
@@ -182,6 +183,47 @@ async def get_reconciliation_runs(
     return await svc.list_reconciliation_runs(bot_id, limit)
 
 
+@router.get("/reconciliation/queue-items")
+async def list_reconciliation_queue_items(
+    workspace_id: str,
+    bot_id: str,
+    statuses: str = "failed_needs_operator,dead_letter,pending,retry",
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    allowed = {
+        "pending",
+        "retry",
+        "in_progress",
+        "resolved",
+        "cancelled",
+        "failed_needs_operator",
+        "dead_letter",
+    }
+    requested = [str(s).strip().lower() for s in str(statuses or "").split(",") if str(s).strip()]
+    filtered = [s for s in requested if s in allowed]
+    if not filtered:
+        filtered = ["failed_needs_operator", "dead_letter", "pending", "retry"]
+
+    rows = (
+        (
+            await db.execute(
+                select(ReconciliationQueueItem)
+                .where(
+                    ReconciliationQueueItem.bot_instance_id == bot_id,
+                    ReconciliationQueueItem.status.in_(filtered),
+                )
+                .order_by(ReconciliationQueueItem.updated_at.desc())
+                .limit(max(1, min(int(limit), 500)))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return rows
+
+
 @router.post("/reconciliation/{queue_item_id}/resolve")
 async def manual_resolve_reconciliation_item(
     workspace_id: str,
@@ -218,6 +260,27 @@ async def manual_resolve_reconciliation_item(
     proof_payload = dict((payload or {}).get("broker_proof") or {})
     if not proof_payload:
         raise HTTPException(status_code=400, detail="broker_proof_required")
+    provider_name = str(proof_payload.get("provider") or "").strip()
+    evidence_ref = str(proof_payload.get("evidence_ref") or "").strip()
+    observed_at = str(proof_payload.get("observed_at") or "").strip()
+    payload_hash = str(proof_payload.get("payload_hash") or proof_payload.get("raw_response_hash") or "").strip()
+    if not provider_name or not evidence_ref or not observed_at:
+        raise HTTPException(
+            status_code=400,
+            detail="broker_proof_invalid_missing_fields:provider|evidence_ref|observed_at",
+        )
+    if not payload_hash:
+        raise HTTPException(status_code=400, detail="broker_proof_missing_payload_hash")
+    if outcome == "filled":
+        has_fill_identity = any(
+            str(proof_payload.get(k) or "").strip()
+            for k in ("broker_order_id", "broker_deal_id", "broker_position_id")
+        )
+        if not has_fill_identity:
+            raise HTTPException(
+                status_code=400,
+                detail="broker_proof_missing_fill_identity",
+            )
 
     ledger = OrderLedgerService(db)
     event_type = "order_filled" if outcome == "filled" else "order_rejected"
@@ -225,7 +288,7 @@ async def manual_resolve_reconciliation_item(
         bot_instance_id=str(bot_id),
         event_type=event_type,
         idempotency_key=str(row.idempotency_key),
-        broker=str(proof_payload.get("provider") or "manual_reconcile"),
+        broker=provider_name or "manual_reconcile",
         payload={
             **proof_payload,
             "manual_resolution": True,
@@ -259,6 +322,49 @@ async def manual_resolve_reconciliation_item(
         "idempotency_key": str(row.idempotency_key),
         "outcome": outcome,
     }
+
+
+@router.get("/reconciliation/{queue_item_id}/attempt-events")
+async def list_reconciliation_attempt_events(
+    workspace_id: str,
+    bot_id: str,
+    queue_item_id: int,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    queue_row = (
+        (
+            await db.execute(
+                select(ReconciliationQueueItem)
+                .where(
+                    ReconciliationQueueItem.id == queue_item_id,
+                    ReconciliationQueueItem.bot_instance_id == bot_id,
+                )
+                .limit(1)
+            )
+        )
+        .scalar_one_or_none()
+    )
+    if queue_row is None:
+        raise HTTPException(status_code=404, detail="reconciliation_queue_item_not_found")
+
+    rows = (
+        (
+            await db.execute(
+                select(ReconciliationAttemptEvent)
+                .where(
+                    ReconciliationAttemptEvent.queue_item_id == queue_item_id,
+                    ReconciliationAttemptEvent.bot_instance_id == bot_id,
+                )
+                .order_by(ReconciliationAttemptEvent.created_at.desc())
+                .limit(max(1, min(int(limit), 500)))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return rows
 
 
 @router.post("/reconcile-now")
@@ -316,31 +422,94 @@ async def reset_daily_state_lock(
     reason = str((payload or {}).get("reason") or "").strip()
     if not reason:
         raise HTTPException(status_code=400, detail="Reset reason required")
+    scope = str((payload or {}).get("scope") or "bot").strip().lower()
+    if scope not in {"bot", "portfolio"}:
+        raise HTTPException(status_code=400, detail="scope must be bot|portfolio")
+    acknowledged = bool((payload or {}).get("acknowledge_operator_action", False))
+
+    related_bot_ids = [bot_id]
+    if scope == "portfolio":
+        bot_ids = (
+            (
+                await db.execute(
+                    select(BotInstance.id).where(BotInstance.workspace_id == workspace_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        related_bot_ids = [str(b) for b in bot_ids]
+
     svc = SafetyLedgerService(db)
-    state = await svc.reset_daily_lock(bot_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Daily state not found")
+    open_critical = (
+        (
+            await db.execute(
+                select(TradingIncident)
+                .where(
+                    TradingIncident.bot_instance_id.in_(related_bot_ids),
+                    TradingIncident.status != "resolved",
+                    TradingIncident.severity == "critical",
+                    TradingIncident.incident_type.in_(
+                        [
+                            "daily_lock_close_all_postcondition_failed",
+                            "daily_lock_controller_failure",
+                        ]
+                    ),
+                )
+                .limit(1)
+            )
+        )
+        .scalar_one_or_none()
+    )
+    if open_critical is not None and not acknowledged:
+        raise HTTPException(
+            status_code=409,
+            detail="operator_ack_required_for_open_critical_daily_lock_incident",
+        )
+
+    daily = DailyTradingStateService(db)
+    if scope == "portfolio":
+        states = await daily.reset_workspace_locks(workspace_id)
+        if not states:
+            raise HTTPException(status_code=404, detail="No bots found for workspace")
+    else:
+        state = await svc.reset_daily_lock(bot_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="Daily state not found")
+        states = [state]
+
     db.add(
         AuditLog(
             user_id=str(getattr(current_user, "id", "") or ""),
             action="daily_state_reset_lock",
-            resource_type="bot_instance",
-            resource_id=bot_id,
-            details={"reason": reason, "workspace_id": workspace_id},
+            resource_type="workspace" if scope == "portfolio" else "bot_instance",
+            resource_id=workspace_id if scope == "portfolio" else bot_id,
+            details={
+                "reason": reason,
+                "workspace_id": workspace_id,
+                "scope": scope,
+                "acknowledge_operator_action": acknowledged,
+                "bot_ids": related_bot_ids,
+            },
         )
     )
     await db.commit()
     registry = _get_registry(request)
-    if registry is not None and registry.get(bot_id) is not None:
-        runtime = registry.get(bot_id)
+    for target_bot_id in related_bot_ids:
+        if registry is None or registry.get(target_bot_id) is None:
+            continue
+        runtime = registry.get(target_bot_id)
         state_obj = getattr(runtime, "state", None)
         metadata = getattr(state_obj, "metadata", {})
         if isinstance(metadata, dict):
             metadata["kill_switch"] = False
+            metadata["new_orders_paused"] = False
     return {
         "bot_instance_id": bot_id,
-        "locked": bool(state.locked),
-        "lock_reason": state.lock_reason,
+        "scope": scope,
+        "affected_bots": [str(getattr(s, "bot_instance_id", "")) for s in states],
+        "locked": any(bool(getattr(s, "locked", False)) for s in states),
+        "lock_reason": next((getattr(s, "lock_reason", None) for s in states if getattr(s, "lock_reason", None)), None),
     }
 
 

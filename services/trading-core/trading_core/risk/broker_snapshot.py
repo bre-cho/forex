@@ -16,7 +16,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Iterable, Optional
 
 
 def _stable_hash(data: dict) -> str:
@@ -92,6 +92,17 @@ class BrokerQuoteSnapshot:
         if self.timestamp <= 0:
             raise ValueError(f"BrokerQuoteSnapshot: timestamp must be > 0, got {self.timestamp}")
 
+    def to_conversion_quote(self) -> dict:
+        """Compact quote payload for currency conversion/risk services."""
+        return {
+            "bid": float(self.bid),
+            "ask": float(self.ask),
+            "mid": float(self.mid),
+            "timestamp": float(self.timestamp),
+            "quote_id": str(self.quote_id),
+            "source": str(self.source),
+        }
+
 
 @dataclass(frozen=True)
 class BrokerInstrumentSpecSnapshot:
@@ -162,3 +173,13 @@ class BrokerInstrumentSpecSnapshot:
             errors.append("symbol must be non-empty")
         if errors:
             raise ValueError(f"BrokerInstrumentSpecSnapshot: {'; '.join(errors)}")
+
+
+def build_quote_snapshot_index(snapshots: Iterable[BrokerQuoteSnapshot]) -> dict[str, dict]:
+    """Create symbol->quote dict compatible with CurrencyConversionService."""
+    result: dict[str, dict] = {}
+    for item in snapshots:
+        if not isinstance(item, BrokerQuoteSnapshot):
+            continue
+        result[str(item.symbol).upper()] = item.to_conversion_quote()
+    return result

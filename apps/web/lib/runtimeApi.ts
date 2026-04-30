@@ -68,6 +68,49 @@ export interface ExecutionReceipt {
   created_at?: string;
 }
 
+export interface ReconciliationQueueItem {
+  id: number;
+  bot_instance_id: string;
+  signal_id?: string | null;
+  idempotency_key: string;
+  status: string;
+  attempts?: number;
+  max_attempts?: number;
+  next_retry_at?: string | null;
+  deadline_at?: string | null;
+  last_error?: string | null;
+  payload?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ReconciliationAttemptEvent {
+  id: number;
+  queue_item_id?: number | null;
+  bot_instance_id: string;
+  signal_id?: string | null;
+  idempotency_key: string;
+  worker_id?: string | null;
+  attempt_no: number;
+  outcome: string;
+  resolution_code?: string | null;
+  provider?: string | null;
+  payload_hash?: string | null;
+  payload?: Record<string, unknown>;
+  created_at?: string;
+}
+
+export type ManualBrokerProofPayload = {
+  provider: string;
+  evidence_ref: string;
+  observed_at: string;
+  payload_hash?: string;
+  raw_response_hash?: string;
+  broker_order_id?: string;
+  broker_deal_id?: string;
+  broker_position_id?: string;
+};
+
 export const runtimeApi = {
   getStatus: (workspaceId: string, botId: string) =>
     api.get<RuntimeStatus>(`/v1/workspaces/${workspaceId}/bots/${botId}/runtime`),
@@ -84,6 +127,40 @@ export const runtimeApi = {
     api.get<ReconciliationRun[]>(`/v1/workspaces/${workspaceId}/bots/${botId}/reconciliation-runs`, {
       params: { limit },
     }),
+
+  getReconciliationQueueItems: (
+    workspaceId: string,
+    botId: string,
+    options?: { statuses?: string[]; limit?: number }
+  ) =>
+    api.get<ReconciliationQueueItem[]>(`/v1/workspaces/${workspaceId}/bots/${botId}/reconciliation/queue-items`, {
+      params: {
+        statuses: (options?.statuses || ['failed_needs_operator', 'dead_letter', 'pending', 'retry']).join(','),
+        limit: options?.limit ?? 100,
+      },
+    }),
+
+  getReconciliationAttemptEvents: (
+    workspaceId: string,
+    botId: string,
+    queueItemId: number,
+    limit = 100
+  ) =>
+    api.get<ReconciliationAttemptEvent[]>(
+      `/v1/workspaces/${workspaceId}/bots/${botId}/reconciliation/${queueItemId}/attempt-events`,
+      { params: { limit } }
+    ),
+
+  resolveReconciliationItem: (
+    workspaceId: string,
+    botId: string,
+    queueItemId: number,
+    data: {
+      outcome: 'filled' | 'rejected';
+      broker_proof: ManualBrokerProofPayload;
+    }
+  ) =>
+    api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/reconciliation/${queueItemId}/resolve`, data),
 
   getExecutionReceipts: (workspaceId: string, botId: string, limit = 50) =>
     api.get<ExecutionReceipt[]>(`/v1/workspaces/${workspaceId}/bots/${botId}/execution-receipts`, {

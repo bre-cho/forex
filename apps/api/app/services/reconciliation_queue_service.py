@@ -106,6 +106,9 @@ class ReconciliationQueueService:
         if row is None:
             return False
         row.status = "resolved"
+        payload = dict(row.payload or {})
+        payload["last_resolution_code"] = "resolved"
+        row.payload = payload
         row.updated_at = datetime.now(timezone.utc)
         await self.db.commit()
         return True
@@ -116,6 +119,7 @@ class ReconciliationQueueService:
         idempotency_key: str,
         *,
         error: str,
+        resolution_code: str | None = None,
         retry_after_seconds: float = 15.0,
     ) -> bool:
         row = (
@@ -136,6 +140,10 @@ class ReconciliationQueueService:
         row.status = "retry"
         row.attempts = int(row.attempts or 0) + 1
         row.last_error = str(error or "")
+        payload = dict(row.payload or {})
+        if resolution_code:
+            payload["last_resolution_code"] = str(resolution_code)
+        row.payload = payload
         row.next_retry_at = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() + float(retry_after_seconds), tz=timezone.utc)
         row.updated_at = datetime.now(timezone.utc)
         await self.db.commit()
@@ -210,6 +218,7 @@ class ReconciliationQueueService:
         idempotency_key: str,
         *,
         error: str,
+        resolution_code: str | None = None,
     ) -> bool:
         """Mark item as dead_letter (max retries exceeded or deadline passed)."""
         row = (
@@ -229,6 +238,10 @@ class ReconciliationQueueService:
             return False
         row.status = "dead_letter"
         row.last_error = str(error or "dead_letter")
+        payload = dict(row.payload or {})
+        if resolution_code:
+            payload["last_resolution_code"] = str(resolution_code)
+        row.payload = payload
         row.next_retry_at = None
         row.lease_owner = None
         row.leased_until = None

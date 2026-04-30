@@ -10,6 +10,21 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+def normalize_asset_class(value: str) -> str:
+    kind = str(value or "").strip().lower()
+    if kind in {"fx", "forex"}:
+        return "forex"
+    if kind in {"metal", "metals", "xau", "xag"}:
+        return "metal"
+    if kind in {"crypto", "digital_asset", "spot_crypto"}:
+        return "crypto"
+    if kind in {"index", "indices"}:
+        return "index"
+    if kind in {"commodity", "commodities", "energy", "softs"}:
+        return "commodity"
+    return "cfd"
+
+
 @dataclass
 class InstrumentSpec:
     """Per-symbol instrument specification from a broker.
@@ -19,7 +34,7 @@ class InstrumentSpec:
     treat this as an incomplete spec and block live trading.
     """
     symbol: str
-    asset_class: str                # "forex" | "crypto" | "metal" | "index" | "cfd"
+    asset_class: str                # "forex" | "crypto" | "metal" | "index" | "commodity" | "cfd"
     contract_size: float            # e.g. 100000 for EURUSD, 1 for BTCUSDT
     pip_size: float                 # e.g. 0.0001 for EURUSD, 0.01 for USDJPY
     tick_size: float                # minimum price movement
@@ -31,6 +46,7 @@ class InstrumentSpec:
     base_currency: Optional[str]    # e.g. "EUR" for EURUSD, None for indices
     tick_value: Optional[float] = None  # value of 1 tick per 1 lot in quote currency
     account_currency: str = "USD"   # account denomination
+    commission_per_lot: float = 0.0   # commission in quote currency per 1 lot
 
     def is_complete(self) -> bool:
         """True if all required fields for live margin calculation are present."""
@@ -56,6 +72,9 @@ class InstrumentSpec:
             return self.tick_value * (self.pip_size / self.tick_size)
         # fallback geometric formula for FX
         return self.pip_size * self.contract_size
+
+    def __post_init__(self) -> None:
+        self.asset_class = normalize_asset_class(self.asset_class)
 
 
 # ---------------------------------------------------------------------------

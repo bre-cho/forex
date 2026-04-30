@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import SubmitOutbox
+from app.models import SubmitOutbox, SubmitOutboxEvent
 
 
 class SubmitOutboxService:
@@ -40,6 +42,10 @@ class SubmitOutboxService:
         )
 
         now = datetime.now(timezone.utc)
+        payload = dict(phase_payload or {})
+        payload_hash = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str).encode("utf-8")
+        ).hexdigest()
         if row is None:
             row = SubmitOutbox(
                 bot_instance_id=bot_instance_id,
@@ -47,7 +53,7 @@ class SubmitOutboxService:
                 phase=phase,
                 request_hash=request_hash,
                 provider=provider,
-                phase_payload=dict(phase_payload or {}),
+                phase_payload=payload,
                 created_at=now,
                 updated_at=now,
             )
@@ -56,9 +62,47 @@ class SubmitOutboxService:
             row.phase = phase
             row.request_hash = request_hash
             row.provider = provider
-            row.phase_payload = dict(phase_payload or {})
+            row.phase_payload = payload
             row.updated_at = now
+
+        # Append-only immutable event history for every phase transition.
+        event = SubmitOutboxEvent(
+            bot_instance_id=bot_instance_id,
+            idempotency_key=idempotency_key,
+            phase=phase,
+            request_hash=request_hash,
+            payload_hash=payload_hash,
+            provider=provider,
+            phase_payload=payload,
+            created_at=now,
+        )
+        self.db.add(event)
 
         await self.db.commit()
         await self.db.refresh(row)
         return row
+
+    async def list_stale_submit_phases(
+        self,
+        *,
+        older_than_seconds: float,
+        phases: tuple[str, ...] = ("SUBMITTING", "BROKER_SEND_STARTED"),
+        limit: int = 200,
+    ) -> list[SubmitOutbox]:
+        now = datetime.now(timezone.utc)
+        cutoff = datetime.fromtimestamp(now.timestamp() - float(older_than_seconds), tz=timezone.utc)
+        return (
+            (
+                await self.db.execute(
+                    select(SubmitOutbox)
+                    .where(
+                        SubmitOutbox.phase.in_(list(phases)),
+                        SubmitOutbox.updated_at <= cutoff,
+                    )
+                    .order_by(SubmitOutbox.updated_at.asc())
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )

@@ -32,10 +32,27 @@ ReconcileHook = Callable[[Dict[str, Any]], "asyncio.Coroutine[Any, Any, None]"]
 
 
 @dataclass
+class BrokerOrderTruth:
+    status: str
+    resolution_code: str
+    broker_order_id: Optional[str] = None
+    broker_position_id: Optional[str] = None
+    broker_deal_id: Optional[str] = None
+    fill_price: Optional[float] = None
+    fill_volume: Optional[float] = None
+    raw_response_hash: Optional[str] = None
+    details: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_conclusive(self) -> bool:
+        return str(self.status).lower() in {"filled", "rejected"}
+
+
+@dataclass
 class UnknownOrderResult:
     idempotency_key: str
     bot_instance_id: str
-    outcome: str  # filled | rejected | failed_needs_operator | still_unknown | error
+    outcome: str  # filled | rejected | failed_needs_operator | not_found | lookup_failed | ambiguous | partial | pending | error
     broker_order_id: Optional[str] = None
     broker_position_id: Optional[str] = None
     broker_deal_id: Optional[str] = None
@@ -119,7 +136,7 @@ class UnknownOrderReconciler:
                 idempotency_key=idempotency_key,
                 signal_id=signal_id,
             )
-            if result.outcome != "still_unknown":
+            if str(result.outcome).lower() in {"filled", "rejected", "error", "lookup_failed", "ambiguous"}:
                 if self._on_resolved is not None:
                     try:
                         await self._on_resolved(result.to_dict())
@@ -129,19 +146,22 @@ class UnknownOrderReconciler:
 
             if attempt < self._max_retries:
                 logger.info(
-                    "UnknownOrderReconciler: attempt %d/%d — key=%s still unknown, retrying in %.1fs",
+                    "UnknownOrderReconciler: attempt %d/%d — key=%s outcome=%s, retrying in %.1fs",
                     attempt,
                     self._max_retries,
                     idempotency_key,
+                    str(result.outcome),
                     self._retry_interval,
                 )
                 await asyncio.sleep(self._retry_interval)
 
+        last_outcome = str(result.outcome or "not_found") if "result" in locals() else "not_found"
         result = UnknownOrderResult(
             idempotency_key=idempotency_key,
             bot_instance_id=bot_instance_id,
             outcome="failed_needs_operator",
             error="max_retries_exceeded",
+            details={"last_outcome": last_outcome},
         )
         if self._on_resolved is not None:
             try:
@@ -203,13 +223,33 @@ class UnknownOrderReconciler:
                     return UnknownOrderResult(
                         idempotency_key=idempotency_key,
                         bot_instance_id=bot_instance_id,
-                        outcome="error",
+                        outcome="lookup_failed",
                         error=f"provider_order_lookup_failed:{exc}",
                     )
                 logger.warning("get_order_by_client_id failed: %s", exc)
 
         if broker_order and isinstance(broker_order, dict):
-            return self._classify_broker_order(idempotency_key, bot_instance_id, broker_order)
+            truth = self._classify_broker_order(broker_order)
+            return UnknownOrderResult(
+                idempotency_key=idempotency_key,
+                bot_instance_id=bot_instance_id,
+                outcome=truth.status,
+                broker_order_id=truth.broker_order_id,
+                broker_position_id=truth.broker_position_id,
+                broker_deal_id=truth.broker_deal_id,
+                fill_price=truth.fill_price,
+                fill_volume=truth.fill_volume,
+                raw_response_hash=truth.raw_response_hash,
+                final_transition=("FILLED" if truth.status == "filled" else "REJECTED") if truth.is_conclusive else None,
+                details={
+                    **dict(truth.details or {}),
+                    "resolution_code": truth.resolution_code,
+                    "broker_truth": {
+                        "status": truth.status,
+                        "resolution_code": truth.resolution_code,
+                    },
+                },
+            )
 
         # --- 2. Try execution/deal lookup ---
         executions: List[Dict[str, Any]] = []
@@ -221,67 +261,102 @@ class UnknownOrderReconciler:
                     return UnknownOrderResult(
                         idempotency_key=idempotency_key,
                         bot_instance_id=bot_instance_id,
-                        outcome="error",
+                        outcome="lookup_failed",
                         error=f"provider_execution_lookup_failed:{exc}",
                     )
                 logger.warning("get_executions_by_client_id failed: %s", exc)
 
         if executions:
-            return self._classify_from_executions(idempotency_key, bot_instance_id, executions)
+            truth = self._classify_from_executions(executions)
+            return UnknownOrderResult(
+                idempotency_key=idempotency_key,
+                bot_instance_id=bot_instance_id,
+                outcome=truth.status,
+                broker_order_id=truth.broker_order_id,
+                broker_position_id=truth.broker_position_id,
+                broker_deal_id=truth.broker_deal_id,
+                fill_price=truth.fill_price,
+                fill_volume=truth.fill_volume,
+                raw_response_hash=truth.raw_response_hash,
+                final_transition=("FILLED" if truth.status == "filled" else "REJECTED") if truth.is_conclusive else None,
+                details={
+                    **dict(truth.details or {}),
+                    "resolution_code": truth.resolution_code,
+                    "broker_truth": {
+                        "status": truth.status,
+                        "resolution_code": truth.resolution_code,
+                    },
+                },
+            )
 
         # --- 3. Fall through — still unknown ---
         return UnknownOrderResult(
             idempotency_key=idempotency_key,
             bot_instance_id=bot_instance_id,
-            outcome="still_unknown",
+            outcome="not_found",
+            details={"resolution_code": "not_found"},
         )
 
     @staticmethod
-    def _classify_broker_order(
-        idempotency_key: str, bot_instance_id: str, order: Dict[str, Any]
-    ) -> UnknownOrderResult:
+    def _classify_broker_order(order: Dict[str, Any]) -> BrokerOrderTruth:
         broker_status = str(order.get("status") or order.get("orderStatus") or "").upper()
         broker_order_id = str(order.get("orderId") or order.get("id") or order.get("brokerOrderId") or "")
+        filled_volume = _safe_float(order.get("filledVolume") or order.get("qty") or order.get("executionSize"), default=0.0)
+        requested_volume = _safe_float(order.get("requestedVolume") or order.get("origQty") or order.get("volume"), default=0.0)
+
+        if broker_status in {"PENDING", "NEW", "ACCEPTED", "ACTIVE", "OPEN", "SUBMITTED"}:
+            return BrokerOrderTruth(
+                status="pending",
+                resolution_code="order_pending",
+                broker_order_id=broker_order_id or None,
+                raw_response_hash=_hash_payload(order),
+                details=order,
+            )
+
+        if requested_volume > 0 and filled_volume > 0 and filled_volume + 1e-12 < requested_volume:
+            return BrokerOrderTruth(
+                status="partial",
+                resolution_code="order_partially_filled",
+                broker_order_id=broker_order_id or None,
+                broker_position_id=str(order.get("positionId") or order.get("brokerPositionId") or "") or None,
+                broker_deal_id=str(order.get("dealId") or order.get("brokerDealId") or "") or None,
+                fill_price=_safe_float(order.get("filledPrice") or order.get("avgFillPrice") or order.get("executionPrice"), default=0.0) or None,
+                fill_volume=filled_volume or None,
+                raw_response_hash=_hash_payload(order),
+                details=order,
+            )
 
         if broker_status in {"FILLED", "COMPLETELY_FILLED", "EXECUTED", "CLOSED"}:
-            return UnknownOrderResult(
-                idempotency_key=idempotency_key,
-                bot_instance_id=bot_instance_id,
-                outcome="filled",
+            return BrokerOrderTruth(
+                status="filled",
+                resolution_code="filled",
                 broker_order_id=broker_order_id or None,
                 broker_position_id=str(order.get("positionId") or order.get("brokerPositionId") or "") or None,
                 broker_deal_id=str(order.get("dealId") or order.get("brokerDealId") or "") or None,
                 fill_price=_safe_float(order.get("filledPrice") or order.get("avgFillPrice") or order.get("executionPrice")),
                 fill_volume=_safe_float(order.get("filledVolume") or order.get("qty") or order.get("executionSize")),
                 raw_response_hash=_hash_payload(order),
-                final_transition="FILLED",
                 details=order,
             )
         if broker_status in {"REJECTED", "CANCELED", "EXPIRED", "CANCELLED"}:
-            return UnknownOrderResult(
-                idempotency_key=idempotency_key,
-                bot_instance_id=bot_instance_id,
-                outcome="rejected",
+            return BrokerOrderTruth(
+                status="rejected",
+                resolution_code="rejected",
                 broker_order_id=broker_order_id or None,
-                error=str(order.get("rejectReason") or order.get("errorCode") or broker_status),
                 raw_response_hash=_hash_payload(order),
-                final_transition="REJECTED",
                 details=order,
             )
-        # Partially filled, pending, active — still in flight
-        return UnknownOrderResult(
-            idempotency_key=idempotency_key,
-            bot_instance_id=bot_instance_id,
-            outcome="still_unknown",
+
+        return BrokerOrderTruth(
+            status="ambiguous",
+            resolution_code="order_status_ambiguous",
             broker_order_id=broker_order_id or None,
             raw_response_hash=_hash_payload(order),
             details=order,
         )
 
     @staticmethod
-    def _classify_from_executions(
-        idempotency_key: str, bot_instance_id: str, executions: List[Dict[str, Any]]
-    ) -> UnknownOrderResult:
+    def _classify_from_executions(executions: List[Dict[str, Any]]) -> BrokerOrderTruth:
         total_volume = sum(_safe_float(e.get("volume") or e.get("qty") or e.get("size")) for e in executions)
         avg_price = 0.0
         if total_volume > 0:
@@ -291,17 +366,20 @@ class UnknownOrderReconciler:
             )
             avg_price = weighted / total_volume
         broker_order_id = str(executions[0].get("orderId") or executions[0].get("brokerOrderId") or "")
-        return UnknownOrderResult(
-            idempotency_key=idempotency_key,
-            bot_instance_id=bot_instance_id,
-            outcome="filled",
+        resolution_code = "filled_from_executions"
+        status = "filled"
+        if total_volume <= 0:
+            status = "ambiguous"
+            resolution_code = "executions_without_volume"
+        return BrokerOrderTruth(
+            status=status,
+            resolution_code=resolution_code,
             broker_order_id=broker_order_id or None,
             broker_position_id=str(executions[0].get("positionId") or executions[0].get("brokerPositionId") or "") or None,
             broker_deal_id=str(executions[0].get("dealId") or executions[0].get("brokerDealId") or "") or None,
             fill_price=avg_price if avg_price > 0 else None,
             fill_volume=total_volume if total_volume > 0 else None,
             raw_response_hash=_hash_payload({"executions": executions}),
-            final_transition="FILLED",
             details={"executions": executions},
         )
 

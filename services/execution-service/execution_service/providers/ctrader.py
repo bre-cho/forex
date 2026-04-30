@@ -396,7 +396,13 @@ class CTraderProvider(BrokerProvider):
                     import inspect
                     if inspect.isawaitable(result):
                         result = await result
-                    return dict(result) if result else None
+                    if not result:
+                        return None
+                    payload = dict(result)
+                    import time
+                    payload.setdefault("timestamp", float(time.time()))
+                    payload.setdefault("quote_id", f"ctrader:{symbol}:{int(payload['timestamp'] * 1000)}")
+                    return payload
                 except Exception as exc:
                     if self.live:
                         raise RuntimeError(f"ctrader_get_quote_failed:{exc}") from exc
@@ -409,7 +415,16 @@ class CTraderProvider(BrokerProvider):
                 if candles is not None and not candles.empty:
                     last = candles.iloc[-1]
                     close = float(last.get("close") if hasattr(last, "get") else last["close"])
-                    return {"symbol": symbol, "bid": close, "ask": close, "spread_pips": 0.0}
+                    import time
+                    ts = float(time.time())
+                    return {
+                        "symbol": symbol,
+                        "bid": close,
+                        "ask": close,
+                        "spread_pips": 0.0,
+                        "timestamp": ts,
+                        "quote_id": f"ctrader:fallback:{symbol}:{int(ts * 1000)}",
+                    }
             except Exception as exc:
                 pass
         return None

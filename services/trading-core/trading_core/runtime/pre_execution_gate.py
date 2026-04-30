@@ -1,6 +1,7 @@
 """services/trading-core/trading_core/runtime/pre_execution_gate.py"""
 from __future__ import annotations
 
+import hmac
 import hashlib
 import json
 from dataclasses import asdict, dataclass, field
@@ -151,6 +152,25 @@ def hash_gate_context(context: Dict[str, Any]) -> str:
     canonical = canonicalize_gate_context(context)
     payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def build_frozen_context_id(context: Dict[str, Any]) -> str:
+    canonical = canonicalize_gate_context(context)
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    digest = hashlib.sha256(f"frozen_context:{payload}".encode("utf-8")).hexdigest()
+    return digest
+
+
+def sign_gate_context(context: Dict[str, Any], *, secret: str) -> str:
+    normalized_secret = str(secret or "")
+    if not normalized_secret:
+        return ""
+    context_hash = hash_gate_context(context)
+    return hmac.new(
+        normalized_secret.encode("utf-8"),
+        context_hash.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 class PreExecutionGate:

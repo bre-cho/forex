@@ -43,7 +43,7 @@ export function DailyLockPanel({ workspaceId, botId }: Props) {
     setError('');
     setMsg('');
     try {
-      await botApi.resetDailyLock(workspaceId, botId, 'operator_panel_reset');
+      await botApi.resetDailyLock(workspaceId, botId, 'operator_panel_reset', { scope: 'bot' });
       setMsg('Đã reset daily lock.');
       await load();
     } catch (err: unknown) {

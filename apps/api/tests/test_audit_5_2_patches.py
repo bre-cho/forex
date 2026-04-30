@@ -71,8 +71,10 @@ class TestLiveReadinessGuardCapabilityProof:
             provider="test", mode="live",
             account_authorized=True, account_id_match=True,
             quote_realtime=True, server_time_valid=True,
-            instrument_spec_valid=True, client_order_id_supported=True,
-            order_lookup_supported=True, close_all_supported=True,
+            instrument_spec_valid=True, margin_estimate_valid=True,
+            client_order_id_supported=True,
+            order_lookup_supported=True, execution_lookup_supported=True,
+            close_all_supported=True,
         )
         provider = MagicMock()
         provider.verify_live_capability = AsyncMock(return_value=proof)
@@ -87,8 +89,10 @@ class TestLiveReadinessGuardCapabilityProof:
             provider="test", mode="live",
             account_authorized=False,  # MISSING
             account_id_match=True, quote_realtime=True, server_time_valid=True,
-            instrument_spec_valid=True, client_order_id_supported=True,
-            order_lookup_supported=True, close_all_supported=True,
+            instrument_spec_valid=True, margin_estimate_valid=True,
+            client_order_id_supported=True,
+            order_lookup_supported=True, execution_lookup_supported=True,
+            close_all_supported=True,
         )
         provider = MagicMock()
         provider.verify_live_capability = AsyncMock(return_value=proof)

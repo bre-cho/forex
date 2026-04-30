@@ -100,6 +100,14 @@ async def health_live_hard(
     except Exception as exc:
         checks["reconciliation_daemon"] = f"error: {exc}"
 
+    # 4. Submit outbox recovery worker alive flag
+    try:
+        from app.workers import submit_outbox_recovery_worker as _sow
+        outbox_worker_alive = bool(getattr(_sow, "_worker_running", False))
+        checks["submit_outbox_recovery_worker"] = "ok" if outbox_worker_alive else "not_running"
+    except Exception as exc:
+        checks["submit_outbox_recovery_worker"] = f"error: {exc}"
+
     all_ok = all(v == "ok" for v in checks.values())
     payload = {
         "status": "ok" if all_ok else "degraded",

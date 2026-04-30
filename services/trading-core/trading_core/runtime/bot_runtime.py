@@ -932,6 +932,9 @@ class BotRuntime:
                         volume=float(signal.lot_size),
                         price=float(signal.entry_price),
                     )
+                    quote_index: dict[str, dict] = {}
+                    if isinstance(locals().get("live_quote"), dict):
+                        quote_index[str(signal.symbol).upper()] = dict(locals().get("live_quote") or {})
                     risk_ctx = RiskContextBuilder.build(
                         account_info=account,
                         open_positions=open_positions or [],
@@ -943,6 +946,11 @@ class BotRuntime:
                         instrument_spec=instrument_spec,
                         runtime_mode=self.runtime_mode,
                         broker_margin_required=float(margin_required),
+                        quote_snapshots=quote_index,
+                        conversion_rates=(self.risk_config.get("conversion_rates") if isinstance(self.risk_config, dict) else None),
+                        correlation_buckets=(self.risk_config.get("correlation_buckets") if isinstance(self.risk_config, dict) else None),
+                        slippage_pips=float(self.risk_config.get("max_slippage_pips", 0.0) or 0.0) if isinstance(self.risk_config, dict) else 0.0,
+                        commission_per_lot=float(self.risk_config.get("commission_per_lot", 0.0) or 0.0) if isinstance(self.risk_config, dict) else 0.0,
                     )
                 except Exception as exc:
                     self.state.error_message = f"risk_context_build_failed:{exc}"
@@ -965,10 +973,20 @@ class BotRuntime:
                 )
             gate_result = self._gate.evaluate(gate_ctx)
             try:
-                from trading_core.runtime.pre_execution_gate import hash_gate_context
+                import os
+                from trading_core.runtime.pre_execution_gate import hash_gate_context, build_frozen_context_id, sign_gate_context
                 gate_ctx_hash = hash_gate_context(gate_ctx)
+                frozen_context_id = build_frozen_context_id(gate_ctx)
+                context_signature = sign_gate_context(
+                    gate_ctx,
+                    secret=str(os.getenv("FROZEN_CONTEXT_HMAC_SECRET") or os.getenv("APP_SECRET_KEY") or ""),
+                )
+                gate_ctx["frozen_context_id"] = str(frozen_context_id)
+                gate_ctx["context_signature"] = str(context_signature)
             except Exception:
                 gate_ctx_hash = ""
+                frozen_context_id = ""
+                context_signature = ""
             gate_event = {
                 "bot_instance_id": self.bot_instance_id,
                 "signal_id": str(signal.signal_id),
@@ -977,6 +995,10 @@ class BotRuntime:
                 "gate_reason": gate_result.reason,
                 "gate_details": gate_result.details,
                 "gate_context_hash": gate_ctx_hash,
+                "frozen_context_id": str(frozen_context_id or ""),
+                "context_signature": str(context_signature or ""),
+                "gate_context": dict(gate_ctx or {}),
+                "runtime_version": str(self.state.metadata.get("runtime_version") or "") or None,
                 "brain_cycle_id": str(getattr(signal, "meta", {}).get("brain_cycle_id", "") or ""),
                 "broker": str(getattr(self.broker_provider, "provider_name", "")),
                 "symbol": str(signal.symbol),
@@ -1069,6 +1091,8 @@ class BotRuntime:
             policy_snapshot=getattr(signal, "meta", {}).get("policy_snapshot", {}),
             gate_context=dict(gate_ctx or {}),
             context_hash=str(gate_ctx_hash or ""),
+            frozen_context_id=str(frozen_context_id or ""),
+            context_signature=str(context_signature or ""),
             margin_usage_pct=float((gate_ctx or {}).get("margin_usage_pct", 0.0)),
             free_margin_after_order=float((gate_ctx or {}).get("free_margin_after_order", 0.0)),
             account_exposure_pct=float((gate_ctx or {}).get("account_exposure_pct", 0.0)),
@@ -1136,6 +1160,7 @@ class BotRuntime:
                 "signal_id": signal.signal_id,
                 "idempotency_key": command.idempotency_key,
                 "brain_cycle_id": command.brain_cycle_id,
+                "frozen_context_id": str(getattr(pre_ctx, "frozen_context_id", "") or "") or None,
                 "broker_order_id": "",
                 "symbol": request.symbol,
                 "side": request.side.upper(),
@@ -1175,6 +1200,7 @@ class BotRuntime:
             "latency_ms": float(getattr(result, "latency_ms", 0.0) or 0.0),
             "raw_response_hash": str(getattr(result, "raw_response_hash", "") or "") or None,
             "raw_response": dict(getattr(result, "raw_response", {}) or {}),
+            "frozen_context_id": str(getattr(pre_ctx, "frozen_context_id", "") or "") or None,
             "status": "filled" if result.success else "rejected",
             "error_message": result.error_message,
         }

@@ -218,6 +218,8 @@ class PreExecutionContext:
     policy_snapshot: Dict[str, Any] = field(default_factory=dict)
     gate_context: Dict[str, Any] = field(default_factory=dict)
     context_hash: str = ""
+    frozen_context_id: str = ""
+    context_signature: str = ""
 
 
 @dataclass
@@ -422,31 +424,39 @@ class BrokerProvider(ABC):
 
         # 8. Order lookup
         try:
-            await self.get_order_by_client_id("capability_probe_client_order_id")
-            proof.order_lookup_supported = True
+            lookup = await self.get_order_by_client_id("capability_probe_client_order_id")
+            # Strict pass criteria in live mode:
+            # - valid typed response (dict | None), or
+            # - provider returns a known not-found/empty code via structured payload.
+            proof.order_lookup_supported = isinstance(lookup, dict) or lookup is None
+            proof.detail["order_lookup_response_type"] = type(lookup).__name__ if lookup is not None else "none"
         except NotImplementedError as exc:
             proof.detail["order_lookup_error"] = str(exc)
-        except Exception:
-            # Any provider-level error means method exists and is wired; capability is present.
-            proof.order_lookup_supported = True
+        except Exception as exc:
+            proof.detail["order_lookup_error"] = str(exc)
+            proof.order_lookup_supported = False
 
         # 9. Execution lookup
         try:
-            await self.get_executions_by_client_id("capability_probe_client_order_id")
-            proof.execution_lookup_supported = True
+            executions = await self.get_executions_by_client_id("capability_probe_client_order_id")
+            proof.execution_lookup_supported = isinstance(executions, list)
+            proof.detail["execution_lookup_count"] = len(executions) if isinstance(executions, list) else -1
         except NotImplementedError as exc:
             proof.detail["execution_lookup_error"] = str(exc)
-        except Exception:
-            proof.execution_lookup_supported = True
+        except Exception as exc:
+            proof.detail["execution_lookup_error"] = str(exc)
+            proof.execution_lookup_supported = False
 
         # 10. Close all
         try:
-            await self.close_all_positions(symbol=probe_symbol)
-            proof.close_all_supported = True
+            close_result = await self.close_all_positions(symbol=probe_symbol)
+            proof.close_all_supported = isinstance(close_result, list)
+            proof.detail["close_all_result_count"] = len(close_result) if isinstance(close_result, list) else -1
         except NotImplementedError as exc:
             proof.detail["close_all_error"] = str(exc)
-        except Exception:
-            proof.close_all_supported = True
+        except Exception as exc:
+            proof.detail["close_all_error"] = str(exc)
+            proof.close_all_supported = False
 
         if timeframe:
             proof.detail["timeframe"] = str(timeframe)

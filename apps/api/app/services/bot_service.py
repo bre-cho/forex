@@ -202,8 +202,44 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                 if str(payload.get("gate_action", "")).upper() == "ALLOW":
                     idem = str(payload.get("idempotency_key") or payload.get("signal_id") or "")
                     sig = str(payload.get("signal_id") or "")
+                    frozen_context_id = str(payload.get("frozen_context_id") or "")
+                    context_hash = str(payload.get("gate_context_hash") or "")
+                    context_signature = str(payload.get("context_signature") or "")
+                    gate_context = dict(payload.get("gate_context") or {})
+                    if frozen_context_id and context_hash and context_signature and gate_context:
+                        try:
+                            _approved_volume = gate_context.get("approved_volume")
+                            _approved_price = gate_context.get("entry_price")
+                            _approved_sl = gate_context.get("stop_loss")
+                            _approved_tp = gate_context.get("take_profit")
+                            _max_slippage = gate_context.get("slippage_pips")
+                            _max_dev_bps = gate_context.get("max_price_deviation_bps")
+                            await ledger.record_frozen_gate_context(
+                                context_id=frozen_context_id,
+                                bot_instance_id=bot_id,
+                                idempotency_key=idem,
+                                context_hash=context_hash,
+                                context_signature=context_signature,
+                                canonical_context=gate_context,
+                                runtime_version=str(payload.get("runtime_version") or "") or None,
+                                policy_version_id=str(gate_context.get("policy_version_id") or payload.get("policy_version") or "") or None,
+                                broker_snapshot_hash=str(gate_context.get("broker_snapshot_hash") or "") or None,
+                                risk_context_hash=str(gate_context.get("risk_context_hash") or "") or None,
+                                approved_volume=(float(_approved_volume) if _approved_volume is not None else None),
+                                approved_price=(float(_approved_price) if _approved_price is not None else None),
+                                approved_sl=(float(_approved_sl) if _approved_sl is not None else None),
+                                approved_tp=(float(_approved_tp) if _approved_tp is not None else None),
+                                max_slippage_pips=(float(_max_slippage) if _max_slippage is not None else None),
+                                max_price_deviation_bps=(float(_max_dev_bps) if _max_dev_bps is not None else None),
+                            )
+                        except Exception as exc:
+                            if bot_mode == "live":
+                                raise RuntimeError(f"persist_frozen_context_failed:{exc}") from exc
+                            logger.warning("persist_frozen_context failed [%s]: %s", bot_id, exc)
                     try:
                         order_ledger = OrderLedgerService(db)
+                        base_payload = dict(payload.get("request_payload") or payload)
+                        base_payload["frozen_context_id"] = frozen_context_id or None
                         await order_ledger.persist_intent(
                             bot_instance_id=bot_id,
                             signal_id=sig,
@@ -213,7 +249,7 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                             symbol=str(payload.get("symbol") or ""),
                             side=str(payload.get("side") or ""),
                             volume=_safe_float(payload.get("volume"), 0.0),
-                            request_payload=dict(payload.get("request_payload") or payload),
+                            request_payload=base_payload,
                             gate_context_hash=str(payload.get("gate_context_hash") or "") or None,
                         )
                     except Exception as exc:
@@ -356,6 +392,25 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                     detail=str(payload.get("reason") or event_type),
                     payload=dict(payload),
                 )
+                lock_scope = str(payload.get("lock_scope") or "bot").strip().lower()
+                lock_reason = str(payload.get("reason") or event_type)
+                daily = DailyTradingStateService(db)
+                bot_row = (
+                    (
+                        await db.execute(
+                            select(BotInstance).where(BotInstance.id == bot_id).limit(1)
+                        )
+                    )
+                    .scalar_one_or_none()
+                )
+                if lock_scope == "portfolio" and bot_row is not None:
+                    locked_rows = await daily.lock_workspace_day(
+                        str(bot_row.workspace_id),
+                        reason=f"portfolio_lock:{lock_reason}",
+                    )
+                    payload["locked_bot_ids"] = [str(r.bot_instance_id) for r in locked_rows]
+                else:
+                    await daily.lock_day(bot_id, lock_reason)
                 # Wire daily lock controller to apply runtime action
                 lock_action = str(payload.get("lock_action") or "stop_new_orders")
                 try:
@@ -367,8 +422,15 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                         controller = DailyLockRuntimeController(
                             provider=provider,
                             runtime_registry=registry,
+                            db=db,
                         )
-                        controller_outcome = await controller.apply_lock_action(bot_id, lock_action)
+                        controller_outcome = await controller.apply_lock_action(
+                            bot_id,
+                            lock_action,
+                            symbol=str(payload.get("symbol") or "") or None,
+                            lock_scope=lock_scope,
+                            lock_reason=lock_reason,
+                        )
                         await ledger.record_daily_lock_event(
                             bot_instance_id=bot_id,
                             event_type=f"{event_type}_controller_outcome",

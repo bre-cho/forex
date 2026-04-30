@@ -39,7 +39,7 @@ async def test_resolve_rejected_via_order_lookup():
     reconciler = UnknownOrderReconciler(provider=provider, max_retries=1, retry_interval_seconds=0)
     result = await reconciler.resolve_unknown_order(bot_instance_id="bot1", idempotency_key="KEY-2")
     assert result.outcome == "rejected"
-    assert result.error == "insufficient_margin"
+    assert result.details["rejectReason"] == "insufficient_margin"
 
 
 @pytest.mark.asyncio
@@ -86,6 +86,7 @@ async def test_resolve_failed_after_max_retries():
     result = await reconciler.resolve_unknown_order(bot_instance_id="bot3", idempotency_key="KEY-99")
     assert result.outcome == "failed_needs_operator"
     assert result.error == "max_retries_exceeded"
+    assert result.details["last_outcome"] == "not_found"
 
 
 # ------------------------------------------------------------------
@@ -161,7 +162,7 @@ async def test_live_provider_order_lookup_throws_returns_error():
     provider.get_order_by_client_id = AsyncMock(side_effect=Exception("network_error"))
     reconciler = UnknownOrderReconciler(provider=provider, max_retries=1, retry_interval_seconds=0)
     result = await reconciler.resolve_unknown_order(bot_instance_id="bot-live2", idempotency_key="KEY-live-2")
-    assert result.outcome == "error"
+    assert result.outcome == "lookup_failed"
     assert "lookup_failed" in result.error
 
 
@@ -175,5 +176,47 @@ async def test_live_provider_execution_lookup_throws_returns_error():
     provider.get_executions_by_client_id = AsyncMock(side_effect=Exception("rpc_error"))
     reconciler = UnknownOrderReconciler(provider=provider, max_retries=1, retry_interval_seconds=0)
     result = await reconciler.resolve_unknown_order(bot_instance_id="bot-live3", idempotency_key="KEY-live-3")
-    assert result.outcome == "error"
+    assert result.outcome == "lookup_failed"
     assert "lookup_failed" in result.error
+
+
+@pytest.mark.asyncio
+async def test_pending_order_outcome_is_pending():
+    provider = _make_provider(
+        get_order_by_client_id={"status": "PENDING", "orderId": "BRK-P1"},
+        get_executions_by_client_id=[],
+    )
+    reconciler = UnknownOrderReconciler(provider=provider, max_retries=1, retry_interval_seconds=0)
+    result = await reconciler.resolve_unknown_order(bot_instance_id="bot-pending", idempotency_key="KEY-p")
+    assert result.outcome == "failed_needs_operator"
+    assert result.details["last_outcome"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_partial_order_outcome_is_partial():
+    provider = _make_provider(
+        get_order_by_client_id={
+            "status": "FILLED",
+            "orderId": "BRK-PT",
+            "filledVolume": 0.02,
+            "requestedVolume": 0.10,
+            "filledPrice": 1.1111,
+        },
+        get_executions_by_client_id=[],
+    )
+    reconciler = UnknownOrderReconciler(provider=provider, max_retries=2, retry_interval_seconds=0)
+    result = await reconciler.resolve_unknown_order(bot_instance_id="bot-partial", idempotency_key="KEY-pt")
+    assert result.outcome == "failed_needs_operator"
+    assert result.details["last_outcome"] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_status_returns_ambiguous():
+    provider = _make_provider(
+        get_order_by_client_id={"status": "UNKNOWN_BROKER_STATUS", "orderId": "BRK-A1"},
+        get_executions_by_client_id=[],
+    )
+    reconciler = UnknownOrderReconciler(provider=provider, max_retries=2, retry_interval_seconds=0)
+    result = await reconciler.resolve_unknown_order(bot_instance_id="bot-amb", idempotency_key="KEY-amb")
+    assert result.outcome == "ambiguous"
+    assert result.details["resolution_code"] == "order_status_ambiguous"

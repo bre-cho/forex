@@ -375,6 +375,14 @@ class MT5Provider(BrokerProvider):
         pip_size = float(getattr(info, "point", 0.0001) or 0.0001) if info else 0.0001
         bid = float(getattr(tick, "bid", 0) or 0)
         ask = float(getattr(tick, "ask", 0) or 0)
+        ts = float(getattr(tick, "time", 0) or 0)
         spread_pips = (ask - bid) / pip_size if pip_size > 0 else 0.0
-        return {"symbol": symbol, "bid": bid, "ask": ask, "spread_pips": spread_pips}
+        return {
+            "symbol": symbol,
+            "bid": bid,
+            "ask": ask,
+            "spread_pips": spread_pips,
+            "timestamp": ts,
+            "quote_id": f"mt5:{symbol}:{int(ts * 1000)}",
+        }
 

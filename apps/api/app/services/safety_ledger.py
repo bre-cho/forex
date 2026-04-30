@@ -17,6 +17,7 @@ from app.models import (
     BrokerReconciliationRun,
     DailyTradingState,
     DailyLockEvent,
+    FrozenGateContext,
     OrderIdempotencyReservation,
     OrderStateTransition,
     PreExecutionGateEvent,
@@ -149,6 +150,7 @@ class SafetyLedgerService:
         side: str,
         volume: float,
         request_payload: dict[str, Any],
+        frozen_context_id: str | None = None,
         gate_context_hash: str | None = None,
         status: str = "PENDING_SUBMIT",
         auto_commit: bool = True,
@@ -159,8 +161,14 @@ class SafetyLedgerService:
         )
         existing = (await self.db.execute(stmt.limit(1))).scalar_one_or_none()
         if existing is not None:
+            changed = False
             if gate_context_hash and str(getattr(existing, "gate_context_hash", "") or "") != str(gate_context_hash):
                 existing.gate_context_hash = str(gate_context_hash)
+                changed = True
+            if frozen_context_id and str(getattr(existing, "frozen_context_id", "") or "") != str(frozen_context_id):
+                existing.frozen_context_id = str(frozen_context_id)
+                changed = True
+            if changed:
                 existing.updated_at = datetime.now(timezone.utc)
                 if auto_commit:
                     await self.db.commit()
@@ -179,6 +187,7 @@ class SafetyLedgerService:
             side=side,
             volume=volume,
             request_payload=request_payload,
+            frozen_context_id=str(frozen_context_id or "") or None,
             gate_context_hash=str(gate_context_hash or "") or None,
             status=status,
             current_state="INTENT_CREATED",
@@ -208,6 +217,7 @@ class SafetyLedgerService:
         broker_order_id: str | None = None,
         error_message: str | None = None,
         gate_context_hash: str | None = None,
+        frozen_context_id: str | None = None,
         auto_commit: bool = True,
     ) -> BrokerOrderAttempt | None:
         stmt = select(BrokerOrderAttempt).where(
@@ -226,6 +236,8 @@ class SafetyLedgerService:
             row.error_message = error_message
         if gate_context_hash is not None:
             row.gate_context_hash = str(gate_context_hash or "") or None
+        if frozen_context_id is not None:
+            row.frozen_context_id = str(frozen_context_id or "") or None
         row.updated_at = datetime.now(timezone.utc)
         if auto_commit:
             await self.db.commit()
@@ -342,6 +354,7 @@ class SafetyLedgerService:
         broker_position_id: str | None,
         broker_deal_id: str | None,
         client_order_id: str | None = None,
+        frozen_context_id: str | None = None,
         fill_status: str,
         requested_volume: float,
         filled_volume: float,
@@ -363,6 +376,7 @@ class SafetyLedgerService:
         row = BrokerExecutionReceipt(
             bot_instance_id=bot_instance_id,
             idempotency_key=idempotency_key,
+            frozen_context_id=str(frozen_context_id or "") or None,
             broker=broker,
             broker_order_id=broker_order_id,
             broker_position_id=broker_position_id,
@@ -386,6 +400,62 @@ class SafetyLedgerService:
             await self.db.refresh(row)
         else:
             await self.db.flush()
+        return row
+
+    async def record_frozen_gate_context(
+        self,
+        *,
+        context_id: str,
+        bot_instance_id: str,
+        idempotency_key: str,
+        context_hash: str,
+        context_signature: str,
+        canonical_context: dict[str, Any],
+        runtime_version: str | None = None,
+        policy_version_id: str | None = None,
+        broker_snapshot_hash: str | None = None,
+        risk_context_hash: str | None = None,
+        approved_volume: float | None = None,
+        approved_price: float | None = None,
+        approved_sl: float | None = None,
+        approved_tp: float | None = None,
+        max_slippage_pips: float | None = None,
+        max_price_deviation_bps: float | None = None,
+    ) -> FrozenGateContext:
+        existing = (
+            (
+                await self.db.execute(
+                    select(FrozenGateContext)
+                    .where(FrozenGateContext.id == context_id)
+                    .limit(1)
+                )
+            )
+            .scalar_one_or_none()
+        )
+        if existing is not None:
+            return existing
+
+        row = FrozenGateContext(
+            id=str(context_id),
+            bot_instance_id=str(bot_instance_id),
+            idempotency_key=str(idempotency_key),
+            context_hash=str(context_hash),
+            context_signature=str(context_signature),
+            canonical_context=dict(canonical_context or {}),
+            runtime_version=str(runtime_version or "") or None,
+            policy_version_id=str(policy_version_id or "") or None,
+            broker_snapshot_hash=str(broker_snapshot_hash or "") or None,
+            risk_context_hash=str(risk_context_hash or "") or None,
+            approved_volume=float(approved_volume) if approved_volume is not None else None,
+            approved_price=float(approved_price) if approved_price is not None else None,
+            approved_sl=float(approved_sl) if approved_sl is not None else None,
+            approved_tp=float(approved_tp) if approved_tp is not None else None,
+            max_slippage_pips=float(max_slippage_pips) if max_slippage_pips is not None else None,
+            max_price_deviation_bps=float(max_price_deviation_bps) if max_price_deviation_bps is not None else None,
+        )
+        self.db.add(row)
+        await self.db.commit()
+        await self.db.refresh(row)
         return row
 
     async def list_execution_receipts(self, bot_instance_id: str, limit: int = 100) -> list[BrokerExecutionReceipt]:

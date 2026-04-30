@@ -57,9 +57,13 @@ async def test_apply_close_all_and_stop_fallback_per_position():
     provider = _make_provider(positions=[{"id": "P1"}, {"id": "P2"}])
     # no close_all_positions method
     del provider.close_all_positions
-    # first call returns positions to iterate; second call (verification) returns empty
+    # call sequence:
+    # 1) positions_before count, 2) fallback iterate positions,
+    # 3) fallback verification, 4) positions_after count
     provider.get_open_positions = AsyncMock(side_effect=[
         [{"id": "P1"}, {"id": "P2"}],
+        [{"id": "P1"}, {"id": "P2"}],
+        [],
         [],
     ])
     ctrl = DailyLockRuntimeController(provider=provider, runtime_registry=registry)
@@ -115,3 +119,19 @@ async def test_registry_error_sets_outcome_error():
     result = await ctrl.apply_lock_action("bot-7", "stop_new_orders")
     assert result["outcome"] == "error"
     assert "registry down" in result["detail"]
+
+
+@pytest.mark.asyncio
+async def test_close_all_postcondition_failure_returns_error():
+    registry = _make_registry(stop=None)
+    provider = _make_provider(close_result=[MagicMock()])
+    provider.get_open_positions = AsyncMock(
+        side_effect=[
+            [{"id": "P1", "symbol": "EURUSD"}],
+            [{"id": "P1", "symbol": "EURUSD"}],
+        ]
+    )
+    ctrl = DailyLockRuntimeController(provider=provider, runtime_registry=registry)
+    result = await ctrl.apply_lock_action("bot-8", "close_all_and_stop", symbol="EURUSD")
+    assert result["outcome"] == "error"
+    assert "remaining_positions" in result["detail"] or "incomplete" in result["detail"]

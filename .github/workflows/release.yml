@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 jobs:
-  build-and-deploy:
+  live-safety-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +26,56 @@ jobs:
       - name: Verify runtime snapshot payload contract
         run: |
           python .github/scripts/verify_runtime_snapshot_payload.py
+
+      - name: Verify live import boundary
+        run: |
+          python .github/scripts/verify_live_import_boundary.py
+
+      - name: Verify no live stub provider
+        run: |
+          python .github/scripts/verify_no_live_stub_provider.py
+
+      - name: Verify no live fallback spec
+        run: |
+          bash .github/scripts/verify_live_no_fallback_spec.sh
+
+      - name: Verify no live stub (integration paths)
+        run: |
+          bash .github/scripts/verify_live_no_stub.sh
+
+      - name: Verify broker gate wiring
+        run: |
+          python .github/scripts/verify_broker_gate_wiring.py
+
+      - name: Verify frontend API contract
+        run: |
+          python .github/scripts/verify_frontend_api_contract.py
+
+      - name: Verify production no legacy stack
+        run: |
+          bash .github/scripts/verify_production_no_legacy_stack.sh
+
+      - name: Verify live safety closure
+        run: |
+          bash .github/scripts/verify_live_safety_closure.sh
+
+      - name: Verify outbox recovery scenario
+        run: |
+          python .github/scripts/verify_outbox_recovery_scenario.py
+
+      - name: Verify daily lock close-all scenario
+        run: |
+          python .github/scripts/verify_daily_lock_closeall_scenario.py
+
+      - name: Verify unknown reconciliation scenario
+        run: |
+          python .github/scripts/verify_unknown_reconciliation_scenario.py
+
+  build-and-deploy:
+    needs: live-safety-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Build API image
         run: |

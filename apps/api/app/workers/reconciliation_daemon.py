@@ -113,11 +113,13 @@ async def _create_critical_incident(
     )
 
 
-async def _attempt_broker_reconcile(item: ReconciliationQueueItem) -> bool:
+async def _attempt_broker_reconcile(item: ReconciliationQueueItem) -> dict[str, object]:
     """Try broker-side UNKNOWN reconciliation for a queue item.
 
-    Returns True if broker status is conclusively resolved (filled/rejected)
-    and queue item can be marked resolved.
+        Returns a dict payload with keys:
+            - resolved: bool (filled/rejected conclusive)
+            - outcome: reconciler outcome string
+            - resolution_code: normalized reason code
     """
     try:
         registry = get_registry()
@@ -153,9 +155,42 @@ async def _attempt_broker_reconcile(item: ReconciliationQueueItem) -> bool:
             idempotency_key=str(item.idempotency_key),
             signal_id=str(item.signal_id or ""),
         )
-        conclusive = str(result.outcome or "").lower() in {"filled", "rejected"}
+        outcome = str(result.outcome or "").lower()
+        resolution_code = str((result.details or {}).get("resolution_code") or outcome or "unknown")
+        provider_name = str(getattr(provider, "provider_name", "") or "unknown")
+
+        try:
+            from app.services.reconciliation_attempt_event_service import ReconciliationAttemptEventService
+
+            async with AsyncSessionLocal() as attempt_db:
+                event_svc = ReconciliationAttemptEventService(attempt_db)
+                await event_svc.record_attempt(
+                    queue_item_id=int(getattr(item, "id", 0) or 0) or None,
+                    bot_instance_id=str(item.bot_instance_id),
+                    signal_id=str(item.signal_id or "") or None,
+                    idempotency_key=str(item.idempotency_key),
+                    worker_id=str(getattr(item, "lease_owner", "") or None),
+                    attempt_no=int(getattr(item, "attempts", 0) or 0) + 1,
+                    outcome=outcome,
+                    resolution_code=resolution_code,
+                    provider=provider_name,
+                    payload=result.to_dict(),
+                )
+        except Exception as persist_exc:
+            logger.warning(
+                "reconciliation_daemon: failed to persist attempt event item=%s bot=%s: %s",
+                getattr(item, "id", None),
+                getattr(item, "bot_instance_id", None),
+                persist_exc,
+            )
+
+        conclusive = outcome in {"filled", "rejected"}
         if not conclusive:
-            return False
+            return {
+                "resolved": False,
+                "outcome": outcome,
+                "resolution_code": resolution_code,
+            }
 
         # Persist broker truth into order ledger BEFORE changing queue status.
         # If this fails, queue stays retry — no silent data loss.
@@ -188,9 +223,17 @@ async def _attempt_broker_reconcile(item: ReconciliationQueueItem) -> bool:
                 getattr(item, "bot_instance_id", None),
                 persist_exc,
             )
-            return False
+            return {
+                "resolved": False,
+                "outcome": "lookup_failed",
+                "resolution_code": "ledger_persist_failed",
+            }
 
-        return True
+        return {
+            "resolved": True,
+            "outcome": outcome,
+            "resolution_code": resolution_code,
+        }
     except Exception as exc:
         logger.warning(
             "reconciliation_daemon: broker reconcile failed item=%s bot=%s: %s",
@@ -198,7 +241,11 @@ async def _attempt_broker_reconcile(item: ReconciliationQueueItem) -> bool:
             getattr(item, "bot_instance_id", None),
             exc,
         )
-        return False
+        return {
+            "resolved": False,
+            "outcome": "lookup_failed",
+            "resolution_code": "daemon_exception",
+        }
     finally:
         try:
             # Disconnect only when provider was created by daemon fallback (not runtime-owned).
@@ -237,7 +284,13 @@ async def _process_item(
 
         # Try broker source-of-truth reconciliation before applying retry/escalation.
         if age_seconds >= _RETRY_AFTER_AGE_SECONDS:
-            broker_resolved = await _attempt_broker_reconcile(item)
+            broker_attempt = await _attempt_broker_reconcile(item)
+            if isinstance(broker_attempt, dict):
+                broker_resolved = bool(broker_attempt.get("resolved", False))
+                resolution_code = str(broker_attempt.get("resolution_code") or "unknown")
+            else:
+                broker_resolved = bool(broker_attempt)
+                resolution_code = "unknown"
             if broker_resolved:
                 await queue_svc.mark_resolved(item.bot_instance_id, item.idempotency_key)
                 logger.info(
@@ -246,6 +299,8 @@ async def _process_item(
                     item.bot_instance_id,
                 )
                 return
+        else:
+            resolution_code = "grace_period"
 
         if deadline_passed or max_attempts_exceeded:
             # Escalate: dead-letter + critical incident + lock bot
@@ -260,6 +315,7 @@ async def _process_item(
                 item.bot_instance_id,
                 item.idempotency_key,
                 error=reason,
+                resolution_code=resolution_code,
             )
             await _create_critical_incident(db, item, reason)
             await _lock_bot_daily_state(db, item.bot_instance_id)
@@ -272,6 +328,7 @@ async def _process_item(
                 item.bot_instance_id,
                 item.idempotency_key,
                 error="unknown_order_unresolved",
+                resolution_code=resolution_code,
                 retry_after_seconds=backoff,
             )
             logger.info(

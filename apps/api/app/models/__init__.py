@@ -436,6 +436,7 @@ class BrokerOrderAttempt(Base):
     side: Mapped[str] = mapped_column(String(8), nullable=False)
     volume: Mapped[float] = mapped_column(Float, nullable=False)
     request_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    frozen_context_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     gate_context_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="PENDING_SUBMIT")
     current_state: Mapped[str] = mapped_column(String(64), default="INTENT_CREATED")
@@ -460,6 +461,20 @@ class SubmitOutbox(Base):
     phase_payload: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class SubmitOutboxEvent(Base):
+    __tablename__ = "submit_outbox_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    phase: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    phase_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
 class WorkerHeartbeat(Base):
@@ -520,6 +535,7 @@ class BrokerExecutionReceipt(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
     idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    frozen_context_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     client_order_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     broker: Mapped[str] = mapped_column(String(32), nullable=False)
     broker_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -593,6 +609,24 @@ class ReconciliationQueueItem(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 
 
+class ReconciliationAttemptEvent(Base):
+    __tablename__ = "reconciliation_attempt_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    queue_item_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    signal_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    attempt_no: Mapped[int] = mapped_column(Integer, default=0)
+    outcome: Mapped[str] = mapped_column(String(64), nullable=False)
+    resolution_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
 class TradingIncident(Base):
     __tablename__ = "trading_incidents"
 
@@ -634,6 +668,33 @@ class DailyLockAction(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class FrozenGateContext(Base):
+    """Immutable, signed gate context evidence captured before execution."""
+
+    __tablename__ = "frozen_gate_contexts"
+    __table_args__ = (
+        UniqueConstraint("bot_instance_id", "idempotency_key", name="uq_frozen_gate_context_bot_idem"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    context_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    context_signature: Mapped[str] = mapped_column(String(128), nullable=False)
+    canonical_context: Mapped[dict] = mapped_column(JSON, default=dict)
+    runtime_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    policy_version_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    broker_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    risk_context_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    approved_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    approved_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    approved_sl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    approved_tp: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_slippage_pips: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_price_deviation_bps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
 class PolicyVersion(Base):

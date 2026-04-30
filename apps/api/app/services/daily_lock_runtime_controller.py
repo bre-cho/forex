@@ -75,6 +75,7 @@ class DailyLockRuntimeController:
         lock_action: str,
         *,
         symbol: Optional[str] = None,
+        lock_scope: str = "bot",
         lock_reason: Optional[str] = None,
         trading_day: Optional[date] = None,
     ) -> dict:
@@ -115,18 +116,22 @@ class DailyLockRuntimeController:
                 result["detail"] = "new_orders_paused"
 
             elif action == "close_all_and_stop":
-                positions_before = 0
-                try:
-                    open_pos = await self._provider.get_open_positions()
-                    positions_before = len(open_pos or [])
-                except Exception:
-                    pass
-                close_result = await self._close_all_positions(bot_id, symbol=symbol)
-                result["detail"] = f"closed_positions:{close_result}"
+                symbol_filter = symbol if str(lock_scope or "bot").lower() == "bot" else None
+                positions_before = await self._count_open_positions(symbol=symbol_filter)
+                close_result = await self._close_all_positions(bot_id, symbol=symbol_filter)
+                positions_after = await self._count_open_positions(symbol=symbol_filter)
+                result["detail"] = (
+                    f"closed_positions:{close_result['closed_count']},"
+                    f"positions_before:{positions_before},positions_after:{positions_after}"
+                )
                 await self._stop_bot(bot_id)
                 if action_row is not None:
                     action_row.positions_before = positions_before
-                    action_row.positions_after = 0
+                    action_row.positions_after = positions_after
+                if positions_after > 0:
+                    raise RuntimeError(
+                        f"daily_lock_postcondition_failed_remaining_positions:{positions_after}"
+                    )
 
             elif action == "reduce_risk_only":
                 await self._set_risk_mode(bot_id, "reduce_only")
@@ -160,6 +165,13 @@ class DailyLockRuntimeController:
                     await self._db.commit()
                 except Exception:
                     await self._db.rollback()
+            if action == "close_all_and_stop":
+                await self._create_critical_incident(
+                    bot_id=bot_id,
+                    incident_type="daily_lock_close_all_postcondition_failed",
+                    title="Daily lock close-all postcondition failed",
+                    detail=str(exc),
+                )
 
         if self._on_action_completed is not None:
             try:
@@ -245,7 +257,7 @@ class DailyLockRuntimeController:
         else:
             raise RuntimeError("registry_set_risk_mode_unavailable")
 
-    async def _close_all_positions(self, bot_id: str, symbol: Optional[str] = None) -> str:
+    async def _close_all_positions(self, bot_id: str, symbol: Optional[str] = None) -> dict:
         provider = self._provider
         if hasattr(provider, "close_all_positions"):
             results = await provider.close_all_positions(symbol)
@@ -255,7 +267,7 @@ class DailyLockRuntimeController:
             remaining_count = len([p for p in (remaining or []) if not symbol or str(p.get("symbol") or "").upper() == str(symbol).upper()])
             if remaining_count > 0:
                 raise RuntimeError(f"close_all_positions_incomplete:{remaining_count}")
-            return str(count)
+            return {"closed_count": count, "remaining_count": remaining_count}
         # Fallback: close individual positions
         try:
             positions = await provider.get_open_positions()
@@ -278,4 +290,44 @@ class DailyLockRuntimeController:
         remaining_count = len([p for p in (remaining or []) if not symbol or str(p.get("symbol") or "").upper() == str(symbol).upper()])
         if remaining_count > 0:
             raise RuntimeError(f"close_positions_fallback_incomplete:{remaining_count}")
-        return str(closed)
+        return {"closed_count": closed, "remaining_count": remaining_count}
+
+    async def _count_open_positions(self, symbol: Optional[str] = None) -> int:
+        positions = await self._provider.get_open_positions()
+        if not symbol:
+            return len(positions or [])
+        symbol_upper = str(symbol).upper()
+        return len(
+            [
+                p
+                for p in (positions or [])
+                if str(p.get("symbol") or "").upper() == symbol_upper
+            ]
+        )
+
+    async def _create_critical_incident(
+        self,
+        *,
+        bot_id: str,
+        incident_type: str,
+        title: str,
+        detail: str,
+    ) -> None:
+        if self._db is None:
+            return
+        from app.models import TradingIncident
+
+        self._db.add(
+            TradingIncident(
+                bot_instance_id=bot_id,
+                incident_type=incident_type,
+                severity="critical",
+                title=title,
+                detail=detail,
+                status="open",
+            )
+        )
+        try:
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()

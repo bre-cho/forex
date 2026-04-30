@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -86,6 +88,10 @@ class LiveReadinessGuard:
             return ReadinessResult(False, f"provider_capability_proof_error:{exc}")
         if not proof.all_required_passed:
             failed = ",".join(proof.failed_checks())
+            detail_payload = dict(getattr(proof, "detail", {}) or {})
+            detail_hash = hashlib.sha256(
+                json.dumps(detail_payload, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
             return ReadinessResult(
                 False,
                 f"broker_capability_proof_failed:{failed}",
@@ -95,8 +101,14 @@ class LiveReadinessGuard:
                     "mode": str(getattr(proof, "mode", "")),
                     "symbol": str(symbol or ""),
                     "timeframe": str(timeframe or ""),
+                    "proof_detail_hash": detail_hash,
+                    "detail": detail_payload,
                 },
             )
+        detail_payload = dict(getattr(proof, "detail", {}) or {})
+        detail_hash = hashlib.sha256(
+            json.dumps(detail_payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
         return ReadinessResult(
             True,
             "ok",
@@ -107,7 +119,8 @@ class LiveReadinessGuard:
                 "timeframe": str(timeframe or ""),
                 "proof_timestamp": float(getattr(proof, "proof_timestamp", 0.0) or 0.0),
                 "failed_checks": list(getattr(proof, "failed_checks")() if callable(getattr(proof, "failed_checks", None)) else []),
-                "detail": dict(getattr(proof, "detail", {}) or {}),
+                "proof_detail_hash": detail_hash,
+                "detail": detail_payload,
             },
         )
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 from types import SimpleNamespace
 import pytest
-from trading_core.runtime.pre_execution_gate import hash_gate_context
+from trading_core.runtime.pre_execution_gate import hash_gate_context, build_frozen_context_id
 from trading_core.runtime.frozen_context_contract import validate_frozen_context_bindings
 
 
@@ -27,7 +27,10 @@ def _base_ctx(**overrides):
         "broker_account_snapshot_hash": "acct_snap_hash_1",
         "risk_context_hash": "risk_hash_1",
         "max_price_deviation_bps": 20.0,
+        "frozen_context_id": "",
+        "context_signature": "sig-1",
     }
+    gate_context["frozen_context_id"] = build_frozen_context_id(gate_context)
     d = dict(
         bot_instance_id="bot-1",
         idempotency_key="idem-abc",
@@ -41,8 +44,16 @@ def _base_ctx(**overrides):
         take_profit=1.1200,
         gate_context=gate_context,
         context_hash=hash_gate_context(gate_context),
+        frozen_context_id=gate_context["frozen_context_id"],
+        context_signature=str(gate_context.get("context_signature") or "sig-1"),
     )
     d.update(overrides)
+    if "gate_context" in overrides:
+        gc = dict(d.get("gate_context") or {})
+        if "frozen_context_id" not in overrides:
+            d["frozen_context_id"] = str(gc.get("frozen_context_id") or "")
+        if "context_signature" not in overrides:
+            d["context_signature"] = str(gc.get("context_signature") or "")
     return SimpleNamespace(**d)
 
 
@@ -95,7 +106,10 @@ def test_symbol_mismatch():
         "broker_account_snapshot_hash": "acct_snap_hash_1",
         "risk_context_hash": "risk_hash_1",
         "max_price_deviation_bps": 20.0,
+        "frozen_context_id": "",
+        "context_signature": "sig-1",
     }
+    gate_context["frozen_context_id"] = build_frozen_context_id(gate_context)
     ctx = _base_ctx(gate_context=gate_context, context_hash=hash_gate_context(gate_context))
     r = validate_frozen_context_bindings(request=_base_req(), context=ctx, provider_name="ctrader")
     assert not r.ok
@@ -158,7 +172,10 @@ def test_missing_gate_context_field_blocks_live() -> None:
         "broker_snapshot_hash": "broker_snap_hash_1",
         "broker_account_snapshot_hash": "acct_snap_hash_1",
         "risk_context_hash": "risk_hash_1",
+        "frozen_context_id": "",
+        "context_signature": "sig-1",
     }
+    gate_context["frozen_context_id"] = build_frozen_context_id(gate_context)
     ctx = _base_ctx(gate_context=gate_context, context_hash=hash_gate_context(gate_context))
     r = validate_frozen_context_bindings(request=_base_req(), context=ctx, provider_name="ctrader")
     assert r.ok is False
@@ -184,7 +201,10 @@ def test_missing_policy_hash_blocks_live() -> None:
         "broker_snapshot_hash": "broker_snap_hash_1",
         "broker_account_snapshot_hash": "acct_snap_hash_1",
         "risk_context_hash": "risk_hash_1",
+        "frozen_context_id": "",
+        "context_signature": "sig-1",
     }
+    gate_context["frozen_context_id"] = build_frozen_context_id(gate_context)
     ctx = _base_ctx(gate_context=gate_context, context_hash=hash_gate_context(gate_context))
     r = validate_frozen_context_bindings(request=_base_req(), context=ctx, provider_name="ctrader")
     assert r.ok is False

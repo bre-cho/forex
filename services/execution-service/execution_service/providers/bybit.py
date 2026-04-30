@@ -385,7 +385,17 @@ class BybitProvider(BrokerProvider):
                 spec = self._instrument_info.get("priceFilter", {})
                 tick = float(spec.get("tickSize", 0.01) or 0.01)
                 spread_pips = (ask - bid) / tick if tick > 0 else 0.0
-                return {"symbol": symbol, "bid": bid, "ask": ask, "spread_pips": spread_pips}
+                ts_ms = float(t.get("time") or resp.get("time") or 0)
+                ts = ts_ms / 1000.0 if ts_ms > 0 else 0.0
+                quote_id = str(t.get("bid1Price") or "") + ":" + str(t.get("ask1Price") or "") + ":" + str(int(ts_ms or 0))
+                return {
+                    "symbol": symbol,
+                    "bid": bid,
+                    "ask": ask,
+                    "spread_pips": spread_pips,
+                    "timestamp": ts,
+                    "quote_id": f"bybit:{symbol}:{quote_id}",
+                }
         except Exception:
             pass
         return None
