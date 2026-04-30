@@ -35,6 +35,10 @@ class ProviderCertificationService:
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+    @classmethod
+    def build_evidence_hash(cls, evidence: dict[str, Any] | None) -> str:
+        return cls._canonical_hash(dict(evidence or {}))
+
     @staticmethod
     def _normalize_required_checks(required_checks: Iterable[str] | None) -> list[str]:
         values = [str(v).strip() for v in (required_checks or DEFAULT_REQUIRED_CHECKS)]
@@ -63,7 +67,14 @@ class ProviderCertificationService:
         actor_user_id: str | None = None,
     ) -> ProviderCertification:
         req = self._normalize_required_checks(required_checks)
+        normalized_evidence = dict(evidence or {})
+        if not normalized_evidence.get("evidence_hash"):
+            normalized_evidence["evidence_hash"] = self.build_evidence_hash(normalized_evidence)
+
         live_certified, checks_passed = self._evaluate_checks(req, checks)
+        # Evidence is mandatory for live certification; checks-only is insufficient.
+        if str(mode).lower() == "live" and not str(normalized_evidence.get("evidence_hash") or ""):
+            live_certified = False
 
         proof_payload = {
             "bot_instance_id": str(bot_instance_id),
@@ -74,7 +85,7 @@ class ProviderCertificationService:
             "required_checks": list(req),
             "checks": dict(checks or {}),
             "checks_passed": list(checks_passed),
-            "evidence": dict(evidence or {}),
+            "evidence": dict(normalized_evidence),
             "actor_user_id": str(actor_user_id or ""),
         }
         cert_hash = self._canonical_hash(proof_payload)
@@ -93,7 +104,7 @@ class ProviderCertificationService:
             required_checks=list(req),
             checks_passed=list(checks_passed),
             checks=dict(checks or {}),
-            evidence=dict(evidence or {}),
+            evidence=dict(normalized_evidence),
             actor_user_id=(str(actor_user_id) if actor_user_id else None),
             certified_at=(now if live_certified else None),
             expires_at=(expires_at if live_certified else None),

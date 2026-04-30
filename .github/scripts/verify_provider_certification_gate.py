@@ -42,6 +42,12 @@ if svc.exists():
     svc_src = svc.read_text()
     check("provider_certification_expired" in svc_src, "provider certification service handles expired certification")
     check("provider_certification_revoked" in svc_src, "provider certification service handles revoked certification")
+    check("build_evidence_hash" in svc_src, "provider certification service can compute evidence hash")
+
+if router.exists():
+    r_src = router.read_text()
+    check("smoke_suite_run_id" in r_src, "provider certification router requires smoke_suite_run_id for live")
+    check("artifact_ref" in r_src or "artifact_uri" in r_src, "provider certification router requires artifact reference for live")
 
 if main_py.exists():
     src = main_py.read_text()

@@ -408,11 +408,22 @@ async def submit_manual_signal(
     db: AsyncSession = Depends(get_db),
     _member=Depends(require_workspace_role("trader")),
 ):
-    await _get_bot_or_404(bot_id, workspace_id, db)
+    bot = await _get_bot_or_404(bot_id, workspace_id, db)
     registry = _get_registry(request)
     if registry is None or registry.get(bot_id) is None:
         raise HTTPException(status_code=404, detail="Runtime not found")
     runtime = registry.get(bot_id)
+
+    if bot.mode == "live":
+        provider = getattr(runtime, "broker_provider", None) if runtime else None
+        readiness = await LiveReadinessGuard.check_provider(provider, require_live=True)
+        if not readiness.ok:
+            raise HTTPException(status_code=503, detail=f"manual_signal_blocked:{readiness.reason}")
+        try:
+            await run_live_start_preflight(bot=bot, provider=provider, db=db)
+        except LiveStartPreflightError as exc:
+            raise HTTPException(status_code=503, detail=f"manual_signal_blocked:{str(exc)}") from exc
+
     try:
         signal = await runtime.submit_manual_signal(direction=direction, confidence=confidence)
     except Exception as exc:

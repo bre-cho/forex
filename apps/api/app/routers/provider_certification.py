@@ -89,6 +89,18 @@ async def record_provider_certification(
     evidence = payload.get("evidence")
     if evidence is not None and not isinstance(evidence, dict):
         raise HTTPException(status_code=400, detail="evidence must be an object")
+    evidence_obj = dict(evidence or {})
+
+    if mode == "live":
+        # Live certification must be backed by smoke-suite evidence, not manual toggles.
+        smoke_suite_run_id = str(evidence_obj.get("smoke_suite_run_id") or "").strip()
+        artifact_ref = str(evidence_obj.get("artifact_ref") or evidence_obj.get("artifact_uri") or "").strip()
+        if not smoke_suite_run_id:
+            raise HTTPException(status_code=400, detail="live certification requires evidence.smoke_suite_run_id")
+        if not artifact_ref:
+            raise HTTPException(status_code=400, detail="live certification requires evidence.artifact_ref")
+        if not evidence_obj.get("evidence_hash"):
+            evidence_obj["evidence_hash"] = ProviderCertificationService.build_evidence_hash(evidence_obj)
 
     required_checks = payload.get("required_checks")
     if required_checks is not None and not isinstance(required_checks, list):
@@ -102,7 +114,7 @@ async def record_provider_certification(
         account_id=(str(payload.get("account_id")) if payload.get("account_id") else None),
         symbol=(str(payload.get("symbol")) if payload.get("symbol") else None),
         checks=(checks or {}),
-        evidence=(evidence or {}),
+        evidence=evidence_obj,
         ttl_seconds=(int(payload.get("ttl_seconds")) if payload.get("ttl_seconds") is not None else None),
         required_checks=required_checks,
         actor_user_id=str(getattr(current_user, "id", "") or "") or None,

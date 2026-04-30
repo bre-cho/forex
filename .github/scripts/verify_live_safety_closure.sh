@@ -113,6 +113,26 @@ else
     fail "execution-service directory not found"
 fi
 
+# ── 13. Manual signal route must use same live preflight gate ───────────────
+BOTS_ROUTER="$REPO_ROOT/apps/api/app/routers/bots.py"
+if grep -q "@router.post(\"/{bot_id}/manual-signal\")" "$BOTS_ROUTER"; then
+    pass "bots manual-signal route exists"
+else
+    fail "manual-signal route missing"
+fi
+
+if grep -q "manual_signal_blocked" "$BOTS_ROUTER"; then
+    pass "manual-signal route has explicit live block reason"
+else
+    fail "manual-signal route missing live block reason"
+fi
+
+if grep -q "run_live_start_preflight" "$BOTS_ROUTER"; then
+    pass "manual-signal route uses run_live_start_preflight"
+else
+    fail "manual-signal route does not call run_live_start_preflight"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 if [ "$ERRORS" -gt 0 ]; then
