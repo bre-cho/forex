@@ -145,6 +145,7 @@ from app.routers import (
     incidents,
     live_trading,
     notifications,
+    provider_certification,
     public,
     qa_parity,
     risk_policy,
@@ -172,6 +173,7 @@ app.include_router(admin.router)
 app.include_router(ws.router)
 app.include_router(incidents.router)
 app.include_router(live_trading.router)
+app.include_router(provider_certification.router)
 app.include_router(risk_policy.router)
 app.include_router(experiments.router)
 app.include_router(qa_parity.router)

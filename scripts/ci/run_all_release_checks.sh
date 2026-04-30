@@ -47,6 +47,12 @@ run_check "live_import_boundary" \
 run_check "no_live_stub_provider" \
   python .github/scripts/verify_no_live_stub_provider.py
 
+run_check "no_stub_in_prod" \
+  python .github/scripts/verify_no_stub_in_prod.py
+
+run_check "provider_certification_gate" \
+  python .github/scripts/verify_provider_certification_gate.py
+
 run_check "live_no_fallback_spec" \
   bash .github/scripts/verify_live_no_fallback_spec.sh
 

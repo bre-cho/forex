@@ -135,6 +135,14 @@ jobs:
         run: |
           .github/scripts/verify_no_live_stub_provider.py
 
+      - name: Verify no stub runtime in production/staging
+        run: |
+          python .github/scripts/verify_no_stub_in_prod.py
+
+      - name: Verify provider certification gate
+        run: |
+          python .github/scripts/verify_provider_certification_gate.py
+
       - name: Verify frontend/API contract
         run: |
           .github/scripts/verify_frontend_api_contract.py

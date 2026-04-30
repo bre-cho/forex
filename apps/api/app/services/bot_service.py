@@ -31,6 +31,7 @@ from app.services.reconciliation_queue_service import ReconciliationQueueService
 from app.services.safety_ledger import SafetyLedgerService
 from app.services.submit_outbox_service import SubmitOutboxService
 from app.services.live_readiness_guard import LiveReadinessGuard
+from app.services.environment_runtime_policy import enforce_stub_runtime_allowed
 from app.services.policy_service import PolicyService
 from execution_service.order_state_machine import validate_transition
 
@@ -948,6 +949,7 @@ async def create_runtime_for_bot(
             raise RuntimeError(
                 f"Live mode requires trading_core runtime components for bot {bot.id}"
             )
+        enforce_stub_runtime_allowed()
         logger.warning("trading_core not available, creating stub runtime for bot: %s", bot.id)
         await _register_stub(bot.id, registry)
     except ValueError as exc:

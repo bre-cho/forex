@@ -35,6 +35,14 @@ jobs:
         run: |
           python .github/scripts/verify_no_live_stub_provider.py
 
+      - name: Verify no stub runtime in production/staging
+        run: |
+          python .github/scripts/verify_no_stub_in_prod.py
+
+      - name: Verify provider certification gate
+        run: |
+          python .github/scripts/verify_provider_certification_gate.py
+
       - name: Verify no live fallback spec
         run: |
           bash .github/scripts/verify_live_no_fallback_spec.sh

@@ -10,6 +10,18 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 
+def _app_env() -> str:
+    return str(os.getenv("APP_ENV", "local") or "local").strip().lower()
+
+
+def _allow_stub_runtime() -> bool:
+    # Stub fallback is allowed in local/dev. Test requires explicit opt-in.
+    env = _app_env()
+    if env in {"local", "dev", "development"}:
+        return True
+    return env == "test" and str(os.getenv("ALLOW_STUB_RUNTIME", "false") or "false").strip().lower() == "true"
+
+
 class RuntimeFactory:
     """Creates BotRuntime instances from configuration dicts."""
 
@@ -28,10 +40,12 @@ class RuntimeFactory:
         try:
             from execution_service.providers import get_provider
         except ImportError:
-            if str(runtime_mode or "").lower() == "live" and os.environ.get("ALLOW_STUB_IN_LIVE", "false").lower() != "true":
+            env = _app_env()
+            if env in {"staging", "production"}:
+                raise RuntimeError("stub_runtime_forbidden_in_staging_or_production")
+            if not _allow_stub_runtime():
                 raise RuntimeError(
-                    "Live mode requires execution_service providers. "
-                    "Stub fallback is disabled when ALLOW_STUB_IN_LIVE=false."
+                    "Stub fallback is disabled unless APP_ENV=test and ALLOW_STUB_RUNTIME=true"
                 )
             logger.warning("execution_service.providers unavailable, using local paper adapter")
             from trading_core.engines.data_provider import MockDataProvider

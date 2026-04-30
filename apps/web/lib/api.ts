@@ -92,6 +92,20 @@ export const botApi = {
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/reconciliation-runs`, { params: { limit } }),
   operationsDashboard: (workspaceId: string, botId: string) =>
     api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/operations-dashboard`),
+  providerCertificationStatus: (
+    workspaceId: string,
+    botId: string,
+    provider: string,
+    mode = 'live',
+    accountId?: string
+  ) =>
+    api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/provider-certification/status`, {
+      params: { provider, mode, account_id: accountId },
+    }),
+  providerCertificationRecords: (workspaceId: string, botId: string, limit = 50) =>
+    api.get(`/v1/workspaces/${workspaceId}/bots/${botId}/provider-certification/records`, {
+      params: { limit },
+    }),
   reconcileNow: (workspaceId: string, botId: string) =>
     api.post(`/v1/workspaces/${workspaceId}/bots/${botId}/reconcile-now`),
   resolveReconciliationItem: (

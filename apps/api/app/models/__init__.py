@@ -627,6 +627,27 @@ class ReconciliationAttemptEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
+class ProviderCertification(Base):
+    __tablename__ = "provider_certifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    mode: Mapped[str] = mapped_column(String(32), default="live", nullable=False)
+    account_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    live_certified: Mapped[bool] = mapped_column(Boolean, default=False, index=True, nullable=False)
+    certification_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    required_checks: Mapped[list] = mapped_column(JSON, default=list)
+    checks_passed: Mapped[list] = mapped_column(JSON, default=list)
+    checks: Mapped[dict] = mapped_column(JSON, default=dict)
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    actor_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    certified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
 class TradingIncident(Base):
     __tablename__ = "trading_incidents"
 

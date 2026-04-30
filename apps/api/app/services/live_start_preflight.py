@@ -14,6 +14,7 @@ from app.services.reconciliation_queue_service import ReconciliationQueueService
 from app.services.daily_trading_state import DailyTradingStateService
 from app.services.live_readiness_guard import LiveReadinessGuard
 from app.services.policy_service import PolicyService
+from app.services.provider_certification_service import ProviderCertificationService
 
 # Minimum required keys for a live-approved risk policy
 _REQUIRED_LIVE_POLICY_KEYS = {
@@ -51,6 +52,7 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
     checks: dict[str, bool] = {
         "broker_health": False,
         "broker_capability_proof": False,
+        "provider_certified": False,
         "reconciliation_daemon_healthy": False,
         "submit_outbox_recovery_healthy": False,
         "active_policy": False,
@@ -93,6 +95,17 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
         proof_payload=dict(proof_result.details or {}),
     )
     checks["broker_capability_proof"] = True
+
+    provider_name = str(getattr(provider, "provider_name", type(provider).__name__) or "")
+    cert_svc = ProviderCertificationService(db)
+    certified = await cert_svc.is_live_certified(
+        bot_instance_id=str(bot.id),
+        provider=provider_name,
+        account_id=account_id or None,
+    )
+    checks["provider_certified"] = bool(certified)
+    if not certified:
+        raise LiveStartPreflightError("provider_not_live_certified")
 
     daemon_healthy = await ReconciliationDaemonHealthService.is_healthy(db)
     checks["reconciliation_daemon_healthy"] = bool(daemon_healthy)
