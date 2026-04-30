@@ -37,16 +37,21 @@ class BybitProvider(BrokerProvider):
         symbol: str = "BTCUSDT",
         timeframe: str = "M5",
         testnet: bool = True,
+        mode: str | None = None,
+        _allow_live: bool = False,
     ) -> None:
-        if bool(testnet) is False:
+        resolved_mode = str(mode or ("demo" if bool(testnet) else "live")).lower()
+        if resolved_mode not in {"demo", "live"}:
+            raise ValueError(f"BybitProvider mode must be demo|live, got: {resolved_mode}")
+        if resolved_mode == "live" and not bool(_allow_live):
             raise ValueError("BybitProvider is demo-only; use BybitLiveProvider for live mode")
         self.api_key = api_key
         self.api_secret = api_secret
         self.symbol = symbol
         self.timeframe = timeframe
-        self.testnet = True
+        self.testnet = resolved_mode != "live"
         self.provider_name = "bybit"
-        self.mode = "demo"
+        self.mode = resolved_mode
         self._session: Optional[Any] = None
         self._connected = False
         self._instrument_info: dict[str, Any] = {}
@@ -285,6 +290,10 @@ class BybitProvider(BrokerProvider):
     @property
     def supports_client_order_id(self) -> bool:
         return True
+
+    @property
+    def client_order_id_transport(self) -> str:
+        return "orderLinkId"
 
     async def get_instrument_spec(self, symbol: str) -> Optional[Dict[str, Any]]:
         self._require_sdk()

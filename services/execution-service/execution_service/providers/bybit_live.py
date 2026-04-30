@@ -7,7 +7,6 @@ class BybitLiveProvider(BybitProvider):
     """Explicit live-only Bybit provider."""
 
     def __init__(self, *args, **kwargs):
-        kwargs["testnet"] = True
+        kwargs["mode"] = "live"
+        kwargs["_allow_live"] = True
         super().__init__(*args, **kwargs)
-        self.testnet = False
-        self.mode = "live"

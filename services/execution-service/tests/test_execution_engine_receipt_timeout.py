@@ -56,7 +56,7 @@ async def test_execution_engine_timeout_returns_unknown_status() -> None:
 
 def _live_command(idem: str = "idem-live-timeout") -> ExecutionCommand:
     gate_context = {
-        "schema_version": "gate_context_v1",
+        "schema_version": "gate_context_v2",
         "provider_mode": "live",
         "runtime_mode": "live",
         "broker_connected": True,
@@ -78,7 +78,16 @@ def _live_command(idem: str = "idem-live-timeout") -> ExecutionCommand:
         "account_id": "acc-1",
         "broker_name": "ctrader",
         "policy_version": "v1",
+        "policy_version_id": "v1",
+        "policy_status": "active",
         "policy_hash": "policy_hash_1",
+        "quote_id": "q-1",
+        "quote_timestamp": 1000.0,
+        "broker_server_time": 1001.0,
+        "instrument_spec_hash": "spec_hash_1",
+        "broker_snapshot_hash": "broker_snap_hash_1",
+        "broker_account_snapshot_hash": "acct_snap_hash_1",
+        "risk_context_hash": "risk_hash_1",
         "idempotency_key": idem,
         "approved_volume": 0.01,
     }

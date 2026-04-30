@@ -8,7 +8,7 @@ from trading_core.runtime.frozen_context_contract import validate_frozen_context
 
 def _base_ctx(**overrides):
     gate_context = {
-        "schema_version": "gate_context_v1",
+        "schema_version": "gate_context_v2",
         "symbol": "EURUSD",
         "side": "buy",
         "requested_volume": 0.1,
@@ -17,7 +17,16 @@ def _base_ctx(**overrides):
         "account_id": "acc-123",
         "broker_name": "ctrader",
         "policy_version": "v1.0",
+        "policy_version_id": "v1.0",
+        "policy_status": "active",
         "policy_hash": "policy_hash_abc",
+        "quote_id": "q-1",
+        "quote_timestamp": 1000.0,
+        "instrument_spec_hash": "spec_hash_1",
+        "broker_snapshot_hash": "broker_snap_hash_1",
+        "broker_account_snapshot_hash": "acct_snap_hash_1",
+        "risk_context_hash": "risk_hash_1",
+        "max_price_deviation_bps": 20.0,
     }
     d = dict(
         bot_instance_id="bot-1",
@@ -67,7 +76,7 @@ def test_broker_name_case_insensitive():
 
 def test_symbol_mismatch():
     gate_context = {
-        "schema_version": "gate_context_v1",
+        "schema_version": "gate_context_v2",
         "symbol": "GBPUSD",
         "side": "buy",
         "requested_volume": 0.1,
@@ -76,7 +85,16 @@ def test_symbol_mismatch():
         "account_id": "acc-123",
         "broker_name": "ctrader",
         "policy_version": "v1.0",
+        "policy_version_id": "v1.0",
+        "policy_status": "active",
         "policy_hash": "policy_hash_abc",
+        "quote_id": "q-1",
+        "quote_timestamp": 1000.0,
+        "instrument_spec_hash": "spec_hash_1",
+        "broker_snapshot_hash": "broker_snap_hash_1",
+        "broker_account_snapshot_hash": "acct_snap_hash_1",
+        "risk_context_hash": "risk_hash_1",
+        "max_price_deviation_bps": 20.0,
     }
     ctx = _base_ctx(gate_context=gate_context, context_hash=hash_gate_context(gate_context))
     r = validate_frozen_context_bindings(request=_base_req(), context=ctx, provider_name="ctrader")
@@ -90,15 +108,15 @@ def test_volume_mismatch():
     assert "volume" in r.reason
 
 
-def test_entry_price_within_5pct_band():
-    # 1.1000 * 0.04 = 0.044 deviation — within 5%
-    r = validate_frozen_context_bindings(request=_base_req(price=1.1044), context=_base_ctx(), provider_name="ctrader")
+def test_entry_price_within_bps_band():
+    # 20 bps at 1.1000 => max deviation 0.0022
+    r = validate_frozen_context_bindings(request=_base_req(price=1.1010), context=_base_ctx(), provider_name="ctrader")
     assert r.ok
 
 
-def test_entry_price_exceeds_5pct_band():
-    # 1.1000 * 0.06 = 0.066 deviation — outside 5%
-    r = validate_frozen_context_bindings(request=_base_req(price=1.1066 + 1.1000 * 0.06), context=_base_ctx(), provider_name="ctrader")
+def test_entry_price_exceeds_bps_band():
+    # 20 bps at 1.1000 => deviation > 0.0022 must fail
+    r = validate_frozen_context_bindings(request=_base_req(price=1.1030), context=_base_ctx(), provider_name="ctrader")
     assert not r.ok
     assert "entry_price" in r.reason
 
@@ -123,7 +141,7 @@ def test_missing_policy_version():
 
 def test_missing_gate_context_field_blocks_live() -> None:
     gate_context = {
-        "schema_version": "gate_context_v1",
+        "schema_version": "gate_context_v2",
         "symbol": "EURUSD",
         "requested_volume": 0.1,
         "approved_volume": 0.1,
@@ -131,7 +149,15 @@ def test_missing_gate_context_field_blocks_live() -> None:
         "account_id": "acc-123",
         "broker_name": "ctrader",
         "policy_version": "v1.0",
+        "policy_version_id": "v1.0",
+        "policy_status": "active",
         "policy_hash": "policy_hash_abc",
+        "quote_id": "q-1",
+        "quote_timestamp": 1000.0,
+        "instrument_spec_hash": "spec_hash_1",
+        "broker_snapshot_hash": "broker_snap_hash_1",
+        "broker_account_snapshot_hash": "acct_snap_hash_1",
+        "risk_context_hash": "risk_hash_1",
     }
     ctx = _base_ctx(gate_context=gate_context, context_hash=hash_gate_context(gate_context))
     r = validate_frozen_context_bindings(request=_base_req(), context=ctx, provider_name="ctrader")
@@ -141,7 +167,7 @@ def test_missing_gate_context_field_blocks_live() -> None:
 
 def test_missing_policy_hash_blocks_live() -> None:
     gate_context = {
-        "schema_version": "gate_context_v1",
+        "schema_version": "gate_context_v2",
         "symbol": "EURUSD",
         "side": "buy",
         "requested_volume": 0.1,
@@ -150,6 +176,14 @@ def test_missing_policy_hash_blocks_live() -> None:
         "account_id": "acc-123",
         "broker_name": "ctrader",
         "policy_version": "v1.0",
+        "policy_version_id": "v1.0",
+        "policy_status": "active",
+        "quote_id": "q-1",
+        "quote_timestamp": 1000.0,
+        "instrument_spec_hash": "spec_hash_1",
+        "broker_snapshot_hash": "broker_snap_hash_1",
+        "broker_account_snapshot_hash": "acct_snap_hash_1",
+        "risk_context_hash": "risk_hash_1",
     }
     ctx = _base_ctx(gate_context=gate_context, context_hash=hash_gate_context(gate_context))
     r = validate_frozen_context_bindings(request=_base_req(), context=ctx, provider_name="ctrader")

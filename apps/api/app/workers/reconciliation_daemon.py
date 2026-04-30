@@ -28,6 +28,8 @@ from app.models import ReconciliationQueueItem, TradingIncident
 from app.services.daily_trading_state import DailyTradingStateService
 from app.services.reconciliation_lease_service import ReconciliationLeaseService
 from app.services.reconciliation_queue_service import ReconciliationQueueService
+from app.services.broker_connection_provider_factory import BrokerConnectionProviderFactory
+from app.services.worker_heartbeat_service import WorkerHeartbeatService
 from app.services.incident_notifier import notify_incident
 
 logger = logging.getLogger(__name__)
@@ -119,14 +121,25 @@ async def _attempt_broker_reconcile(item: ReconciliationQueueItem) -> bool:
     """
     try:
         registry = get_registry()
+        provider_from_runtime = False
+        provider = None
         if registry is None or not hasattr(registry, "get"):
-            return False
-        runtime = registry.get(str(item.bot_instance_id))
-        if runtime is None:
-            return False
-        provider = getattr(runtime, "broker_provider", None)
+            runtime = None
+        else:
+            runtime = registry.get(str(item.bot_instance_id))
+        if runtime is not None:
+            provider = getattr(runtime, "broker_provider", None)
+            provider_from_runtime = provider is not None
+        if provider is None:
+            # Runtime may be down. Reconstruct provider from DB credentials.
+            async with AsyncSessionLocal() as fac_db:
+                factory = BrokerConnectionProviderFactory(fac_db)
+                provider = await factory.create_provider_for_bot(str(item.bot_instance_id))
         if provider is None:
             return False
+
+        if not bool(getattr(provider, "is_connected", False)) and callable(getattr(provider, "connect", None)):
+            await provider.connect()
 
         from execution_service.unknown_order_reconciler import UnknownOrderReconciler
 
@@ -186,6 +199,15 @@ async def _attempt_broker_reconcile(item: ReconciliationQueueItem) -> bool:
             exc,
         )
         return False
+    finally:
+        try:
+            # Disconnect only when provider was created by daemon fallback (not runtime-owned).
+            if "provider" in locals() and provider is not None and not bool(locals().get("provider_from_runtime", False)):
+                disconnect = getattr(provider, "disconnect", None)
+                if callable(disconnect):
+                    await disconnect()
+        except Exception:
+            pass
 
 
 async def _process_item(
@@ -281,6 +303,17 @@ async def _process_item(
 async def _run_once(worker_id: str) -> None:
     """Run a single poll cycle."""
     async with AsyncSessionLocal() as db:
+        try:
+            hb = WorkerHeartbeatService(db)
+            await hb.beat(
+                worker_name="reconciliation_daemon",
+                worker_id=worker_id,
+                status="running",
+                detail={"phase": "poll"},
+            )
+        except Exception:
+            pass
+
         # Clear stale leases from workers that may have died
         lease_svc = ReconciliationLeaseService(db)
         await lease_svc.release_all_expired()
@@ -317,6 +350,17 @@ async def run_reconciliation_daemon(
     worker_id = _worker_id()
     logger.info("reconciliation_daemon: started worker=%s interval=%.1fs", worker_id, poll_interval)
     _daemon_running = True
+    try:
+        async with AsyncSessionLocal() as db:
+            hb = WorkerHeartbeatService(db)
+            await hb.beat(
+                worker_name="reconciliation_daemon",
+                worker_id=worker_id,
+                status="running",
+                detail={"phase": "start", "poll_interval": poll_interval},
+            )
+    except Exception:
+        pass
 
     try:
         while True:
@@ -344,5 +388,16 @@ async def run_reconciliation_daemon(
                 break
     finally:
         _daemon_running = False
+        try:
+            async with AsyncSessionLocal() as db:
+                hb = WorkerHeartbeatService(db)
+                await hb.beat(
+                    worker_name="reconciliation_daemon",
+                    worker_id=worker_id,
+                    status="stopped",
+                    detail={"phase": "stop"},
+                )
+        except Exception:
+            pass
 
     logger.info("reconciliation_daemon: stopped worker=%s", worker_id)

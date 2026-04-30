@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 import pandas as pd
 
@@ -124,6 +124,59 @@ class BrokerCapabilityProof:
             "close_all_supported": self.close_all_supported,
         }
         return [k for k, v in checks.items() if not v]
+
+
+@runtime_checkable
+class LiveBrokerProviderProtocol(Protocol):
+    """Structural protocol for providers allowed in live runtime mode."""
+
+    provider_name: str
+    mode: str
+
+    @property
+    def is_connected(self) -> bool:
+        ...
+
+    @property
+    def supports_client_order_id(self) -> bool:
+        ...
+
+    @property
+    def client_order_id_transport(self) -> str:
+        ...
+
+    async def get_account_info(self) -> AccountInfo:
+        ...
+
+    async def get_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
+        ...
+
+    async def get_server_time(self) -> Optional[float]:
+        ...
+
+    async def get_instrument_spec(self, symbol: str) -> Optional[Dict[str, Any]]:
+        ...
+
+    async def estimate_margin(self, symbol: str, side: str, volume: float, price: float) -> float:
+        ...
+
+    async def get_order_by_client_id(self, client_order_id: str) -> Optional[Dict[str, Any]]:
+        ...
+
+    async def get_executions_by_client_id(self, client_order_id: str) -> List[Dict[str, Any]]:
+        ...
+
+    async def close_all_positions(self, symbol: Optional[str] = None) -> List[OrderResult]:
+        ...
+
+    async def verify_live_capability(
+        self,
+        *,
+        expected_account_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+    ) -> BrokerCapabilityProof:
+        ...
 
 
 
@@ -271,6 +324,14 @@ class BrokerProvider(ABC):
         Live mode must fail if this returns False (no idempotency audit trail).
         """
         return False
+
+    @property
+    def client_order_id_transport(self) -> str:
+        """How client order id is transported to broker.
+
+        Typical values: comment | client_order_id | orderLinkId | magic | unsupported
+        """
+        return "unsupported"
 
     async def verify_live_capability(
         self,

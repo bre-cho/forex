@@ -70,6 +70,7 @@ class RuntimeRegistry:
         on_reconciliation_incident=None,
         on_unknown_order_resolved=None,
         mark_submitting_hook=None,
+        mark_submit_phase_hook=None,
         enqueue_unknown_hook=None,
     ) -> BotRuntime:
         """Register a new BotRuntime.  Raises ValueError if one already exists."""
@@ -104,6 +105,7 @@ class RuntimeRegistry:
                 on_reconciliation_incident=on_reconciliation_incident,
                 on_unknown_order_resolved=on_unknown_order_resolved,
                 mark_submitting_hook=mark_submitting_hook,
+                mark_submit_phase_hook=mark_submit_phase_hook,
                 enqueue_unknown_hook=enqueue_unknown_hook,
             )
             self._runtimes[bot_instance_id] = runtime

@@ -445,6 +445,39 @@ class BrokerOrderAttempt(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 
 
+class SubmitOutbox(Base):
+    __tablename__ = "submit_outbox"
+    __table_args__ = (
+        UniqueConstraint("bot_instance_id", "idempotency_key", name="uq_submit_outbox_bot_idem"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    phase: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    phase_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class WorkerHeartbeat(Base):
+    __tablename__ = "worker_heartbeats"
+    __table_args__ = (
+        UniqueConstraint("worker_name", "worker_id", name="uq_worker_heartbeat_name_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    worker_name: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    worker_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
 class DailyLockEvent(Base):
     __tablename__ = "daily_lock_events"
 

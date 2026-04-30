@@ -56,6 +56,29 @@ services:
     deploy:
       replicas: 1
 
+  # Nightly integrity worker — verifies ledger/outbox/reconciliation invariants
+  # and raises critical incidents on hard violations.
+  integrity-worker:
+    image: ${API_IMAGE:-forex-api:latest}
+    command: ["python", "-m", "app.workers.order_ledger_integrity_worker_entrypoint"]
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - APP_ENV=production
+      - DEBUG=false
+      - WORKER_MODE=integrity
+      - INTEGRITY_RUN_HOUR_UTC=${INTEGRITY_RUN_HOUR_UTC:-0}
+      - INTEGRITY_RUN_MINUTE_UTC=${INTEGRITY_RUN_MINUTE_UTC:-15}
+      - INTEGRITY_RUN_ON_STARTUP=${INTEGRITY_RUN_ON_STARTUP:-true}
+    env_file:
+      - ../../.env
+    depends_on:
+      - postgres
+      - redis
+    restart: always
+    deploy:
+      replicas: 1
+
   web:
     image: ${WEB_IMAGE:-forex-web:latest}
     ports:

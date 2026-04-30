@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from execution_service.providers.base import LiveBrokerProviderProtocol
+
 
 @dataclass
 class ReadinessResult:
@@ -112,6 +114,8 @@ class LiveReadinessGuard:
     @classmethod
     async def assert_live_provider_contract(cls, provider: Any, *, symbol: str = "") -> ReadinessResult:
         """P0.4: Verify all live-required methods are implemented (not base NotImplemented)."""
+        if not isinstance(provider, LiveBrokerProviderProtocol):
+            return ReadinessResult(False, "live_provider_protocol_non_compliant")
         required_methods = [
             "get_instrument_spec",
             "estimate_margin",
@@ -119,6 +123,7 @@ class LiveReadinessGuard:
             "get_executions_by_client_id",
             "close_all_positions",
             "get_quote",
+            "get_server_time",
         ]
         for name in required_methods:
             fn = getattr(provider, name, None)

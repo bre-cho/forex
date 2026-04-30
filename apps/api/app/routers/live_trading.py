@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
-from app.models import AuditLog, User
+from app.models import AuditLog, ReconciliationQueueItem, User
 from app.services.experiment_registry_service import ExperimentRegistryService
+from app.services.order_ledger_service import OrderLedgerService
+from app.services.reconciliation_queue_service import ReconciliationQueueService
 from app.services.safety_ledger import SafetyLedgerService
 
 router = APIRouter(prefix="/v1/workspaces/{workspace_id}/bots/{bot_id}", tags=["live-trading"])
@@ -177,6 +180,85 @@ async def get_reconciliation_runs(
 ):
     svc = SafetyLedgerService(db)
     return await svc.list_reconciliation_runs(bot_id, limit)
+
+
+@router.post("/reconciliation/{queue_item_id}/resolve")
+async def manual_resolve_reconciliation_item(
+    workspace_id: str,
+    bot_id: str,
+    queue_item_id: int,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Operator/admin manual resolution for dead-letter or ambiguous unknown orders."""
+    if not bool(getattr(current_user, "is_superuser", False)):
+        raise HTTPException(status_code=403, detail="Admin permission required")
+
+    outcome = str((payload or {}).get("outcome") or "").lower().strip()
+    if outcome not in {"filled", "rejected"}:
+        raise HTTPException(status_code=400, detail="outcome must be filled|rejected")
+
+    row = (
+        (
+            await db.execute(
+                select(ReconciliationQueueItem)
+                .where(
+                    ReconciliationQueueItem.id == queue_item_id,
+                    ReconciliationQueueItem.bot_instance_id == bot_id,
+                )
+                .limit(1)
+            )
+        )
+        .scalar_one_or_none()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="reconciliation_queue_item_not_found")
+
+    proof_payload = dict((payload or {}).get("broker_proof") or {})
+    if not proof_payload:
+        raise HTTPException(status_code=400, detail="broker_proof_required")
+
+    ledger = OrderLedgerService(db)
+    event_type = "order_filled" if outcome == "filled" else "order_rejected"
+    await ledger.record_lifecycle_event(
+        bot_instance_id=str(bot_id),
+        event_type=event_type,
+        idempotency_key=str(row.idempotency_key),
+        broker=str(proof_payload.get("provider") or "manual_reconcile"),
+        payload={
+            **proof_payload,
+            "manual_resolution": True,
+            "resolved_by": str(getattr(current_user, "id", "") or ""),
+            "workspace_id": str(workspace_id),
+            "signal_id": str(row.signal_id or ""),
+        },
+    )
+    queue_svc = ReconciliationQueueService(db)
+    await queue_svc.mark_resolved(str(bot_id), str(row.idempotency_key))
+
+    db.add(
+        AuditLog(
+            user_id=str(getattr(current_user, "id", "") or ""),
+            action="manual_reconciliation_resolve",
+            resource_type="reconciliation_queue_item",
+            resource_id=str(queue_item_id),
+            details={
+                "workspace_id": workspace_id,
+                "bot_id": bot_id,
+                "idempotency_key": str(row.idempotency_key),
+                "outcome": outcome,
+                "broker_proof": proof_payload,
+            },
+        )
+    )
+    await db.commit()
+    return {
+        "status": "resolved",
+        "queue_item_id": queue_item_id,
+        "idempotency_key": str(row.idempotency_key),
+        "outcome": outcome,
+    }
 
 
 @router.post("/reconcile-now")

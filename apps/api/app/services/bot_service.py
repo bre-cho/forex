@@ -29,6 +29,7 @@ from app.services.order_ledger_service import OrderLedgerService
 from app.services.order_projection_service import OrderProjectionService
 from app.services.reconciliation_queue_service import ReconciliationQueueService
 from app.services.safety_ledger import SafetyLedgerService
+from app.services.submit_outbox_service import SubmitOutboxService
 from app.services.live_readiness_guard import LiveReadinessGuard
 from app.services.policy_service import PolicyService
 from execution_service.order_state_machine import validate_transition
@@ -464,6 +465,25 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                 payload=dict(payload or {}),
             )
 
+    async def mark_submit_phase_hook(
+        bot_instance_id: str,
+        idempotency_key: str,
+        phase: str,
+        request_hash: str,
+        provider: str,
+        payload: dict,
+    ) -> None:
+        async with AsyncSessionLocal() as db:
+            svc = SubmitOutboxService(db)
+            await svc.mark_phase(
+                bot_instance_id=str(bot_instance_id or bot_id),
+                idempotency_key=str(idempotency_key),
+                phase=str(phase),
+                request_hash=str(request_hash or "") or None,
+                provider=str(provider or "") or None,
+                phase_payload=dict(payload or {}),
+            )
+
     async def get_daily_state() -> dict | None:
         async with AsyncSessionLocal() as db:
             svc = DailyTradingStateService(db)
@@ -760,6 +780,7 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
         "on_reconciliation_incident": on_reconciliation_incident,
         "on_unknown_order_resolved": on_unknown_order_resolved,
         "mark_submitting_hook": mark_submitting_hook,
+        "mark_submit_phase_hook": mark_submit_phase_hook,
         "enqueue_unknown_hook": enqueue_unknown_hook,
     }
 
@@ -855,6 +876,7 @@ async def create_runtime_for_bot(
             on_reconciliation_incident=hooks["on_reconciliation_incident"],
             on_unknown_order_resolved=hooks["on_unknown_order_resolved"],
             mark_submitting_hook=hooks["mark_submitting_hook"],
+            mark_submit_phase_hook=hooks["mark_submit_phase_hook"],
             enqueue_unknown_hook=hooks["enqueue_unknown_hook"],
         )
         logger.info("Runtime created for bot: %s (mode=%s)", bot.id, bot.mode)

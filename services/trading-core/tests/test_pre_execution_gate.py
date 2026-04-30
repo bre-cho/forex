@@ -19,6 +19,7 @@ DEFAULT_POLICY: dict = {
 
 def _ctx(**kwargs) -> dict:
     base = {
+        "schema_version": "gate_context_v2",
         "provider_mode": "live",
         "runtime_mode": "live",
         "broker_connected": True,
@@ -34,9 +35,17 @@ def _ctx(**kwargs) -> dict:
         "idempotency_exists": False,
         "kill_switch": False,
         "policy_hash": "policy_hash_1",
+        "policy_version": "v1",
+        "policy_version_id": "v1",
+        "policy_status": "active",
         "quote_id": "q-1",
         "quote_timestamp": 1.0,
+        "broker_server_time": 2.0,
         "instrument_spec_hash": "spec_hash_1",
+        "broker_snapshot_hash": "broker_snap_hash_1",
+        "broker_account_snapshot_hash": "acct_snap_hash_1",
+        "risk_context_hash": "risk_hash_1",
+        "unknown_orders_unresolved": False,
     }
     base.update(kwargs)
     return base
@@ -204,7 +213,7 @@ def test_portfolio_daily_loss_blocks():
 
 def test_gate_context_hash_is_canonical_for_key_order() -> None:
     ctx_a = {
-        "schema_version": "gate_context_v1",
+        "schema_version": "gate_context_v2",
         "symbol": "EURUSD",
         "side": "buy",
         "requested_volume": 0.1,
@@ -212,6 +221,8 @@ def test_gate_context_hash_is_canonical_for_key_order() -> None:
         "account_id": "acc-1",
         "broker_name": "ctrader",
         "policy_version": "v1",
+        "policy_version_id": "v1",
+        "policy_status": "active",
         "policy_hash": "policy_hash_1",
         "idempotency_key": "idem-1",
         "runtime_mode": "live",
@@ -226,6 +237,14 @@ def test_gate_context_hash_is_canonical_for_key_order() -> None:
         "daily_profit_amount": 0.0,
         "daily_loss_pct": 0.0,
         "consecutive_losses": 0,
+        "quote_id": "q-1",
+        "quote_timestamp": 1.0,
+        "broker_server_time": 2.0,
+        "instrument_spec_hash": "spec_hash_1",
+        "broker_snapshot_hash": "broker_snap_hash_1",
+        "broker_account_snapshot_hash": "acct_snap_hash_1",
+        "risk_context_hash": "risk_hash_1",
+        "unknown_orders_unresolved": False,
     }
     ctx_b = dict(reversed(list(ctx_a.items())))
     assert hash_gate_context(ctx_a) == hash_gate_context(ctx_b)

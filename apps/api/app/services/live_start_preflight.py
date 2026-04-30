@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BotInstance, TradingIncident
 from app.services.broker_capability_proof_service import BrokerCapabilityProofService
+from app.services.reconciliation_daemon_health_service import ReconciliationDaemonHealthService
 from app.services.reconciliation_queue_service import ReconciliationQueueService
 from app.services.daily_trading_state import DailyTradingStateService
 from app.services.live_readiness_guard import LiveReadinessGuard
@@ -19,6 +20,16 @@ _REQUIRED_LIVE_POLICY_KEYS = {
     "max_daily_loss_pct",
     "max_margin_usage_pct",
     "max_account_exposure_pct",
+    "max_symbol_exposure_pct",
+    "max_correlated_usd_exposure_pct",
+    "max_spread_pips",
+    "max_slippage_pips",
+    "min_free_margin_after_order",
+    "stop_loss_required_in_live",
+    "max_open_positions",
+    "max_risk_amount_per_trade",
+    "lock_action_on_daily_tp",
+    "lock_action_on_daily_loss",
 }
 
 
@@ -39,6 +50,7 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
     checks: dict[str, bool] = {
         "broker_health": False,
         "broker_capability_proof": False,
+        "reconciliation_daemon_healthy": False,
         "active_policy": False,
         "daily_state_fresh": False,
         "no_daily_lock": False,
@@ -79,6 +91,11 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
         proof_payload=dict(proof_result.details or {}),
     )
     checks["broker_capability_proof"] = True
+
+    daemon_healthy = await ReconciliationDaemonHealthService.is_healthy(db)
+    checks["reconciliation_daemon_healthy"] = bool(daemon_healthy)
+    if not daemon_healthy:
+        raise LiveStartPreflightError("reconciliation_daemon_unhealthy")
 
     policy_svc = PolicyService(db)
     is_approved = await policy_svc.is_policy_approved_for_live(bot.id)

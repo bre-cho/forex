@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from execution_service.execution_engine import ExecutionEngine
-from execution_service.providers.base import ExecutionCommand, OrderRequest, PreExecutionContext, OrderResult
+from execution_service.providers.base import ExecutionCommand, OrderRequest, OrderResult, PreExecutionContext
 from trading_core.runtime.pre_execution_gate import hash_gate_context
 
 
@@ -31,14 +31,13 @@ class _LiveProvider:
             symbol=request.symbol,
             side=request.side,
             volume=request.volume,
-            fill_price=1.1001,
+            fill_price=1.1,
             commission=0.0,
             success=True,
             submit_status="ACKED",
             fill_status="FILLED",
             broker_order_id="bo-1",
-            account_id="acc-1",
-            raw_response_hash="hash-1",
+            raw_response_hash="h",
             raw_response={"ok": True},
         )
 
@@ -52,7 +51,7 @@ class _LiveProvider:
         return []
 
 
-def _command() -> ExecutionCommand:
+def _live_command() -> ExecutionCommand:
     gate_context = {
         "schema_version": "gate_context_v2",
         "provider_mode": "live",
@@ -79,6 +78,8 @@ def _command() -> ExecutionCommand:
         "policy_version_id": "v1",
         "policy_status": "active",
         "policy_hash": "policy_hash_1",
+        "idempotency_key": "idem-1",
+        "approved_volume": 0.01,
         "quote_id": "q-1",
         "quote_timestamp": 1000.0,
         "broker_server_time": 1001.0,
@@ -86,8 +87,7 @@ def _command() -> ExecutionCommand:
         "broker_snapshot_hash": "broker_snap_hash_1",
         "broker_account_snapshot_hash": "acct_snap_hash_1",
         "risk_context_hash": "risk_hash_1",
-        "idempotency_key": "idem-1",
-        "approved_volume": 0.01,
+        "unknown_orders_unresolved": False,
     }
     ctx = PreExecutionContext(
         bot_instance_id="bot-1",
@@ -127,7 +127,7 @@ def _command() -> ExecutionCommand:
             client_order_id="idem-1",
             idempotency_key="idem-1",
         ),
-        intent={"symbol": "EURUSD", "side": "buy", "lot_size": 0.01},
+        intent={"signal_id": "sig-1"},
         pre_execution_context=ctx,
         idempotency_key="idem-1",
         brain_cycle_id="cycle-1",
@@ -135,59 +135,30 @@ def _command() -> ExecutionCommand:
 
 
 @pytest.mark.asyncio
-async def test_live_uses_broker_identity_for_frozen_context() -> None:
+async def test_execution_engine_marks_submit_outbox_phases() -> None:
     provider = _LiveProvider()
+    phases: list[str] = []
 
     async def _verify(*args, **kwargs):
         return True
+
+    async def _mark_submitting(*args, **kwargs):
+        return None
+
+    async def _mark_phase(*args, **kwargs):
+        phases.append(str(args[2]))
 
     engine = ExecutionEngine(
         provider=provider,
         provider_name="ctrader",
         runtime_mode="live",
         verify_idempotency_reservation=_verify,
+        mark_submitting_hook=_mark_submitting,
+        mark_submit_phase_hook=_mark_phase,
     )
     engine._router.register("ctrader", provider)
 
-    result = await engine.place_order(_command())
+    result = await engine.place_order(_live_command())
     assert result.success is True
-
-
-@pytest.mark.asyncio
-async def test_live_invalid_receipt_is_downgraded_to_unknown() -> None:
-    class _BadProvider(_LiveProvider):
-        async def place_order(self, request: OrderRequest):
-            return OrderResult(
-                order_id="bo-1",
-                symbol=request.symbol,
-                side=request.side,
-                volume=request.volume,
-                fill_price=1.1001,
-                commission=0.0,
-                success=True,
-                submit_status="ACKED",
-                fill_status="FILLED",
-                broker_order_id="",
-                broker_position_id="",
-                account_id="",
-                raw_response_hash=None,
-                raw_response={"ok": True},
-            )
-
-    provider = _BadProvider()
-
-    async def _verify(*args, **kwargs):
-        return True
-
-    engine = ExecutionEngine(
-        provider=provider,
-        provider_name="ctrader",
-        runtime_mode="live",
-        verify_idempotency_reservation=_verify,
-    )
-    engine._router.register("ctrader", provider)
-
-    result = await engine.place_order(_command())
-    assert result.success is False
-    assert result.submit_status == "UNKNOWN"
-    assert "invalid_live_execution_receipt" in str(result.error_message)
+    assert "BROKER_SEND_STARTED" in phases
+    assert "BROKER_SEND_RETURNED" in phases

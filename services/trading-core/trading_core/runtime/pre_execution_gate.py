@@ -61,12 +61,21 @@ class GateContextV1:
     idempotency_key: str = ""
     quote_id: str = ""
     quote_timestamp: float = 0.0
+    broker_server_time: float = 0.0
+    quote_age_seconds: float = 0.0
     instrument_spec_hash: str = ""
+    broker_account_snapshot_hash: str = ""
+    broker_snapshot_hash: str = ""
+    risk_context_hash: str = ""
     policy_hash: str = ""
+    policy_version_id: str = ""
+    policy_status: str = "active"
+    policy_approved_at: float = 0.0
     approved_volume: float = 0.0
     margin_required: float = 0.0
     portfolio_exposure_after_trade: float = 0.0
-    schema_version: str = field(default="gate_context_v1", init=False)
+    unknown_orders_unresolved: bool = False
+    schema_version: str = field(default="gate_context_v2", init=False)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -113,11 +122,20 @@ class GateContextV1:
             idempotency_key=str(context.get("idempotency_key", "") or ""),
             quote_id=str(context.get("quote_id", "") or ""),
             quote_timestamp=float(context.get("quote_timestamp", 0.0) or 0.0),
+            broker_server_time=float(context.get("broker_server_time", 0.0) or 0.0),
+            quote_age_seconds=float(context.get("quote_age_seconds", 0.0) or 0.0),
             instrument_spec_hash=str(context.get("instrument_spec_hash", "") or ""),
+            broker_account_snapshot_hash=str(context.get("broker_account_snapshot_hash", "") or ""),
+            broker_snapshot_hash=str(context.get("broker_snapshot_hash", "") or ""),
+            risk_context_hash=str(context.get("risk_context_hash", "") or ""),
             policy_hash=str(context.get("policy_hash", "") or ""),
+            policy_version_id=str(context.get("policy_version_id", context.get("policy_version", "")) or ""),
+            policy_status=str(context.get("policy_status", "active") or "active"),
+            policy_approved_at=float(context.get("policy_approved_at", 0.0) or 0.0),
             approved_volume=float(context.get("approved_volume", context.get("requested_volume", 0.0)) or 0.0),
             margin_required=float(context.get("margin_required", 0.0) or 0.0),
             portfolio_exposure_after_trade=float(context.get("portfolio_exposure_after_trade", 0.0) or 0.0),
+            unknown_orders_unresolved=bool(context.get("unknown_orders_unresolved", False)),
         )
 
 
@@ -187,15 +205,37 @@ class PreExecutionGate:
         if context.get("runtime_mode") == "live" and context.get("policy_version_approved") is False:
             return GateResult("BLOCK", "policy_version_unapproved", severity="critical", operator_action="review")
         if context.get("runtime_mode") == "live":
+            if str(context.get("schema_version", "") or "") != "gate_context_v2":
+                return GateResult("BLOCK", "gate_context_schema_v2_required", severity="critical", operator_action="review")
             policy_hash = str(context.get("policy_hash", "") or "")
             if not policy_hash or policy_hash == "policy_hash_unknown":
                 return GateResult("BLOCK", "policy_hash_missing", severity="critical", operator_action="review")
+            if str(context.get("policy_version_id", "") or "") == "":
+                return GateResult("BLOCK", "policy_version_id_missing", severity="critical", operator_action="review")
+            if str(context.get("policy_status", "") or "").lower() != "active":
+                return GateResult("BLOCK", "policy_status_not_active", severity="critical", operator_action="review")
             if str(context.get("instrument_spec_hash", "") or "") == "":
                 return GateResult("BLOCK", "instrument_spec_hash_missing", severity="critical", operator_action="broker_check")
             if str(context.get("quote_id", "") or "") == "":
                 return GateResult("BLOCK", "quote_id_missing", severity="critical", operator_action="broker_check")
             if float(context.get("quote_timestamp", 0.0) or 0.0) <= 0.0:
                 return GateResult("BLOCK", "quote_timestamp_invalid", severity="critical", operator_action="broker_check")
+            if str(context.get("broker_account_snapshot_hash", "") or "") == "":
+                return GateResult("BLOCK", "broker_account_snapshot_hash_missing", severity="critical", operator_action="broker_check")
+            if str(context.get("broker_snapshot_hash", "") or "") == "":
+                return GateResult("BLOCK", "broker_snapshot_hash_missing", severity="critical", operator_action="broker_check")
+            if str(context.get("risk_context_hash", "") or "") == "":
+                return GateResult("BLOCK", "risk_context_hash_missing", severity="critical", operator_action="review")
+            if bool(context.get("unknown_orders_unresolved", False)):
+                return GateResult("BLOCK", "unknown_orders_unresolved", severity="critical", operator_action="reconcile")
+            broker_server_time = float(context.get("broker_server_time", 0.0) or 0.0)
+            quote_ts = float(context.get("quote_timestamp", 0.0) or 0.0)
+            if broker_server_time > 0 and quote_ts > 0:
+                quote_age_seconds = max(0.0, broker_server_time - quote_ts)
+            else:
+                quote_age_seconds = float(context.get("quote_age_seconds", context.get("data_age_seconds", 0.0)) or 0.0)
+            if quote_age_seconds > float(self.policy.get("max_quote_age_seconds", 15.0)):
+                return GateResult("BLOCK", "quote_too_old", severity="critical", operator_action="broker_check")
         # P0.3: SL required in live mode when explicitly configured or provided in context.
         # This keeps backwards compatibility for legacy tests/contexts that do not include stop_loss.
         if context.get("runtime_mode") == "live":

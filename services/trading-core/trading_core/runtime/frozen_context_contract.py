@@ -26,13 +26,26 @@ def validate_frozen_context_bindings(*, request: Any, context: Any, provider_nam
         return FrozenContextValidationResult(False, "missing_policy_version")
 
     gate_ctx = getattr(context, "gate_context", {}) or {}
-    if str(gate_ctx.get("schema_version", "") or "") != "gate_context_v1":
+    if str(gate_ctx.get("schema_version", "") or "") != "gate_context_v2":
         return FrozenContextValidationResult(False, "invalid_gate_context_schema_version")
     for key in ("symbol", "side", "requested_volume", "idempotency_key"):
         if str(gate_ctx.get(key, "") or "") == "":
             return FrozenContextValidationResult(False, f"missing_gate_context_{key}")
 
     for key in ("account_id", "broker_name", "policy_version"):
+        if str(gate_ctx.get(key, "") or "") == "":
+            return FrozenContextValidationResult(False, f"missing_gate_context_{key}")
+
+    for key in (
+        "policy_version_id",
+        "quote_id",
+        "quote_timestamp",
+        "instrument_spec_hash",
+        "broker_snapshot_hash",
+        "broker_account_snapshot_hash",
+        "risk_context_hash",
+        "policy_hash",
+    ):
         if str(gate_ctx.get(key, "") or "") == "":
             return FrozenContextValidationResult(False, f"missing_gate_context_{key}")
 
@@ -68,9 +81,8 @@ def validate_frozen_context_bindings(*, request: Any, context: Any, provider_nam
     if gate_policy_version != str(getattr(context, "policy_version", "") or ""):
         return FrozenContextValidationResult(False, "policy_version_mismatch_in_gate")
 
-    # In GateContextV1, a non-empty policy_hash indicates an approved immutable policy snapshot.
-    if str(gate_ctx.get("policy_hash", "") or "") == "":
-        return FrozenContextValidationResult(False, "missing_gate_context_policy_hash")
+    if str(gate_ctx.get("policy_status", "") or "active").lower() != "active":
+        return FrozenContextValidationResult(False, "policy_status_not_active")
 
     req_type = str(getattr(request, "order_type", "") or "market").lower()
     if str(getattr(context, "order_type", "market") or "market").lower() != req_type:
@@ -78,8 +90,12 @@ def validate_frozen_context_bindings(*, request: Any, context: Any, provider_nam
 
     req_price = float(getattr(request, "price", 0.0) or 0.0)
     ctx_price = float(getattr(context, "entry_price", 0.0) or 0.0)
-    if req_price > 0 and ctx_price > 0 and abs(req_price - ctx_price) > max(1e-9, req_price * 0.05):
-        return FrozenContextValidationResult(False, "entry_price_out_of_band")
+    deviation = abs(req_price - ctx_price)
+    if req_price > 0 and ctx_price > 0:
+        deviation_bps = (deviation / req_price) * 10000.0
+        max_dev_bps = float(gate_ctx.get("max_price_deviation_bps", 20.0) or 20.0)
+        if deviation_bps > max_dev_bps:
+            return FrozenContextValidationResult(False, "entry_price_out_of_band")
 
     req_sl = float(getattr(request, "stop_loss", 0.0) or 0.0)
     ctx_sl = float(getattr(context, "stop_loss", 0.0) or 0.0)

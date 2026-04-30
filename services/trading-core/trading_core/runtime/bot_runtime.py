@@ -77,6 +77,7 @@ class BotRuntime:
         on_reconciliation_incident: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
         on_unknown_order_resolved: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
         mark_submitting_hook: Optional[Callable[[str, str], Awaitable[None]]] = None,
+        mark_submit_phase_hook: Optional[Callable[[str, str, str, str, str, Dict[str, Any]], Awaitable[None]]] = None,
         enqueue_unknown_hook: Optional[Callable[[str, str, str | None, Dict[str, Any]], Awaitable[None]]] = None,
     ) -> None:
         self.bot_instance_id = bot_instance_id
@@ -110,6 +111,7 @@ class BotRuntime:
         self._on_reconciliation_incident = on_reconciliation_incident
         self._on_unknown_order_resolved = on_unknown_order_resolved
         self._mark_submitting_hook = mark_submitting_hook
+        self._mark_submit_phase_hook = mark_submit_phase_hook
         self._enqueue_unknown_hook = enqueue_unknown_hook
         self._reconciliation_worker = None
         self._known_trade_volumes: Dict[str, float] = {}
@@ -181,6 +183,7 @@ class BotRuntime:
                     gate_policy=gate_policy,
                     verify_idempotency_reservation=self._verify_idempotency_reservation,
                     mark_submitting_hook=self._mark_submitting_hook,
+                    mark_submit_phase_hook=self._mark_submit_phase_hook,
                     enqueue_unknown_hook=self._enqueue_unknown_hook,
                 )
 
@@ -574,6 +577,7 @@ class BotRuntime:
             spread_pips = float(getattr(self.broker_provider, "spread_pips", 0.0))
             quote_id = ""
             quote_timestamp = 0.0
+            broker_server_time = 0.0
             instrument_spec_hash = ""
             policy_meta = getattr(signal, "meta", {}) or {}
             policy_snapshot = policy_meta.get("policy_snapshot", {})
@@ -634,6 +638,7 @@ class BotRuntime:
                     or live_quote.get("server_time")
                     or time.time()
                 )
+                broker_server_time = float(live_quote.get("server_time") or quote_timestamp or time.time())
                 if quote_timestamp <= 0:
                     self.state.error_message = "live_quote_timestamp_invalid"
                     return
@@ -683,6 +688,20 @@ class BotRuntime:
                             self.state.error_message = "instrument_spec_missing_live"
                             return
                     if broker_spec_payload:
+                        if self.runtime_mode == "live":
+                            required_live_spec = {
+                                "pip_size",
+                                "pip_value_per_lot",
+                                "contract_size",
+                                "margin_rate",
+                                "min_lot",
+                                "max_lot",
+                                "lot_step",
+                            }
+                            missing = [k for k in sorted(required_live_spec) if float(broker_spec_payload.get(k) or 0.0) <= 0.0]
+                            if missing:
+                                self.state.error_message = f"instrument_spec_incomplete_live:{','.join(missing)}"
+                                return
                         instrument_spec_hash = _stable_hash_payload(
                             {
                                 "symbol": str(signal.symbol),
@@ -699,13 +718,13 @@ class BotRuntime:
                         )
                         instrument_spec = InstrumentSpec(
                             symbol=str(signal.symbol),
-                            pip_size=float(broker_spec_payload.get("pip_size", 0.0001) or 0.0001),
-                            pip_value_per_lot_usd=float(broker_spec_payload.get("pip_value_per_lot", 10.0) or 10.0),
-                            contract_size=float(broker_spec_payload.get("contract_size", 100000.0) or 100000.0),
-                            margin_rate=float(broker_spec_payload.get("margin_rate", 0.01) or 0.01),
-                            min_lot=float(broker_spec_payload.get("min_lot", 0.01) or 0.01),
-                            max_lot=float(broker_spec_payload.get("max_lot", 100.0) or 100.0),
-                            lot_step=float(broker_spec_payload.get("lot_step", 0.01) or 0.01),
+                            pip_size=float(broker_spec_payload.get("pip_size") or 0.0),
+                            pip_value_per_lot_usd=float(broker_spec_payload.get("pip_value_per_lot") or 0.0),
+                            contract_size=float(broker_spec_payload.get("contract_size") or 0.0),
+                            margin_rate=float(broker_spec_payload.get("margin_rate") or 0.0),
+                            min_lot=float(broker_spec_payload.get("min_lot") or 0.0),
+                            max_lot=float(broker_spec_payload.get("max_lot") or 0.0),
+                            lot_step=float(broker_spec_payload.get("lot_step") or 0.0),
                         )
                     elif self.runtime_mode != "live":
                         instrument_spec = get_fallback_spec(str(signal.symbol))
@@ -819,7 +838,7 @@ class BotRuntime:
                     self.state.error_message = "daily_state_stale"
                     return
             gate_ctx = {
-                "schema_version": "gate_context_v1",
+                "schema_version": "gate_context_v2",
                 "provider_mode": str(getattr(self.broker_provider, "mode", "stub")),
                 "runtime_mode": self.runtime_mode,
                 "broker_connected": bool(getattr(self.broker_provider, "is_connected", False)),
@@ -851,11 +870,36 @@ class BotRuntime:
                 "idempotency_key": idempotency_key,
                 "quote_id": str(quote_id or self.state.metadata.get("quote_id") or ""),
                 "quote_timestamp": float(quote_timestamp or self.state.metadata.get("quote_timestamp") or 0.0),
+                "broker_server_time": float(broker_server_time or quote_timestamp or time.time()),
+                "quote_age_seconds": max(0.0, float((broker_server_time or time.time()) - float(quote_timestamp or time.time()))),
                 "instrument_spec_hash": str(instrument_spec_hash or self.state.metadata.get("instrument_spec_hash") or ""),
+                "broker_snapshot_hash": _stable_hash_payload(
+                    {
+                        "symbol": str(signal.symbol),
+                        "quote_id": str(quote_id or ""),
+                        "quote_timestamp": float(quote_timestamp or 0.0),
+                        "broker_server_time": float(broker_server_time or 0.0),
+                        "instrument_spec_hash": str(instrument_spec_hash or ""),
+                    }
+                ),
+                "broker_account_snapshot_hash": _stable_hash_payload(
+                    {
+                        "account_id": str(getattr(account if self.runtime_mode == "live" else None, "account_id", "") or ""),
+                        "equity": float(getattr(account if self.runtime_mode == "live" else None, "equity", 0.0) or 0.0),
+                        "free_margin": float(getattr(account if self.runtime_mode == "live" else None, "free_margin", 0.0) or 0.0),
+                        "margin_level": float(getattr(account if self.runtime_mode == "live" else None, "margin_level", 0.0) or 0.0),
+                        "currency": str(getattr(account if self.runtime_mode == "live" else None, "currency", "") or ""),
+                    }
+                ),
+                "risk_context_hash": "",
                 "policy_hash": str(policy_hash),
+                "policy_version_id": str(policy_version),
+                "policy_status": "active",
+                "policy_approved_at": float(time.time()),
                 "approved_volume": float(signal.lot_size or 0.0),
                 "margin_required": 0.0,
                 "portfolio_exposure_after_trade": 0.0,
+                "unknown_orders_unresolved": False,
             }
             if self.runtime_mode == "live" and self._get_policy_approval_status is not None:
                 gate_ctx["policy_version_approved"] = bool(await self._get_policy_approval_status())
@@ -916,6 +960,7 @@ class BotRuntime:
                         "approved_volume": float(signal.lot_size or 0.0),
                         "margin_required": float(locals().get("margin_required", 0.0) or 0.0),
                         "portfolio_exposure_after_trade": float(risk_ctx.account_exposure_pct),
+                        "risk_context_hash": _stable_hash_payload(dict(getattr(risk_ctx, "__dict__", {}) or {})),
                     }
                 )
             gate_result = self._gate.evaluate(gate_ctx)

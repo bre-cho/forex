@@ -21,6 +21,16 @@ def _make_valid_policy_snapshot():
         "max_daily_loss_pct": 5.0,
         "max_margin_usage_pct": 80.0,
         "max_account_exposure_pct": 50.0,
+        "max_symbol_exposure_pct": 25.0,
+        "max_correlated_usd_exposure_pct": 35.0,
+        "max_spread_pips": 2.0,
+        "max_slippage_pips": 3.0,
+        "min_free_margin_after_order": 50.0,
+        "stop_loss_required_in_live": True,
+        "max_open_positions": 3,
+        "max_risk_amount_per_trade": 100.0,
+        "lock_action_on_daily_tp": "stop_new_orders",
+        "lock_action_on_daily_loss": "close_all_and_stop",
     }
 
 
@@ -66,7 +76,14 @@ async def test_preflight_fails_closed_if_equity_sync_raises():
     active_policy.status = "active"
     policy_mock.get_active_policy = AsyncMock(return_value=active_policy)
 
+    readiness_contract_ok = MagicMock(ok=True)
+    readiness_proof_ok = MagicMock(ok=True, details={"proof": "ok"})
+
     with patch("app.services.live_start_preflight.LiveReadinessGuard.check_provider", AsyncMock(return_value=readiness_ok)), \
+         patch("app.services.live_start_preflight.LiveReadinessGuard.assert_live_provider_contract", AsyncMock(return_value=readiness_contract_ok)), \
+         patch("app.services.live_start_preflight.LiveReadinessGuard.require_capability_proof", AsyncMock(return_value=readiness_proof_ok)), \
+         patch("app.services.live_start_preflight.BrokerCapabilityProofService.record_proof", AsyncMock(return_value="hash")), \
+         patch("app.services.live_start_preflight.ReconciliationDaemonHealthService.is_healthy", AsyncMock(return_value=True)), \
          patch("app.services.live_start_preflight.PolicyService", return_value=policy_mock):
         with pytest.raises(LiveStartPreflightError, match="broker_equity_sync_failed"):
             await run_live_start_preflight(bot=bot, provider=provider, db=db)
@@ -92,7 +109,14 @@ async def test_preflight_fails_if_equity_is_zero():
     active_policy.policy_snapshot = _make_valid_policy_snapshot()
     policy_mock.get_active_policy = AsyncMock(return_value=active_policy)
 
+    readiness_contract_ok = MagicMock(ok=True)
+    readiness_proof_ok = MagicMock(ok=True, details={"proof": "ok"})
+
     with patch("app.services.live_start_preflight.LiveReadinessGuard.check_provider", AsyncMock(return_value=readiness_ok)), \
+         patch("app.services.live_start_preflight.LiveReadinessGuard.assert_live_provider_contract", AsyncMock(return_value=readiness_contract_ok)), \
+         patch("app.services.live_start_preflight.LiveReadinessGuard.require_capability_proof", AsyncMock(return_value=readiness_proof_ok)), \
+         patch("app.services.live_start_preflight.BrokerCapabilityProofService.record_proof", AsyncMock(return_value="hash")), \
+         patch("app.services.live_start_preflight.ReconciliationDaemonHealthService.is_healthy", AsyncMock(return_value=True)), \
          patch("app.services.live_start_preflight.PolicyService", return_value=policy_mock):
         with pytest.raises(LiveStartPreflightError, match="account_equity_invalid"):
             await run_live_start_preflight(bot=bot, provider=provider, db=db)
@@ -130,9 +154,16 @@ async def test_preflight_blocks_when_unknown_orders_unresolved():
     queue_svc = MagicMock()
     queue_svc.has_unresolved = AsyncMock(return_value=True)
 
+    readiness_contract_ok = MagicMock(ok=True)
+    readiness_proof_ok = MagicMock(ok=True, details={"proof": "ok"})
+
     with patch("app.services.live_start_preflight.LiveReadinessGuard.check_provider", AsyncMock(return_value=readiness_ok)), \
+         patch("app.services.live_start_preflight.LiveReadinessGuard.assert_live_provider_contract", AsyncMock(return_value=readiness_contract_ok)), \
+         patch("app.services.live_start_preflight.LiveReadinessGuard.require_capability_proof", AsyncMock(return_value=readiness_proof_ok)), \
+         patch("app.services.live_start_preflight.BrokerCapabilityProofService.record_proof", AsyncMock(return_value="hash")), \
+         patch("app.services.live_start_preflight.ReconciliationDaemonHealthService.is_healthy", AsyncMock(return_value=True)), \
          patch("app.services.live_start_preflight.PolicyService", return_value=policy_mock), \
          patch("app.services.live_start_preflight.DailyTradingStateService", return_value=daily_svc), \
-            patch("app.services.live_start_preflight.ReconciliationQueueService", return_value=queue_svc):
+         patch("app.services.live_start_preflight.ReconciliationQueueService", return_value=queue_svc):
         with pytest.raises(LiveStartPreflightError, match="unknown_orders_unresolved"):
             await run_live_start_preflight(bot=bot, provider=provider, db=db)

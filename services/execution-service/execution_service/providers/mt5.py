@@ -39,8 +39,13 @@ class MT5Provider(BrokerProvider):
         symbol: str = "EURUSD",
         timeframe: str = "M5",
         live: bool = False,
+        mode: str | None = None,
+        _allow_live: bool = False,
     ) -> None:
-        if bool(live):
+        resolved_mode = str(mode or ("live" if bool(live) else "demo")).lower()
+        if resolved_mode not in {"demo", "live"}:
+            raise ValueError(f"MT5Provider mode must be demo|live, got: {resolved_mode}")
+        if resolved_mode == "live" and not bool(_allow_live):
             raise ValueError("MT5Provider is demo-only; use MT5LiveProvider for live mode")
         self.login = login
         self.password = password
@@ -48,8 +53,8 @@ class MT5Provider(BrokerProvider):
         self.symbol = symbol
         self.timeframe = timeframe
         self.provider_name = "mt5"
-        self.live = False
-        self.mode = "demo"
+        self.live = resolved_mode == "live"
+        self.mode = resolved_mode
         self._connected = False
         self._account_id: Optional[int] = None
 
@@ -265,6 +270,10 @@ class MT5Provider(BrokerProvider):
     @property
     def supports_client_order_id(self) -> bool:
         return True
+
+    @property
+    def client_order_id_transport(self) -> str:
+        return "comment"
 
     async def get_instrument_spec(self, symbol: str) -> Optional[Dict[str, Any]]:
         self._require_sdk()

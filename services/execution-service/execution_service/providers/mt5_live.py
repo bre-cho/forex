@@ -7,7 +7,6 @@ class MT5LiveProvider(MT5Provider):
     """Explicit live-only MT5 provider."""
 
     def __init__(self, *args, **kwargs):
-        kwargs["live"] = False
+        kwargs["mode"] = "live"
+        kwargs["_allow_live"] = True
         super().__init__(*args, **kwargs)
-        self.live = True
-        self.mode = "live"

@@ -35,6 +35,7 @@ class ExecutionEngine:
         verify_idempotency_reservation=None,
         submit_timeout_seconds: float = 10.0,
         mark_submitting_hook=None,
+        mark_submit_phase_hook=None,
         enqueue_unknown_hook=None,
     ) -> None:
         self._provider = provider
@@ -49,8 +50,10 @@ class ExecutionEngine:
         self._submit_timeout_seconds = float(submit_timeout_seconds)
         # P0.4 hooks: async callables invoked at SUBMITTING and UNKNOWN
         # mark_submitting_hook(bot_instance_id, idempotency_key) -> None
+        # mark_submit_phase_hook(bot_instance_id, idempotency_key, phase, request_hash, provider, payload) -> None
         # enqueue_unknown_hook(bot_instance_id, idempotency_key, signal_id, payload) -> None
         self._mark_submitting_hook = mark_submitting_hook
+        self._mark_submit_phase_hook = mark_submit_phase_hook
         self._enqueue_unknown_hook = enqueue_unknown_hook
 
     async def start(self) -> None:
@@ -218,6 +221,10 @@ class ExecutionEngine:
                         success=False,
                         error_message="execution_gate_blocked:missing_idempotency_reservation",
                     )
+                # Force deterministic broker trace id in live mode.
+                # This guarantees lookup by idempotency key even when upstream request omitted fields.
+                request.client_order_id = str(payload.idempotency_key)
+                request.comment = str(payload.idempotency_key)
                 if not getattr(ctx, "context_hash", ""):
                     return OrderResult(
                         order_id="",
@@ -371,6 +378,53 @@ class ExecutionEngine:
                     fill_status="UNKNOWN",
                 )
 
+        request_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "symbol": str(getattr(request, "symbol", "") or ""),
+                    "side": str(getattr(request, "side", "") or ""),
+                    "volume": float(getattr(request, "volume", 0.0) or 0.0),
+                    "order_type": str(getattr(request, "order_type", "") or ""),
+                    "price": float(getattr(request, "price", 0.0) or 0.0),
+                    "stop_loss": float(getattr(request, "stop_loss", 0.0) or 0.0),
+                    "take_profit": float(getattr(request, "take_profit", 0.0) or 0.0),
+                    "client_order_id": str(getattr(request, "client_order_id", "") or ""),
+                    "idempotency_key": str(getattr(request, "idempotency_key", "") or ""),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+
+        if self._runtime_mode == "live" and _bot_id and _idem_key and callable(self._mark_submit_phase_hook):
+            try:
+                await self._mark_submit_phase_hook(
+                    _bot_id,
+                    _idem_key,
+                    "BROKER_SEND_STARTED",
+                    request_hash,
+                    self._provider_name,
+                    {
+                        "signal_id": _signal_id,
+                        "runtime_mode": self._runtime_mode,
+                    },
+                )
+            except Exception as _phase_exc:
+                logger.error("mark_submit_phase_hook failed phase=BROKER_SEND_STARTED idem=%s: %s", _idem_key, _phase_exc)
+                return OrderResult(
+                    order_id="",
+                    symbol=request.symbol,
+                    side=request.side,
+                    volume=request.volume,
+                    fill_price=float(request.price or 0.0),
+                    commission=0.0,
+                    success=False,
+                    error_message=f"execution_gate_blocked:submit_outbox_before_send_failed:{_phase_exc}",
+                    submit_status="UNKNOWN",
+                    fill_status="UNKNOWN",
+                )
+
         started = time.perf_counter()
         try:
             result = await asyncio.wait_for(
@@ -393,6 +447,18 @@ class ExecutionEngine:
             )
             # P0.4 — Enqueue for reconciliation after timeout
             if self._runtime_mode == "live" and _bot_id and _idem_key:
+                if callable(self._mark_submit_phase_hook):
+                    try:
+                        await self._mark_submit_phase_hook(
+                            _bot_id,
+                            _idem_key,
+                            "UNKNOWN_AFTER_SEND",
+                            request_hash,
+                            self._provider_name,
+                            {"reason": "broker_submit_timeout", "signal_id": _signal_id},
+                        )
+                    except Exception as _phase_exc:
+                        logger.error("mark_submit_phase_hook failed phase=UNKNOWN_AFTER_SEND idem=%s: %s", _idem_key, _phase_exc)
                 if not callable(self._enqueue_unknown_hook):
                     _result.error_message = "critical_unknown_enqueue_failed:missing_enqueue_unknown_hook"
                     return _result
@@ -421,6 +487,18 @@ class ExecutionEngine:
             )
             # P0.4 — Enqueue for reconciliation after broker error
             if self._runtime_mode == "live" and _bot_id and _idem_key:
+                if callable(self._mark_submit_phase_hook):
+                    try:
+                        await self._mark_submit_phase_hook(
+                            _bot_id,
+                            _idem_key,
+                            "UNKNOWN_AFTER_SEND",
+                            request_hash,
+                            self._provider_name,
+                            {"reason": f"broker_submit_error:{exc}", "signal_id": _signal_id},
+                        )
+                    except Exception as _phase_exc:
+                        logger.error("mark_submit_phase_hook failed phase=UNKNOWN_AFTER_SEND idem=%s: %s", _idem_key, _phase_exc)
                 if not callable(self._enqueue_unknown_hook):
                     _result.error_message = "critical_unknown_enqueue_failed:missing_enqueue_unknown_hook"
                     return _result
@@ -436,6 +514,27 @@ class ExecutionEngine:
         if result.raw_response is None:
             result.raw_response = {}
         result.raw_response.setdefault("latency_ms", round((time.perf_counter() - started) * 1000.0, 2))
+        if self._runtime_mode == "live" and _bot_id and _idem_key and callable(self._mark_submit_phase_hook):
+            try:
+                await self._mark_submit_phase_hook(
+                    _bot_id,
+                    _idem_key,
+                    "BROKER_SEND_RETURNED",
+                    request_hash,
+                    self._provider_name,
+                    {
+                        "signal_id": _signal_id,
+                        "submit_status": str(getattr(result, "submit_status", "") or ""),
+                        "fill_status": str(getattr(result, "fill_status", "") or ""),
+                        "broker_order_id": str(getattr(result, "broker_order_id", "") or "") or None,
+                    },
+                )
+            except Exception as _phase_exc:
+                logger.error("mark_submit_phase_hook failed phase=BROKER_SEND_RETURNED idem=%s: %s", _idem_key, _phase_exc)
+                result.success = False
+                result.submit_status = "UNKNOWN"
+                result.fill_status = "UNKNOWN"
+                result.error_message = f"critical_submit_outbox_after_send_failed:{_phase_exc}"
         if self._runtime_mode == "live":
             result = self._enforce_live_receipt_contract(result=result, request=request, context=ctx)
         return result
