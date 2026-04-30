@@ -19,6 +19,8 @@ result after ``max_retries`` cycles.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -35,9 +37,13 @@ class UnknownOrderResult:
     bot_instance_id: str
     outcome: str  # filled | rejected | failed_needs_operator | still_unknown | error
     broker_order_id: Optional[str] = None
+    broker_position_id: Optional[str] = None
+    broker_deal_id: Optional[str] = None
     fill_price: Optional[float] = None
     fill_volume: Optional[float] = None
     error: Optional[str] = None
+    raw_response_hash: Optional[str] = None
+    final_transition: Optional[str] = None
     details: Dict[str, Any] = field(default_factory=dict)
     resolved_at: float = field(default_factory=time.time)
 
@@ -47,9 +53,13 @@ class UnknownOrderResult:
             "bot_instance_id": self.bot_instance_id,
             "outcome": self.outcome,
             "broker_order_id": self.broker_order_id,
+            "broker_position_id": self.broker_position_id,
+            "broker_deal_id": self.broker_deal_id,
             "fill_price": self.fill_price,
             "fill_volume": self.fill_volume,
             "error": self.error,
+            "raw_response_hash": self.raw_response_hash,
+            "final_transition": self.final_transition,
             "details": self.details,
             "resolved_at": self.resolved_at,
         }
@@ -239,8 +249,12 @@ class UnknownOrderReconciler:
                 bot_instance_id=bot_instance_id,
                 outcome="filled",
                 broker_order_id=broker_order_id or None,
+                broker_position_id=str(order.get("positionId") or order.get("brokerPositionId") or "") or None,
+                broker_deal_id=str(order.get("dealId") or order.get("brokerDealId") or "") or None,
                 fill_price=_safe_float(order.get("filledPrice") or order.get("avgFillPrice") or order.get("executionPrice")),
                 fill_volume=_safe_float(order.get("filledVolume") or order.get("qty") or order.get("executionSize")),
+                raw_response_hash=_hash_payload(order),
+                final_transition="FILLED",
                 details=order,
             )
         if broker_status in {"REJECTED", "CANCELED", "EXPIRED", "CANCELLED"}:
@@ -250,6 +264,8 @@ class UnknownOrderReconciler:
                 outcome="rejected",
                 broker_order_id=broker_order_id or None,
                 error=str(order.get("rejectReason") or order.get("errorCode") or broker_status),
+                raw_response_hash=_hash_payload(order),
+                final_transition="REJECTED",
                 details=order,
             )
         # Partially filled, pending, active — still in flight
@@ -258,6 +274,7 @@ class UnknownOrderReconciler:
             bot_instance_id=bot_instance_id,
             outcome="still_unknown",
             broker_order_id=broker_order_id or None,
+            raw_response_hash=_hash_payload(order),
             details=order,
         )
 
@@ -279,8 +296,12 @@ class UnknownOrderReconciler:
             bot_instance_id=bot_instance_id,
             outcome="filled",
             broker_order_id=broker_order_id or None,
+            broker_position_id=str(executions[0].get("positionId") or executions[0].get("brokerPositionId") or "") or None,
+            broker_deal_id=str(executions[0].get("dealId") or executions[0].get("brokerDealId") or "") or None,
             fill_price=avg_price if avg_price > 0 else None,
             fill_volume=total_volume if total_volume > 0 else None,
+            raw_response_hash=_hash_payload({"executions": executions}),
+            final_transition="FILLED",
             details={"executions": executions},
         )
 
@@ -290,3 +311,8 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _hash_payload(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

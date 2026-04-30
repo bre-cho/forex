@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -8,6 +8,7 @@ from typing import Any
 class ReadinessResult:
     ok: bool
     reason: str = ""
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 class LiveReadinessGuard:
@@ -57,6 +58,7 @@ class LiveReadinessGuard:
         *,
         expected_account_id: str | None = None,
         symbol: str | None = None,
+        timeframe: str | None = None,
     ) -> ReadinessResult:
         """P0.1: Run BrokerCapabilityProof and fail-closed if any required check fails.
 
@@ -67,16 +69,45 @@ class LiveReadinessGuard:
         if not callable(verify):
             return ReadinessResult(False, "provider_capability_proof_unavailable")
         try:
-            proof = await verify(
-                expected_account_id=expected_account_id,
-                symbol=symbol,
-            )
+            try:
+                proof = await verify(
+                    expected_account_id=expected_account_id,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                )
+            except TypeError:
+                proof = await verify(
+                    expected_account_id=expected_account_id,
+                    symbol=symbol,
+                )
         except Exception as exc:
             return ReadinessResult(False, f"provider_capability_proof_error:{exc}")
         if not proof.all_required_passed:
             failed = ",".join(proof.failed_checks())
-            return ReadinessResult(False, f"broker_capability_proof_failed:{failed}")
-        return ReadinessResult(True, "ok")
+            return ReadinessResult(
+                False,
+                f"broker_capability_proof_failed:{failed}",
+                details={
+                    "failed_checks": proof.failed_checks(),
+                    "provider": str(getattr(proof, "provider", "")),
+                    "mode": str(getattr(proof, "mode", "")),
+                    "symbol": str(symbol or ""),
+                    "timeframe": str(timeframe or ""),
+                },
+            )
+        return ReadinessResult(
+            True,
+            "ok",
+            details={
+                "provider": str(getattr(proof, "provider", "")),
+                "mode": str(getattr(proof, "mode", "")),
+                "symbol": str(symbol or ""),
+                "timeframe": str(timeframe or ""),
+                "proof_timestamp": float(getattr(proof, "proof_timestamp", 0.0) or 0.0),
+                "failed_checks": list(getattr(proof, "failed_checks")() if callable(getattr(proof, "failed_checks", None)) else []),
+                "detail": dict(getattr(proof, "detail", {}) or {}),
+            },
+        )
 
     @classmethod
     async def assert_live_provider_contract(cls, provider: Any, *, symbol: str = "") -> ReadinessResult:
@@ -99,16 +130,35 @@ class LiveReadinessGuard:
         if symbol:
             try:
                 spec = await provider.get_instrument_spec(symbol)
-                if not spec:
+                if not isinstance(spec, dict):
                     return ReadinessResult(False, f"live_provider_instrument_spec_empty:{symbol}")
+                required_spec = ["pip_size", "contract_size", "min_volume", "volume_step"]
+                missing = [k for k in required_spec if float(spec.get(k) or spec.get({"min_volume": "min_lot", "volume_step": "lot_step"}.get(k, "")) or 0.0) <= 0.0]
+                if missing:
+                    return ReadinessResult(False, f"live_provider_instrument_spec_invalid:{','.join(missing)}")
             except Exception as exc:
                 return ReadinessResult(False, f"live_provider_instrument_spec_failed:{exc}")
             try:
                 quote = await provider.get_quote(symbol)
-                if not quote:
+                if not isinstance(quote, dict):
                     return ReadinessResult(False, f"live_provider_quote_empty:{symbol}")
+                if float(quote.get("bid") or 0.0) <= 0 or float(quote.get("ask") or 0.0) <= 0:
+                    return ReadinessResult(False, "live_provider_quote_invalid_bid_ask")
+                if not str(quote.get("quote_id") or ""):
+                    return ReadinessResult(False, "live_provider_quote_missing_quote_id")
+                qts = float(quote.get("timestamp") or 0.0)
+                if qts <= 0:
+                    return ReadinessResult(False, "live_provider_quote_missing_timestamp")
+                if abs(__import__("time").time() - qts) > 30.0:
+                    return ReadinessResult(False, "live_provider_quote_stale")
             except Exception as exc:
                 return ReadinessResult(False, f"live_provider_quote_failed:{exc}")
+            try:
+                margin = await provider.estimate_margin(symbol, "buy", 0.01, float(quote.get("ask") or 0.0))
+                if float(margin or 0.0) <= 0.0:
+                    return ReadinessResult(False, "live_provider_margin_invalid")
+            except Exception as exc:
+                return ReadinessResult(False, f"live_provider_margin_failed:{exc}")
         return ReadinessResult(True, "ok")
 
     @classmethod

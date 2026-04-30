@@ -140,7 +140,44 @@ async def _attempt_broker_reconcile(item: ReconciliationQueueItem) -> bool:
             idempotency_key=str(item.idempotency_key),
             signal_id=str(item.signal_id or ""),
         )
-        return str(result.outcome or "").lower() in {"filled", "rejected"}
+        conclusive = str(result.outcome or "").lower() in {"filled", "rejected"}
+        if not conclusive:
+            return False
+
+        # Persist broker truth into order ledger BEFORE changing queue status.
+        # If this fails, queue stays retry — no silent data loss.
+        try:
+            from app.services.order_ledger_service import OrderLedgerService
+
+            async with AsyncSessionLocal() as persist_db:
+                ledger_svc = OrderLedgerService(persist_db)
+                mapped_event = "order_filled" if result.outcome == "filled" else "order_rejected"
+                await ledger_svc.record_lifecycle_event(
+                    bot_instance_id=str(item.bot_instance_id),
+                    event_type=mapped_event,
+                    idempotency_key=str(item.idempotency_key),
+                    broker=str(getattr(provider, "provider_name", "") or "unknown"),
+                    payload={
+                        **result.to_dict(),
+                        "signal_id": str(item.signal_id or ""),
+                        "broker_order_id": str(result.broker_order_id or "") or None,
+                        "broker_position_id": str(result.broker_position_id or "") or None,
+                        "broker_deal_id": str(result.broker_deal_id or "") or None,
+                        "raw_response_hash": str(result.raw_response_hash or "") or None,
+                        "avg_fill_price": float(result.fill_price) if result.fill_price else None,
+                        "filled_volume": float(result.fill_volume) if result.fill_volume else None,
+                    },
+                )
+        except Exception as persist_exc:
+            logger.error(
+                "reconciliation_daemon: ledger persist failed before mark_resolved item=%s bot=%s: %s",
+                getattr(item, "id", None),
+                getattr(item, "bot_instance_id", None),
+                persist_exc,
+            )
+            return False
+
+        return True
     except Exception as exc:
         logger.warning(
             "reconciliation_daemon: broker reconcile failed item=%s bot=%s: %s",
@@ -261,6 +298,10 @@ async def _run_once(worker_id: str) -> None:
             await _process_item(db, item, worker_id)
 
 
+# Module-level flag checked by /health/live-hard endpoint.
+_daemon_running: bool = False
+
+
 async def run_reconciliation_daemon(
     *,
     poll_interval: float = _POLL_INTERVAL_SECONDS,
@@ -272,31 +313,36 @@ async def run_reconciliation_daemon(
         poll_interval: Seconds between poll cycles.
         stop_event: When set, daemon stops gracefully.
     """
+    global _daemon_running
     worker_id = _worker_id()
     logger.info("reconciliation_daemon: started worker=%s interval=%.1fs", worker_id, poll_interval)
+    _daemon_running = True
 
-    while True:
-        try:
-            await _run_once(worker_id)
-        except Exception as exc:
-            logger.error("reconciliation_daemon: unhandled error in poll cycle: %s", exc)
+    try:
+        while True:
+            try:
+                await _run_once(worker_id)
+            except Exception as exc:
+                logger.error("reconciliation_daemon: unhandled error in poll cycle: %s", exc)
 
-        if stop_event is not None and stop_event.is_set():
-            break
-
-        try:
-            if stop_event is not None:
-                await asyncio.wait_for(
-                    asyncio.shield(asyncio.ensure_future(stop_event.wait())),
-                    timeout=poll_interval,
-                )
+            if stop_event is not None and stop_event.is_set():
                 break
-            else:
-                await asyncio.sleep(poll_interval)
-        except asyncio.TimeoutError:
-            pass  # normal timeout — continue polling
-        except asyncio.CancelledError:
-            logger.info("reconciliation_daemon: cancelled, shutting down")
-            break
+
+            try:
+                if stop_event is not None:
+                    await asyncio.wait_for(
+                        asyncio.shield(asyncio.ensure_future(stop_event.wait())),
+                        timeout=poll_interval,
+                    )
+                    break
+                else:
+                    await asyncio.sleep(poll_interval)
+            except asyncio.TimeoutError:
+                pass  # normal timeout — continue polling
+            except asyncio.CancelledError:
+                logger.info("reconciliation_daemon: cancelled, shutting down")
+                break
+    finally:
+        _daemon_running = False
 
     logger.info("reconciliation_daemon: stopped worker=%s", worker_id)

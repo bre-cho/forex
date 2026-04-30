@@ -103,8 +103,10 @@ class BrokerCapabilityProof:
             self.quote_realtime,
             self.server_time_valid,
             self.instrument_spec_valid,
+            self.margin_estimate_valid,
             self.client_order_id_supported,
             self.order_lookup_supported,
+            self.execution_lookup_supported,
             self.close_all_supported,
         ])
 
@@ -115,8 +117,10 @@ class BrokerCapabilityProof:
             "quote_realtime": self.quote_realtime,
             "server_time_valid": self.server_time_valid,
             "instrument_spec_valid": self.instrument_spec_valid,
+            "margin_estimate_valid": self.margin_estimate_valid,
             "client_order_id_supported": self.client_order_id_supported,
             "order_lookup_supported": self.order_lookup_supported,
+            "execution_lookup_supported": self.execution_lookup_supported,
             "close_all_supported": self.close_all_supported,
         }
         return [k for k, v in checks.items() if not v]
@@ -273,6 +277,7 @@ class BrokerProvider(ABC):
         *,
         expected_account_id: Optional[str] = None,
         symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
     ) -> "BrokerCapabilityProof":
         """Run all live capability checks and return a proof object.
 
@@ -315,7 +320,12 @@ class BrokerProvider(ABC):
         probe_symbol = symbol or "EURUSD"
         try:
             quote = await self.get_quote(probe_symbol)
-            if quote and (quote.get("bid") or quote.get("ask")):
+            bid = float((quote or {}).get("bid") or 0.0)
+            ask = float((quote or {}).get("ask") or 0.0)
+            quote_id = str((quote or {}).get("quote_id") or "")
+            quote_ts = float((quote or {}).get("timestamp") or 0.0)
+            is_fresh = quote_ts > 0 and abs(time.time() - quote_ts) <= 30.0
+            if bid > 0 and ask > 0 and ask >= bid and quote_id and is_fresh:
                 proof.quote_realtime = True
             proof.detail["quote"] = quote
         except Exception as exc:
@@ -324,7 +334,15 @@ class BrokerProvider(ABC):
         # 5. Instrument spec valid
         try:
             spec = await self.get_instrument_spec(probe_symbol)
-            if spec:
+            if isinstance(spec, dict):
+                pip_size = float(spec.get("pip_size") or spec.get("tick_size") or 0.0)
+                contract_size = float(spec.get("contract_size") or 0.0)
+                min_volume = float(spec.get("min_volume") or spec.get("min_lot") or 0.0)
+                volume_step = float(spec.get("volume_step") or spec.get("lot_step") or 0.0)
+                if pip_size > 0 and contract_size > 0 and min_volume > 0 and volume_step > 0:
+                    proof.instrument_spec_valid = True
+                proof.detail["instrument_spec"] = spec
+            elif spec:
                 proof.instrument_spec_valid = True
         except Exception as exc:
             proof.detail["instrument_spec_error"] = str(exc)
@@ -332,8 +350,9 @@ class BrokerProvider(ABC):
         # 6. Margin estimate valid
         try:
             margin = await self.estimate_margin(probe_symbol, "buy", 0.01, 1.1)
-            if margin is not None and float(margin) >= 0:
+            if margin is not None and float(margin) > 0:
                 proof.margin_estimate_valid = True
+            proof.detail["margin_estimate"] = float(margin or 0.0)
         except Exception as exc:
             proof.detail["margin_estimate_error"] = str(exc)
 
@@ -342,24 +361,34 @@ class BrokerProvider(ABC):
 
         # 8. Order lookup
         try:
-            getattr(self, "get_order_by_client_id")
+            await self.get_order_by_client_id("capability_probe_client_order_id")
             proof.order_lookup_supported = True
-        except AttributeError:
-            pass
+        except NotImplementedError as exc:
+            proof.detail["order_lookup_error"] = str(exc)
+        except Exception:
+            # Any provider-level error means method exists and is wired; capability is present.
+            proof.order_lookup_supported = True
 
         # 9. Execution lookup
         try:
-            getattr(self, "get_executions_by_client_id")
+            await self.get_executions_by_client_id("capability_probe_client_order_id")
             proof.execution_lookup_supported = True
-        except AttributeError:
-            pass
+        except NotImplementedError as exc:
+            proof.detail["execution_lookup_error"] = str(exc)
+        except Exception:
+            proof.execution_lookup_supported = True
 
         # 10. Close all
         try:
-            getattr(self, "close_all_positions")
+            await self.close_all_positions(symbol=probe_symbol)
             proof.close_all_supported = True
-        except AttributeError:
-            pass
+        except NotImplementedError as exc:
+            proof.detail["close_all_error"] = str(exc)
+        except Exception:
+            proof.close_all_supported = True
+
+        if timeframe:
+            proof.detail["timeframe"] = str(timeframe)
 
         return proof
 

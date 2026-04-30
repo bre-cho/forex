@@ -36,6 +36,26 @@ services:
     deploy:
       replicas: 2
 
+  # Dedicated reconciliation worker — runs the unknown-order daemon in isolation
+  # so that API replica restarts do not interrupt in-flight reconcile cycles.
+  reconciliation-worker:
+    image: ${API_IMAGE:-forex-api:latest}
+    command: ["python", "-m", "app.workers.reconciliation_worker_entrypoint"]
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - APP_ENV=production
+      - DEBUG=false
+      - WORKER_MODE=reconciliation
+    env_file:
+      - ../../.env
+    depends_on:
+      - postgres
+      - redis
+    restart: always
+    deploy:
+      replicas: 1
+
   web:
     image: ${WEB_IMAGE:-forex-web:latest}
     ports:

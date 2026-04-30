@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BotInstance, TradingIncident
+from app.services.broker_capability_proof_service import BrokerCapabilityProofService
 from app.services.reconciliation_queue_service import ReconciliationQueueService
 from app.services.daily_trading_state import DailyTradingStateService
 from app.services.live_readiness_guard import LiveReadinessGuard
@@ -52,12 +53,31 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
 
     # P0.1 — Broker capability proof: verify all live-required provider capabilities
     account_id = str(getattr(bot, "broker_account_id", "") or "")
+    bot_symbol = str(getattr(bot, "symbol", "") or "EURUSD")
+    bot_timeframe = str(getattr(bot, "timeframe", "") or "") or None
+
+    provider_contract = await LiveReadinessGuard.assert_live_provider_contract(provider, symbol=bot_symbol)
+    if not provider_contract.ok:
+        raise LiveStartPreflightError(f"provider_contract_failed:{provider_contract.reason}")
+
     proof_result = await LiveReadinessGuard.require_capability_proof(
         provider,
         expected_account_id=account_id or None,
+        symbol=bot_symbol,
+        timeframe=bot_timeframe,
     )
     if not proof_result.ok:
         raise LiveStartPreflightError(f"provider_capability_proof_failed:{proof_result.reason}")
+
+    proof_service = BrokerCapabilityProofService(db)
+    await proof_service.record_proof(
+        bot_instance_id=str(bot.id),
+        provider=str(getattr(provider, "provider_name", type(provider).__name__)),
+        account_id=account_id or None,
+        symbol=bot_symbol,
+        timeframe=bot_timeframe,
+        proof_payload=dict(proof_result.details or {}),
+    )
     checks["broker_capability_proof"] = True
 
     policy_svc = PolicyService(db)

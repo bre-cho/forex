@@ -55,3 +55,56 @@ async def admin_runtime(admin: User = Depends(_require_admin)):
     if registry is None:
         return {"runtimes": []}
     return {"runtimes": registry.list_all()}
+
+
+@router.get("/health/live-hard")
+async def health_live_hard(
+    admin: User = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hard liveness check — verifies DB reachability, registry, and reconciliation daemon.
+
+    Returns 200 {"status": "ok", ...} if all subsystems are healthy.
+    Returns 503 {"status": "degraded", ...} if any subsystem is unhealthy.
+
+    Intended for infra/load-balancer health checks (authenticated admin-only).
+    """
+    import time
+    from fastapi.responses import JSONResponse
+
+    checks: dict[str, str] = {}
+
+    # 1. DB round-trip
+    try:
+        await db.execute(select(func.count()).select_from(User))
+        checks["db"] = "ok"
+    except Exception as exc:
+        checks["db"] = f"error: {exc}"
+
+    # 2. In-process registry
+    try:
+        from app.core.registry import get_registry
+        registry = get_registry()
+        if registry is not None:
+            checks["registry"] = "ok"
+        else:
+            checks["registry"] = "not_initialised"
+    except Exception as exc:
+        checks["registry"] = f"error: {exc}"
+
+    # 3. Reconciliation daemon alive flag (daemon sets this attribute on the module)
+    try:
+        from app.workers import reconciliation_daemon as _rd
+        daemon_alive = bool(getattr(_rd, "_daemon_running", False))
+        checks["reconciliation_daemon"] = "ok" if daemon_alive else "not_running"
+    except Exception as exc:
+        checks["reconciliation_daemon"] = f"error: {exc}"
+
+    all_ok = all(v == "ok" for v in checks.values())
+    payload = {
+        "status": "ok" if all_ok else "degraded",
+        "checks": checks,
+        "ts": time.time(),
+    }
+    status_code = 200 if all_ok else 503
+    return JSONResponse(content=payload, status_code=status_code)
