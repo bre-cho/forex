@@ -327,35 +327,29 @@ class CTraderProvider(BrokerProvider):
     async def get_instrument_spec(self, symbol: str):
         """Return instrument spec dict from the underlying cTrader provider."""
         if self._execution_adapter.available:
-            fn = getattr(self._provider, "get_instrument_spec", None)
-            if callable(fn):
-                try:
-                    payload = fn(symbol)
-                    import inspect
-                    if inspect.isawaitable(payload):
-                        payload = await payload
-                    return dict(payload) if payload else None
-                except Exception as exc:
-                    raise RuntimeError(f"ctrader_get_instrument_spec_failed:{exc}") from exc
+            result = await self._execution_adapter.get_instrument_spec(symbol)
+            if result is not None:
+                return result
         if self.live:
-            raise NotImplementedError("CTraderProvider live mode requires get_instrument_spec on underlying engine")
+            raise RuntimeError(
+                f"ctrader_get_instrument_spec_unavailable:{symbol} — "
+                "ensure the underlying engine implements get_instrument_spec()"
+            )
         return None
 
     async def estimate_margin(self, symbol: str, side: str, volume: float, price: float) -> float:
         """Estimate margin using broker-native calculation if available."""
         if self._execution_adapter.available:
-            fn = getattr(self._provider, "estimate_margin", None)
-            if callable(fn):
-                try:
-                    import inspect
-                    result = fn(symbol=symbol, side=side, volume=volume, price=price)
-                    if inspect.isawaitable(result):
-                        result = await result
-                    return float(result or 0.0)
-                except Exception as exc:
-                    raise RuntimeError(f"ctrader_estimate_margin_failed:{exc}") from exc
+            result = await self._execution_adapter.estimate_margin(
+                symbol=symbol, side=side, volume=volume, price=price
+            )
+            if result > 0:
+                return result
         if self.live:
-            raise NotImplementedError("CTraderProvider live mode requires estimate_margin on underlying engine")
+            raise RuntimeError(
+                f"ctrader_estimate_margin_unavailable:{symbol} — "
+                "ensure the underlying engine implements estimate_margin()"
+            )
         return 0.0
 
     async def get_order_by_client_id(self, client_order_id: str):

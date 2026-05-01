@@ -123,6 +123,10 @@ class BotRuntime:
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._heartbeat_interval: float = 30.0
         self._heartbeat_backoff_steps: tuple[float, ...] = (5.0, 30.0, 120.0)
+        # P1.2: Account equity sync loop (live mode only)
+        self._account_sync_task: Optional[asyncio.Task] = None
+        self._account_sync_interval: float = 30.0
+        self._starting_equity: float = 0.0
 
         # Lazy-initialised engines (created on start)
         self._wave_detector = None
@@ -235,6 +239,10 @@ class BotRuntime:
                 self._heartbeat_task = asyncio.create_task(
                     self._broker_heartbeat_loop(), name=f"heartbeat_{self.bot_instance_id}"
                 )
+                # P1.2: Start account equity sync loop to detect drift
+                self._account_sync_task = asyncio.create_task(
+                    self._account_sync_loop(), name=f"acct_sync_{self.bot_instance_id}"
+                )
             logger.info("BotRuntime started: %s", self.bot_instance_id)
 
     async def stop(self) -> None:
@@ -252,6 +260,15 @@ class BotRuntime:
                 except asyncio.CancelledError:
                     pass
             self._heartbeat_task = None
+            # Cancel account equity sync loop
+            account_sync_task = getattr(self, "_account_sync_task", None)
+            if account_sync_task and not account_sync_task.done():
+                account_sync_task.cancel()
+                try:
+                    await account_sync_task
+                except asyncio.CancelledError:
+                    pass
+            self._account_sync_task = None
             if self._engine_task:
                 self._engine_task.cancel()
                 try:
@@ -1891,7 +1908,132 @@ class BotRuntime:
 
         logger.info("Broker heartbeat loop stopped: %s", self.bot_instance_id)
 
-    async def _start_reconciliation_worker(self) -> None:
+    # ── P1.2: Account equity sync loop ──────────────────────────────────── #
+
+    async def _account_sync_loop(self) -> None:
+        """Periodically fetch live account equity from the broker and detect
+        unexpected equity drift (e.g. from manual trades, rollover charges, or
+        data-source divergence).
+
+        When the measured drift exceeds ``max_equity_drift_pct`` (from config /
+        API settings), the loop emits an ``equity_drift_alert`` event and may
+        trigger a daily state refresh so the risk engine re-calibrates from the
+        real broker balance.
+        """
+        logger.info("Account sync loop started: %s", self.bot_instance_id)
+
+        # Allow one full tick interval before the first sync so startup isn't raced.
+        await asyncio.sleep(self._account_sync_interval)
+
+        while True:
+            if self.state.status == RuntimeStatus.STOPPED:
+                break
+            await asyncio.sleep(self._account_sync_interval)
+            if self.state.status == RuntimeStatus.STOPPED:
+                break
+
+            try:
+                account_info_fn = getattr(self.broker_provider, "get_account_info", None)
+                if not callable(account_info_fn):
+                    continue
+
+                account = await account_info_fn()
+                broker_equity = float(getattr(account, "equity", 0.0) or 0.0)
+                broker_balance = float(getattr(account, "balance", 0.0) or 0.0)
+
+                if broker_equity <= 0:
+                    logger.warning(
+                        "AccountSync: broker returned equity=0 for %s — skipping",
+                        self.bot_instance_id,
+                    )
+                    continue
+
+                # Record starting equity on first successful sync
+                if self._starting_equity <= 0:
+                    self._starting_equity = broker_equity
+
+                # Update internal state with live broker values
+                self.state.equity = broker_equity
+                self.state.balance = broker_balance
+                self.state.metadata["broker_equity_synced_at"] = time.time()
+                self.state.metadata["broker_equity"] = broker_equity
+                self.state.metadata["broker_balance"] = broker_balance
+
+                # Drift detection: compare broker equity vs internal tracked equity
+                internal_equity = float(self.state.metadata.get("last_tick_equity", broker_equity))
+                if internal_equity > 0 and broker_equity > 0:
+                    drift_pct = abs(broker_equity - internal_equity) / internal_equity * 100.0
+                    self.state.metadata["equity_drift_pct"] = drift_pct
+
+                    # Read threshold from risk_config, falling back to 1.0%
+                    max_drift_pct = 1.0
+                    try:
+                        from app.core.config import get_settings
+                        max_drift_pct = float(get_settings().max_equity_drift_pct or 1.0)
+                    except Exception:
+                        if isinstance(self.risk_config, dict):
+                            max_drift_pct = float(
+                                self.risk_config.get("max_equity_drift_pct", 1.0) or 1.0
+                            )
+
+                    if drift_pct > max_drift_pct:
+                        logger.warning(
+                            "AccountSync: equity drift %.2f%% > threshold %.2f%% for %s "
+                            "(broker=%.2f, internal=%.2f)",
+                            drift_pct,
+                            max_drift_pct,
+                            self.bot_instance_id,
+                            broker_equity,
+                            internal_equity,
+                        )
+                        await self._emit_event(
+                            "equity_drift_alert",
+                            {
+                                "bot_instance_id": self.bot_instance_id,
+                                "broker_equity": broker_equity,
+                                "internal_equity": internal_equity,
+                                "drift_pct": drift_pct,
+                                "max_drift_pct": max_drift_pct,
+                                "ts": time.time(),
+                            },
+                        )
+                        # Trigger daily state refresh so risk engine re-calibrates
+                        if self._refresh_daily_state_from_broker:
+                            try:
+                                await self._refresh_daily_state_from_broker(broker_equity)
+                            except Exception as exc:
+                                logger.warning(
+                                    "AccountSync: daily state refresh failed for %s: %s",
+                                    self.bot_instance_id,
+                                    exc,
+                                )
+
+                # Emit Prometheus metric if available
+                try:
+                    from app.core.metrics import ACCOUNT_EQUITY_GAUGE, EQUITY_DRIFT_GAUGE
+                    broker_id = str(getattr(self.broker_provider, "provider_name", "unknown"))
+                    ACCOUNT_EQUITY_GAUGE.labels(
+                        bot_id=self.bot_instance_id, provider=broker_id
+                    ).set(broker_equity)
+                    drift = float(self.state.metadata.get("equity_drift_pct", 0.0))
+                    EQUITY_DRIFT_GAUGE.labels(
+                        bot_id=self.bot_instance_id, provider=broker_id
+                    ).set(drift)
+                except Exception:
+                    pass
+
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning(
+                    "AccountSync: error for %s: %s",
+                    self.bot_instance_id,
+                    exc,
+                )
+
+        logger.info("Account sync loop stopped: %s", self.bot_instance_id)
+
+
         if self._reconciliation_worker is not None:
             return
         missing_hooks = []

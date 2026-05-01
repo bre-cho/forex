@@ -38,6 +38,36 @@ class TradingSignal:
             "metadata": self.metadata,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TradingSignal":
+        created_at = data.get("created_at")
+        if isinstance(created_at, str):
+            try:
+                from datetime import datetime, timezone
+                created_at = datetime.fromisoformat(created_at)
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+            except (ValueError, AttributeError):
+                from datetime import datetime, timezone
+                created_at = datetime.now(timezone.utc)
+        elif not isinstance(created_at, datetime):
+            from datetime import datetime, timezone
+            created_at = datetime.now(timezone.utc)
+        return cls(
+            signal_id=str(data.get("signal_id") or str(uuid.uuid4())),
+            bot_instance_id=str(data.get("bot_instance_id") or ""),
+            symbol=str(data.get("symbol") or ""),
+            direction=str(data.get("direction") or ""),
+            confidence=float(data.get("confidence") or 0.0),
+            wave_state=str(data.get("wave_state") or ""),
+            entry_price=data.get("entry_price"),
+            stop_loss=data.get("stop_loss"),
+            take_profit=data.get("take_profit"),
+            timeframe=str(data.get("timeframe") or "M5"),
+            created_at=created_at,
+            metadata=dict(data.get("metadata") or {}),
+        )
+
 
 class SignalBuilder:
     """Builds TradingSignal objects from raw engine analysis results."""

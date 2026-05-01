@@ -137,6 +137,42 @@ try:
         registry=_registry,
     )
 
+    # ─── Account / Equity ─────────────────────────────────────────────────────
+    ACCOUNT_EQUITY_GAUGE = Gauge(
+        "account_equity",
+        "Live account equity synced from broker",
+        labelnames=["bot_id", "provider"],
+        registry=_registry,
+    )
+
+    ACCOUNT_BALANCE_GAUGE = Gauge(
+        "account_balance",
+        "Live account balance synced from broker",
+        labelnames=["bot_id", "provider"],
+        registry=_registry,
+    )
+
+    EQUITY_DRIFT_GAUGE = Gauge(
+        "account_equity_drift_pct",
+        "Absolute equity drift percentage between broker and internal tracking",
+        labelnames=["bot_id", "provider"],
+        registry=_registry,
+    )
+
+    OPEN_POSITIONS_GAUGE = Gauge(
+        "open_positions_total",
+        "Number of currently open positions per bot",
+        labelnames=["bot_id", "provider", "symbol"],
+        registry=_registry,
+    )
+
+    DAILY_PNL_GAUGE = Gauge(
+        "daily_pnl",
+        "Daily profit/loss amount (positive = profit, negative = loss)",
+        labelnames=["bot_id", "provider"],
+        registry=_registry,
+    )
+
     _PROMETHEUS_AVAILABLE = True
 
 except ImportError:
@@ -178,6 +214,11 @@ except ImportError:
     GATE_BLOCK_TOTAL = _noop
     GATE_ALLOW_TOTAL = _noop
     INCIDENT_CREATED_TOTAL = _noop
+    ACCOUNT_EQUITY_GAUGE = _noop
+    ACCOUNT_BALANCE_GAUGE = _noop
+    EQUITY_DRIFT_GAUGE = _noop
+    OPEN_POSITIONS_GAUGE = _noop
+    DAILY_PNL_GAUGE = _noop
 
 
 def prometheus_available() -> bool:

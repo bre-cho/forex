@@ -197,7 +197,7 @@ class LLMOrchestrator:
         "Respond in English. Keep answers concise and actionable."
     )
 
-    def __init__(self) -> None:
+    def __init__(self, *, runtime_mode: str = "paper") -> None:
         self._backend:   str           = "NONE"
         self._client:    Optional[Any] = None
         self._model:     str           = "gpt-4o-mini"
@@ -208,6 +208,7 @@ class LLMOrchestrator:
         self._last_ts:    float       = 0.0
         self._total_calls: int        = 0
         self._enabled:    bool        = False
+        self._runtime_mode: str       = str(runtime_mode or "paper").lower()
 
         self._init_backend()
         self._register_default_functions()
@@ -242,6 +243,12 @@ class LLMOrchestrator:
                 logger.warning("LLMOrchestrator: Gemini init failed: %s", exc)
 
         else:
+            if self._runtime_mode == "live":
+                raise RuntimeError(
+                    "LLMOrchestrator: no LLM API key configured but runtime_mode=live. "
+                    "Set OPENAI_API_KEY or GEMINI_API_KEY, or remove LLM from the live "
+                    "bot's critical trading path."
+                )
             logger.info(
                 "LLMOrchestrator: no LLM API key found "
                 "(OPENAI_API_KEY / GEMINI_API_KEY) — running in stub mode"
