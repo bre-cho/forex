@@ -155,6 +155,7 @@ from app.routers import (
     billing,
     broker_connections,
     bots,
+    compliance,
     experiments,
     incidents,
     live_trading,
@@ -183,6 +184,7 @@ app.include_router(signals.trades_router)
 app.include_router(analytics.router)
 app.include_router(notifications.router)
 app.include_router(billing.router)
+app.include_router(compliance.router)
 app.include_router(public.router)
 app.include_router(admin.router)
 app.include_router(ws.router)
