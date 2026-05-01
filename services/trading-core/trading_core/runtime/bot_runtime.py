@@ -80,6 +80,8 @@ class BotRuntime:
         mark_submitting_hook: Optional[Callable[[str, str], Awaitable[None]]] = None,
         mark_submit_phase_hook: Optional[Callable[[str, str, str, str, str, Dict[str, Any]], Awaitable[None]]] = None,
         enqueue_unknown_hook: Optional[Callable[[str, str, str | None, Dict[str, Any]], Awaitable[None]]] = None,
+        load_risk_state: Optional[Callable[[str], Awaitable[Dict[str, Any] | None]]] = None,
+        save_risk_state: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
     ) -> None:
         self.bot_instance_id = bot_instance_id
         self.strategy_config = strategy_config
@@ -115,6 +117,10 @@ class BotRuntime:
         self._mark_submitting_hook = mark_submitting_hook
         self._mark_submit_phase_hook = mark_submit_phase_hook
         self._enqueue_unknown_hook = enqueue_unknown_hook
+        # P1.1 risk state persistence — injectable callbacks so the host
+        # (API layer) can back these with Redis or another fast store.
+        self._load_risk_state: Optional[Callable[[str], Awaitable[Dict[str, Any] | None]]] = load_risk_state
+        self._save_risk_state: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = save_risk_state
         self._reconciliation_worker = None
         self._known_trade_volumes: Dict[str, float] = {}
         self._known_remaining_volumes: Dict[str, float] = {}
@@ -226,6 +232,8 @@ class BotRuntime:
                 return
             self.state.status = RuntimeStatus.STARTING
             self._init_engines()
+            # P1.1: Restore persisted risk counters before executing any signals.
+            await self._load_risk_state_from_store()
             await self._ensure_provider_usable()
             if self._execution_engine is not None:
                 await self._execution_engine.start()
@@ -660,6 +668,50 @@ class BotRuntime:
         self.state.metadata["last_signal"] = signal
         if self._on_signal:
             await self._safe_hook(self._on_signal(signal), "on_signal")
+
+    async def _load_risk_state_from_store(self) -> None:
+        """Load persisted risk counters (consecutive_losses, daily_pnl) from the
+        injected store on bot startup, preventing reset after process restart."""
+        if self._load_risk_state is None:
+            return
+        try:
+            stored = await self._load_risk_state(self.bot_instance_id)
+            if stored and isinstance(stored, dict):
+                self._consecutive_losses = int(stored.get("consecutive_losses", self._consecutive_losses))
+                self._daily_profit_amount = float(stored.get("daily_profit_amount", self._daily_profit_amount))
+                self._daily_loss_pct = float(stored.get("daily_loss_pct", self._daily_loss_pct))
+                logger.info(
+                    "BotRuntime %s: risk state loaded from store — "
+                    "consecutive_losses=%d daily_profit_amount=%.2f daily_loss_pct=%.4f",
+                    self.bot_instance_id,
+                    self._consecutive_losses,
+                    self._daily_profit_amount,
+                    self._daily_loss_pct,
+                )
+        except Exception as exc:
+            logger.warning(
+                "BotRuntime %s: failed to load risk state from store: %s",
+                self.bot_instance_id,
+                exc,
+            )
+
+    async def _persist_risk_state(self) -> None:
+        """Save current risk counters to the injected store after each trade result."""
+        if self._save_risk_state is None:
+            return
+        payload: Dict[str, Any] = {
+            "consecutive_losses": self._consecutive_losses,
+            "daily_profit_amount": self._daily_profit_amount,
+            "daily_loss_pct": self._daily_loss_pct,
+        }
+        try:
+            await self._save_risk_state(self.bot_instance_id, payload)
+        except Exception as exc:
+            logger.warning(
+                "BotRuntime %s: failed to persist risk state: %s",
+                self.bot_instance_id,
+                exc,
+            )
 
     async def _execute_signal(self, signal) -> None:
         if self._execution_engine is None:
@@ -1148,6 +1200,7 @@ class BotRuntime:
                 logger.info("Gate %s for signal %s: %s", gate_result.action, signal.signal_id, gate_result.reason)
                 if gate_result.action == "BLOCK":
                     self._consecutive_losses += 1
+                    await self._persist_risk_state()
                 return
 
             # Reserve idempotency in DB before broker call (fail-closed in live)
@@ -1392,6 +1445,7 @@ class BotRuntime:
                 await self._set_idempotency_status(command.idempotency_key, "rejected", command.brain_cycle_id or None)
             self.state.error_message = result.error_message
             self._consecutive_losses += 1
+            await self._persist_risk_state()
             await self._emit_event("order_rejected", order_payload)
             return
 
@@ -1416,6 +1470,7 @@ class BotRuntime:
             await self._set_idempotency_status(command.idempotency_key, "filled", command.brain_cycle_id or None)
 
         self._consecutive_losses = 0
+        await self._persist_risk_state()
         self.state.total_trades += 1
         trade_payload = {
             "bot_instance_id": self.bot_instance_id,

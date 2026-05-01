@@ -750,12 +750,17 @@ class CausalStrategyEngine:
         bars_per_episode: int   = 70,
         intervention_m:   int   = _DEFAULT_INTERVENTION_M,
         seed:             Optional[int] = None,
+        live_enabled:     bool  = False,
     ) -> None:
         self.n_samples        = n_samples
         self.episodes         = episodes
         self.bars_per_episode = bars_per_episode
         self.intervention_m   = intervention_m
         self.seed             = seed
+        # P3.3: Staging flag — causal inference must be explicitly enabled for live trading.
+        # Default is False (paper/research only).  Only set to True after validating
+        # the engine achieves positive Sharpe in an extended paper trading period.
+        self.live_enabled     = bool(live_enabled)
 
         self._rng   = random.Random(seed)
         self._world_model: WorldModel = WorldModel()
@@ -847,6 +852,26 @@ class CausalStrategyEngine:
         )
         self._last_result = result
         return result
+
+    def apply_to_live_if_enabled(self, decision_engine: Any) -> bool:
+        """Apply the last causal result to the live decision engine only if
+        ``live_enabled=True`` was set on construction.
+
+        Returns True if the genome was applied, False if blocked or no result.
+        """
+        if not self.live_enabled:
+            logger.warning(
+                "CausalStrategyEngine.apply_to_live_if_enabled: blocked — "
+                "live_enabled=False.  Enable only after paper-trading validation."
+            )
+            return False
+        if self._last_result is None:
+            logger.warning(
+                "CausalStrategyEngine.apply_to_live_if_enabled: no result available yet."
+            )
+            return False
+        self._last_result.apply_to(decision_engine)
+        return True
 
     # ── Internal helpers ───────────────────────────────────────────────── #
 

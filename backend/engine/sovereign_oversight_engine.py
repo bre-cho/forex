@@ -168,6 +168,7 @@ class SovereignPolicy:
     boost_threshold:          float          = 0.70
     attention_normalize:      bool           = True
     max_attention_per_cluster: float         = 0.50  # no single cluster > 50 %
+    require_human_approval_for_kill: bool    = True   # P3.1: KILL directives in FULL_AUTO need approval
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -180,6 +181,7 @@ class SovereignPolicy:
             "boost_threshold":           round(self.boost_threshold, 3),
             "attention_normalize":       self.attention_normalize,
             "max_attention_per_cluster": round(self.max_attention_per_cluster, 3),
+            "require_human_approval_for_kill": self.require_human_approval_for_kill,
         }
 
     @classmethod
@@ -514,8 +516,24 @@ class SovereignOversightResult:
         has_scale_up = any(dt == DirectiveType.SCALE_UP for dt, _ in lot_signals)
 
         if has_kill:
-            # Hard cap: survival / killed cluster signals max conservatism
-            new_lot = min(new_lot, 0.25)
+            # P3.1: In FULL_AUTO mode, KILL directives that reduce lot_scale require
+            # human approval when require_human_approval_for_kill is set.  If approval
+            # is not granted, demote to THROTTLE and log a warning.
+            if (
+                policy.require_human_approval_for_kill
+                and policy.mode == SovereignMode.FULL_AUTO
+            ):
+                logger.warning(
+                    "SovereignOversightResult.apply_to: KILL directive blocked — "
+                    "require_human_approval_for_kill=True in FULL_AUTO mode. "
+                    "Demoting to THROTTLE.  cycle=%s",
+                    self.cycle_id,
+                )
+                # Demote KILL → THROTTLE (lot_scale × 0.70 rather than hard cap 0.25)
+                new_lot = new_lot * 0.70
+            else:
+                # Hard cap: survival / killed cluster signals max conservatism
+                new_lot = min(new_lot, 0.25)
         elif has_throttle and not has_scale_up:
             # Throttle: reduce by 30 %
             new_lot = new_lot * 0.70
