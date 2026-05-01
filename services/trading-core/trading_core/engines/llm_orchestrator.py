@@ -143,6 +143,61 @@ class VectorStore:
     def size(self) -> int:
         return len(self._texts)
 
+    def save(self, path: str) -> None:
+        """Persist the vector store to a JSON + NumPy file pair.
+
+        Two files are written:
+        - ``{path}.json``  — texts and metadata (human-readable)
+        - ``{path}.npy``   — raw float32 embedding matrix
+
+        This allows the store to survive process restarts.
+        """
+        import json as _json
+        docs = [
+            {"text": t, "metadata": m}
+            for t, m in zip(list(self._texts), list(self._metas))
+        ]
+        with open(f"{path}.json", "w", encoding="utf-8") as fh:
+            _json.dump(docs, fh, ensure_ascii=False)
+        if self._vecs is not None:
+            np.save(f"{path}.npy", self._vecs)
+        logger.info("VectorStore saved: %d documents → %s", len(docs), path)
+
+    @classmethod
+    def load(cls, path: str, capacity: int = _MAX_VECTORS, dim: int = _EMB_DIM) -> "VectorStore":
+        """Load a previously saved vector store.
+
+        Returns a new :class:`VectorStore` populated with the saved documents.
+        If the files do not exist, an empty store is returned.
+        """
+        import json as _json
+        store = cls(capacity=capacity, dim=dim)
+        json_path = f"{path}.json"
+        npy_path = f"{path}.npy"
+        try:
+            with open(json_path, encoding="utf-8") as fh:
+                docs = _json.load(fh)
+            for doc in docs:
+                store._texts.append(str(doc.get("text", "")))
+                store._metas.append(dict(doc.get("metadata") or {}))
+        except FileNotFoundError:
+            logger.info("VectorStore.load: %s not found — returning empty store", json_path)
+            return store
+        except Exception as exc:
+            logger.warning("VectorStore.load: failed to read %s: %s", json_path, exc)
+            return store
+        try:
+            vecs = np.load(npy_path, allow_pickle=False)
+            store._vecs = vecs.astype(np.float32) if vecs.ndim == 2 else None
+        except FileNotFoundError:
+            # Rebuild matrix from re-embedding on first query
+            store._vecs = None
+        except Exception as exc:
+            logger.warning("VectorStore.load: failed to read %s: %s", npy_path, exc)
+            store._vecs = None
+        logger.info("VectorStore loaded: %d documents from %s", len(store._texts), path)
+        return store
+
 
 # ── Function registry ──────────────────────────────────────────────────── #
 
@@ -402,6 +457,11 @@ class LLMOrchestrator:
         return self._enabled
 
     @property
+    def is_stub(self) -> bool:
+        """True when no LLM backend is configured (stub / degraded mode)."""
+        return not self._enabled
+
+    @property
     def backend(self) -> str:
         return self._backend
 
@@ -427,6 +487,8 @@ class LLMOrchestrator:
     def status(self) -> dict:
         return {
             "enabled":           self._enabled,
+            "is_stub":           self.is_stub,
+            "backend":           self._backend,
             "model":             self._model,
             "rag_enabled":       True,
             "vector_store_size": self._vector_store.size,

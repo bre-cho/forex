@@ -580,6 +580,8 @@ class AutonomousEnterpriseEngine:
     """
 
     def __init__(self, config: Optional[EnterpriseConfig] = None) -> None:
+        from trading_core.engines._advanced_guard import require_advanced_engines
+        require_advanced_engines("AutonomousEnterpriseEngine")
         from engine.sovereign_oversight_engine import SovereignPolicy, SovereignMode
 
         self.config:    EnterpriseConfig = config or EnterpriseConfig()

@@ -60,8 +60,98 @@ def _safe_upper(value: Any, default: str = "") -> str:
     return str(value).upper()
 
 
+async def _recompute_and_persist_analytics(db: AsyncSession, bot_id: str) -> None:
+    """Recompute trading analytics and persist a BotRuntimeSnapshot.
+
+    Called automatically after each trade close (P2.3) so performance metrics
+    (Sharpe, Calmar, Sortino, streaks) are always up to date in the DB without
+    requiring an external batch job.
+
+    Analytics failures are deliberately swallowed by the caller so that a
+    broken analytics library can never block live trading.
+    """
+    try:
+        from analytics_service import (  # noqa: PLC0415
+            compute_drawdown,
+            compute_expectancy,
+            compute_profit_factor,
+            sharpe_ratio,
+            calmar_ratio,
+            sortino_ratio,
+            compute_streaks,
+        )
+    except ImportError:
+        logger.debug("analytics_service not available — skipping analytics recompute for %s", bot_id)
+        return
+
+    closed_trades = (
+        (
+            await db.execute(
+                select(Trade).where(
+                    Trade.bot_instance_id == bot_id,
+                    Trade.status == "closed",
+                    Trade.pnl.isnot(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not closed_trades:
+        return
+
+    pnl_series = [float(t.pnl or 0.0) for t in closed_trades]
+
+    metrics: dict = {}
+    try:
+        metrics["profit_factor"] = compute_profit_factor(pnl_series)
+    except Exception:
+        pass
+    try:
+        dd = compute_drawdown(pnl_series)
+        metrics["max_drawdown_pct"] = float(dd.max_drawdown_pct)
+    except Exception:
+        pass
+    try:
+        exp = compute_expectancy(pnl_series)
+        metrics["expectancy"] = float(exp.expectancy)
+        metrics["win_rate"] = float(exp.win_rate)
+        metrics["trade_count"] = int(exp.trade_count)
+    except Exception:
+        pass
+    try:
+        metrics["sharpe_ratio"] = sharpe_ratio(pnl_series)
+    except Exception:
+        pass
+    try:
+        metrics["calmar_ratio"] = calmar_ratio(pnl_series)
+    except Exception:
+        pass
+    try:
+        metrics["sortino_ratio"] = sortino_ratio(pnl_series)
+    except Exception:
+        pass
+    try:
+        streaks = compute_streaks(pnl_series)
+        metrics["max_win_streak"] = int(streaks.max_win_streak)
+        metrics["max_loss_streak"] = int(streaks.max_loss_streak)
+    except Exception:
+        pass
+
+    if not metrics:
+        return
+
+    db.add(
+        BotRuntimeSnapshot(
+            bot_instance_id=bot_id,
+            snapshot={"type": "analytics_recompute", "metrics": metrics},
+        )
+    )
+    await db.commit()
+    logger.debug("analytics_recompute persisted for bot %s: %s", bot_id, list(metrics.keys()))
+
+
 def _runtime_hooks(bot_id: str, bot_mode: str):
-    async def _record_transition_with_validation(
         ledger: SafetyLedgerService,
         *,
         signal_id: str,
@@ -180,6 +270,18 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
             if status == "closed":
                 trade.closed_at = _now_utc()
             await db.commit()
+            if status == "closed":
+                # P2.3: Trigger analytics recalculation after every trade close.
+                # This keeps BotRuntimeSnapshot up to date with live performance
+                # metrics (Sharpe, Calmar, Sortino, streaks) without an external
+                # batch job.
+                try:
+                    await _recompute_and_persist_analytics(db, bot_id)
+                except Exception as analytics_exc:
+                    # Analytics failure must NOT affect trading — log and continue.
+                    logger.warning(
+                        "analytics_recompute_failed [%s]: %s", bot_id, analytics_exc
+                    )
         await _publish_bot_event_safe(bot_id, f"trade_{status}", payload)
 
     async def on_snapshot(payload: dict) -> None:
@@ -921,8 +1023,11 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
             )
 
     # P1.1: Redis-backed risk state persistence hooks.
-    # Key: bot:{bot_id}:risk_state — TTL 25 hours so state survives overnight restart.
-    _RISK_STATE_TTL = 25 * 60 * 60  # 25 hours in seconds
+    # Key: bot:{bot_id}:risk_state — TTL 48 hours so state survives overnight
+    # restart and a full weekend (Fri close → Mon open) without being lost.
+    # Previously 25 hours — extended to 48h to survive Redis restarts and
+    # short infra outages (P0.4).
+    _RISK_STATE_TTL = 48 * 60 * 60  # 48 hours in seconds
 
     async def load_risk_state(bid: str) -> dict | None:
         try:

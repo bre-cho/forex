@@ -825,6 +825,8 @@ class UtilityOptimizationEngine:
         utility_config:   Optional[UtilityConfig] = None,
         seed:             Optional[int]           = None,
     ) -> None:
+        from trading_core.engines._advanced_guard import require_advanced_engines
+        require_advanced_engines("UtilityOptimizationEngine")
         self.n_genomes        = n_genomes
         self.episodes         = episodes
         self.bars_per_episode = bars_per_episode

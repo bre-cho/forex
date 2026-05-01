@@ -1083,6 +1083,8 @@ class GameTheoryEngine:
         config: Optional[EcosystemConfig] = None,
         seed:   Optional[int]              = None,
     ) -> None:
+        from trading_core.engines._advanced_guard import require_advanced_engines
+        require_advanced_engines("GameTheoryEngine")
         self.config           = config or EcosystemConfig()
         self.seed             = seed
         self._rng             = random.Random(seed)

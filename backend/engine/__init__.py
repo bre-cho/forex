@@ -1,3 +1,22 @@
+import os as _os
+
+# ── Production import guard ──────────────────────────────────────────────────
+# The backend/engine package is DEPRECATED and superseded by:
+#   services/trading-core/trading_core/engines   (strategy engines)
+#   services/execution-service/execution_service (broker execution)
+#
+# Importing this package in production or staging environments is a
+# configuration error that must be caught immediately.
+_APP_ENV = _os.getenv("APP_ENV", "development").strip().lower()
+_ALLOW_LEGACY = _os.getenv("ALLOW_LEGACY_BACKEND", "false").strip().lower() == "true"
+if _APP_ENV in {"production", "prod", "staging"} and not _ALLOW_LEGACY:
+    raise ImportError(
+        "backend/engine is DEPRECATED and must not be imported in "
+        f"APP_ENV={_APP_ENV!r}. Use trading_core.engines from "
+        "services/trading-core instead. "
+        "Set ALLOW_LEGACY_BACKEND=true ONLY during migration."
+    )
+
 from .wave_detector import WaveDetector, WaveState
 from .signal_coordinator import SignalCoordinator, CoordinatorState, SignalAuthority
 from .risk_manager import RiskManager, LotMode, DrawdownProtection

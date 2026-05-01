@@ -620,6 +620,8 @@ class EvolutionaryEngine:
         bars_per_episode: int   = _DEFAULT_BARS_EPISODE,
         seed:             Optional[int] = None,
     ) -> None:
+        from trading_core.engines._advanced_guard import require_advanced_engines
+        require_advanced_engines("EvolutionaryEngine")
         self.pop_size         = pop_size
         self.generations      = generations
         self.episodes         = episodes

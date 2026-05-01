@@ -230,6 +230,18 @@ class BotRuntime:
             if self.state.status in (RuntimeStatus.RUNNING, RuntimeStatus.STARTING):
                 logger.warning("BotRuntime %s already running or starting", self.bot_instance_id)
                 return
+            # P0.4: Fail-closed — live bots MUST have risk state persistence wired.
+            # An unwired hook means risk counters (daily loss, consecutive losses…)
+            # will be lost on every restart, allowing the bot to silently bypass
+            # drawdown protection.
+            if self.runtime_mode == "live":
+                if self._load_risk_state is None or self._save_risk_state is None:
+                    raise RuntimeError(
+                        f"BotRuntime {self.bot_instance_id}: live mode requires "
+                        "both load_risk_state and save_risk_state hooks to be wired. "
+                        "Pass these callbacks when constructing BotRuntime (the API "
+                        "layer wires them via bot_service._runtime_hooks())."
+                    )
             self.state.status = RuntimeStatus.STARTING
             self._init_engines()
             # P1.1: Restore persisted risk counters before executing any signals.
