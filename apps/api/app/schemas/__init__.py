@@ -169,6 +169,9 @@ class StrategyVersionOut(BaseModel):
     version: int
     config_snapshot: Dict[str, Any]
     change_notes: str
+    stage: str
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

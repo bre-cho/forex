@@ -141,6 +141,9 @@ class StrategyVersion(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     config_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     change_notes: Mapped[str] = mapped_column(Text, default="")
+    stage: Mapped[str] = mapped_column(String(32), default="DRAFT", nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
     strategy: Mapped["Strategy"] = relationship(back_populates="versions")

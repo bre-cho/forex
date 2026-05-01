@@ -18,6 +18,7 @@ ACTION_POLICY: dict[str, dict[str, str]] = {
     "disable_kill_switch": {"requester": "operator", "approver": "risk_admin"},
     "change_provider_credential": {"requester": "operator", "approver": "super_admin"},
     "retry_unknown_order": {"requester": "operator", "approver": "risk_admin"},
+    "promote_strategy_live": {"requester": "trader", "approver": "risk_admin"},
 }
 
 
