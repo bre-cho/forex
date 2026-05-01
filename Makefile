@@ -8,13 +8,13 @@ build:
 	pnpm turbo build
 
 test:
-	pytest apps/api/tests services/trading-core/tests -q
+	pytest apps/api/tests services/trading-core/tests services/execution-service/tests -q
 
 test-api:
 	pytest apps/api/tests -q
 
 test-services:
-	pytest services/trading-core/tests -q
+	pytest services/trading-core/tests services/execution-service/tests -q
 
 lint:
 	pnpm turbo lint
