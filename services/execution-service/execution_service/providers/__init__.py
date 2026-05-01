@@ -8,6 +8,7 @@ from .ctrader_live import CTraderLiveProvider
 from .mt5 import MT5Provider
 from .mt5_demo import MT5DemoProvider
 from .mt5_live import MT5LiveProvider
+from .mt5_bridge import MT5BridgeProvider
 from .bybit import BybitProvider
 from .bybit_demo import BybitDemoProvider
 from .bybit_live import BybitLiveProvider
@@ -24,6 +25,7 @@ __all__ = [
     "MT5Provider",
     "MT5DemoProvider",
     "MT5LiveProvider",
+    "MT5BridgeProvider",
     "BybitProvider",
     "BybitDemoProvider",
     "BybitLiveProvider",
@@ -40,6 +42,7 @@ def get_provider(provider_type: str, **kwargs) -> BrokerProvider:
         "mt5": MT5DemoProvider,
         "mt5_demo": MT5DemoProvider,
         "mt5_live": MT5LiveProvider,
+        "mt5_bridge": MT5BridgeProvider,
         "bybit": BybitDemoProvider,
         "bybit_demo": BybitDemoProvider,
         "bybit_live": BybitLiveProvider,

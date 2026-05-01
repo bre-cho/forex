@@ -67,6 +67,24 @@ class CTraderExecutionAdapter(ABC):
     async def health_check(self) -> ExecutionAdapterHealth:
         """Execution channel health."""
 
+    async def get_instrument_spec(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Return instrument specification for position sizing.
+
+        Optional: concrete adapters that support it should override this.
+        Returns None when unavailable — callers must handle that gracefully.
+        """
+        return None
+
+    async def estimate_margin(
+        self, symbol: str, side: str, volume: float, price: float
+    ) -> float:
+        """Estimate margin required for a trade.
+
+        Optional: concrete adapters that support it should override this.
+        Returns 0.0 when unavailable.
+        """
+        return 0.0
+
 
 class CTraderUnavailableExecutionAdapter(CTraderExecutionAdapter):
     """Fail-closed adapter used when execution capability is unavailable."""
@@ -188,6 +206,34 @@ class CTraderEngineExecutionAdapter(CTraderExecutionAdapter):
         fn = getattr(self._provider, "get_history")
         rows = await self._maybe_await(fn, limit=limit)
         return [dict(r) for r in (rows or [])]
+
+    async def get_instrument_spec(self, symbol: str) -> Optional[Dict[str, Any]]:
+        fn = getattr(self._provider, "get_instrument_spec", None)
+        if not callable(fn):
+            return None
+        try:
+            result = await self._maybe_await(fn, symbol)
+            return dict(result) if result else None
+        except Exception:
+            return None
+
+    async def estimate_margin(
+        self, symbol: str, side: str, volume: float, price: float
+    ) -> float:
+        fn = getattr(self._provider, "estimate_margin", None)
+        if callable(fn):
+            try:
+                result = await self._maybe_await(fn, symbol=symbol, side=side, volume=volume, price=price)
+                return float(result or 0.0)
+            except Exception:
+                pass
+        # Fallback: use instrument spec if available
+        spec = await self.get_instrument_spec(symbol)
+        if spec:
+            margin_rate = float(spec.get("margin_initial", spec.get("margin_rate", 0.01)) or 0.01)
+            contract_size = float(spec.get("contractSize", spec.get("contract_size", 100_000)) or 100_000)
+            return volume * contract_size * price * margin_rate
+        return 0.0
 
     async def health_check(self) -> ExecutionAdapterHealth:
         if not self._available:

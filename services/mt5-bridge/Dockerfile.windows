@@ -1,0 +1,30 @@
+# MT5 Bridge — Dockerfile
+# NOTE: This service MUST be built and run on a Windows host where the
+# MetaTrader5 Python package (Windows-only DLL) is available.
+#
+# Build on Windows:
+#   docker build -f Dockerfile.windows -t forex/mt5-bridge:latest .
+#
+# Run on Windows:
+#   docker run -d --name mt5-bridge \
+#     -p 8181:8181 \
+#     -e MT5_LOGIN=12345678 \
+#     -e MT5_PASSWORD=your_password \
+#     -e MT5_SERVER="ICMarketsSC-Demo" \
+#     -e MT5_SYMBOL=EURUSD \
+#     -e MT5_LIVE=false \
+#     -e BRIDGE_API_KEY=your_secure_api_key \
+#     forex/mt5-bridge:latest
+
+FROM python:3.11-windowsservercore-ltsc2022
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 8181
+
+CMD ["uvicorn", "mt5_bridge.main:app", "--host", "0.0.0.0", "--port", "8181"]
