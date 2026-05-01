@@ -1259,6 +1259,8 @@ class SovereignOversightEngine:
     """
 
     def __init__(self, policy: Optional[SovereignPolicy] = None) -> None:
+        from trading_core.engines._advanced_guard import require_advanced_engines
+        require_advanced_engines("SovereignOversightEngine")
         self.policy: SovereignPolicy = policy or SovereignPolicy()
         self._audit_trail: List[AuditEntry] = []
         self._last_result: Optional[SovereignOversightResult] = None

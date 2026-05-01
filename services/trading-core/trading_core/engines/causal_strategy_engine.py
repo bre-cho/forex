@@ -751,6 +751,8 @@ class CausalStrategyEngine:
         intervention_m:   int   = _DEFAULT_INTERVENTION_M,
         seed:             Optional[int] = None,
     ) -> None:
+        from trading_core.engines._advanced_guard import require_advanced_engines
+        require_advanced_engines("CausalStrategyEngine")
         self.n_samples        = n_samples
         self.episodes         = episodes
         self.bars_per_episode = bars_per_episode

@@ -580,7 +580,9 @@ class AutonomousEnterpriseEngine:
     """
 
     def __init__(self, config: Optional[EnterpriseConfig] = None) -> None:
-        from engine.sovereign_oversight_engine import SovereignPolicy, SovereignMode
+        from trading_core.engines._advanced_guard import require_advanced_engines
+        require_advanced_engines("AutonomousEnterpriseEngine")
+        from trading_core.engines.sovereign_oversight_engine import SovereignPolicy, SovereignMode
 
         self.config:    EnterpriseConfig = config or EnterpriseConfig()
         self.lifecycle: EnterpriseLifecycle = EnterpriseLifecycle.IDLE
@@ -595,7 +597,7 @@ class AutonomousEnterpriseEngine:
         )
 
         # Sovereign engine owned by enterprise (separate from app_state.sovereign_engine)
-        from engine.sovereign_oversight_engine import SovereignOversightEngine
+        from trading_core.engines.sovereign_oversight_engine import SovereignOversightEngine
         self._sovereign = SovereignOversightEngine(policy=self._policy)
 
         self._cycle_n:    int            = 0

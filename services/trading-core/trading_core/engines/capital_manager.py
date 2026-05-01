@@ -231,22 +231,49 @@ class CapitalManager:
         """Return profile by name; falls back to CUSTOM if unknown."""
         return _PROFILES.get(name.upper(), _PROFILES["CUSTOM"])
 
+    # Absolute hard cap on max_lot expressed as a fraction of equity.
+    # Daily compounding after a winning streak can push lot sizes far beyond
+    # what is prudent.  This cap is applied *after* the profile override so
+    # it is always enforced regardless of the profile used.
+    # Formula: hard_cap = equity × MAX_LOT_EQUITY_FRACTION / pip_value_per_lot
+    # With default pip_value=10 and fraction=0.05: $10k equity → 5 lots max.
+    _MAX_LOT_EQUITY_FRACTION = 0.05   # 5% of equity as max notional risk cap
+    _DEFAULT_PIP_VALUE_PER_LOT = 10.0  # USD per pip per standard lot
+
     def apply(
         self,
         settings_dict: dict,
         balance: float,
         profile_override: str = "AUTO",
+        equity: Optional[float] = None,
     ) -> dict:
         """
         Return a copy of *settings_dict* with risk parameters overridden
         according to the capital profile.
 
         In CUSTOM mode or when the user has set profile_override='CUSTOM',
-        no changes are made.
+        no changes are made except the hard cap on max_lot is still enforced
+        when ``equity`` is provided.
+
+        Parameters
+        ----------
+        settings_dict:
+            Current risk settings dict (may be mutated into a copy).
+        balance:
+            Account balance used for profile selection.
+        profile_override:
+            Named profile or "AUTO".
+        equity:
+            Current account equity.  When provided, the hard lot cap
+            ``equity × 5% / pip_value_per_lot`` is enforced.  Prevents
+            compounding from accumulating dangerously large lot sizes.
         """
         name = profile_override.upper()
         if name == "CUSTOM":
-            return dict(settings_dict)
+            updated = dict(settings_dict)
+            if equity is not None and equity > 0:
+                updated = self._apply_hard_lot_cap(updated, equity)
+            return updated
 
         if name == "AUTO":
             profile = self.detect(balance)
@@ -271,14 +298,42 @@ class CapitalManager:
 
         updated = dict(settings_dict)
         updated.update(overrides)
+        if equity is not None and equity > 0:
+            updated = self._apply_hard_lot_cap(updated, equity)
         logger.info(
             "CapitalManager: profile=%s balance=%.2f → lot_mode=%s lot_value=%.3f "
             "max_lot=%.2f dd_daily=%.1f%% dd_overall=%.1f%%",
             profile.profile, balance,
-            profile.lot_mode, profile.lot_value, profile.max_lot,
+            profile.lot_mode, profile.lot_value, float(updated.get("max_lot", profile.max_lot)),
             profile.max_daily_dd_pct, profile.max_overall_dd_pct,
         )
         return updated
+
+    def _apply_hard_lot_cap(self, settings: dict, equity: float) -> dict:
+        """Clamp max_lot to the hard equity-based cap.
+
+        Cap = equity × _MAX_LOT_EQUITY_FRACTION / pip_value_per_lot
+
+        This prevents accumulated compounding gains from inflating lot sizes
+        beyond what the account can sustain given realistic drawdown scenarios.
+        """
+        pip_value = float(
+            settings.get("pip_value_per_lot") or self._DEFAULT_PIP_VALUE_PER_LOT
+        )
+        if pip_value <= 0:
+            pip_value = self._DEFAULT_PIP_VALUE_PER_LOT
+        hard_cap = (float(equity) * self._MAX_LOT_EQUITY_FRACTION) / pip_value
+        hard_cap = max(settings.get("min_lot", 0.01), round(hard_cap, 2))
+        current_max = float(settings.get("max_lot", hard_cap))
+        if current_max > hard_cap:
+            logger.warning(
+                "CapitalManager: max_lot %.2f exceeds equity-based hard cap %.2f "
+                "(equity=%.2f) — clamping",
+                current_max, hard_cap, equity,
+            )
+            settings = dict(settings)
+            settings["max_lot"] = hard_cap
+        return settings
 
     def suggest_daily_targets(
         self,

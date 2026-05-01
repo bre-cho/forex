@@ -574,6 +574,8 @@ class MetaLearningEngine:
         top_k_winners:    int   = _DEFAULT_TOP_K_WINNERS,
         seed:             Optional[int] = None,
     ) -> None:
+        from trading_core.engines._advanced_guard import require_advanced_engines
+        require_advanced_engines("MetaLearningEngine")
         self.outer_loops      = outer_loops
         self.pop_size         = pop_size
         self.generations      = generations
