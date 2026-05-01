@@ -29,6 +29,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import DailyLockAction
 
+try:
+    from app.core.metrics import DAILY_LOCK_ACTIONS_TOTAL
+except Exception:
+    DAILY_LOCK_ACTIONS_TOTAL = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 _MAX_ACTION_ATTEMPTS = 3
@@ -172,6 +177,17 @@ class DailyLockRuntimeController:
                     title="Daily lock close-all postcondition failed",
                     detail=str(exc),
                 )
+
+        # P1.1: emit Prometheus metric for every daily lock action
+        if DAILY_LOCK_ACTIONS_TOTAL is not None:
+            try:
+                DAILY_LOCK_ACTIONS_TOTAL.labels(
+                    bot_id=str(bot_id),
+                    action=str(action),
+                    reason=str(lock_reason or "unknown"),
+                ).inc()
+            except Exception:
+                pass
 
         if self._on_action_completed is not None:
             try:

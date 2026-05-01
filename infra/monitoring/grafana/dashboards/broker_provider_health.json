@@ -1,0 +1,66 @@
+{
+  "title": "Broker Provider Health",
+  "uid": "forex-broker-provider-health",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "title": "Provider Certification Status (1=valid, 0=expired/missing)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "provider_certification_status",
+          "legendFormat": "{{ bot_id }} / {{ provider }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": 0 },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Broker Quote Age (seconds)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "broker_quote_age_seconds",
+          "legendFormat": "{{ bot_id }}/{{ symbol }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "yellow", "value": 5 },
+              { "color": "red", "value": 15 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Trading Incidents by Type & Severity",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "rate(trading_incident_created_total[5m])",
+          "legendFormat": "{{ incident_type }} ({{ severity }})"
+        }
+      ]
+    }
+  ]
+}

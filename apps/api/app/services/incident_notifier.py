@@ -8,6 +8,11 @@ from urllib import request as urllib_request
 
 logger = logging.getLogger(__name__)
 
+try:
+    from app.core.metrics import INCIDENT_CREATED_TOTAL
+except Exception:
+    INCIDENT_CREATED_TOTAL = None  # type: ignore[assignment]
+
 
 async def notify_incident(
     *,
@@ -17,6 +22,13 @@ async def notify_incident(
     detail: str,
     payload: dict | None = None,
 ) -> None:
+    # P1.1: track all incidents in Prometheus regardless of webhook config
+    if INCIDENT_CREATED_TOTAL is not None:
+        try:
+            INCIDENT_CREATED_TOTAL.labels(incident_type=incident_type, severity=severity).inc()
+        except Exception:
+            pass
+
     webhook_url = os.environ.get("INCIDENT_WEBHOOK_URL", "").strip()
     if not webhook_url:
         return

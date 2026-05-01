@@ -1,0 +1,80 @@
+{
+  "title": "Live Bot Health",
+  "uid": "forex-live-bot-health",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "title": "Bot Runtime Heartbeat Age (seconds)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "bot_runtime_heartbeat_age_seconds",
+          "legendFormat": "bot={{ bot_id }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "yellow", "value": 60 },
+              { "color": "red", "value": 300 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Worker Heartbeat Age (seconds)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "worker_heartbeat_age_seconds",
+          "legendFormat": "worker={{ worker_name }}"
+        }
+      ]
+    },
+    {
+      "title": "Pre-Execution Gate Blocks (rate/5m)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "rate(pre_execution_gate_block_total[5m])",
+          "legendFormat": "reason={{ reason }}"
+        }
+      ]
+    },
+    {
+      "title": "Daily Lock Actions",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sum(daily_lock_actions_total)",
+          "legendFormat": "total"
+        }
+      ]
+    },
+    {
+      "title": "Provider Certification Status",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 8 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "provider_certification_status",
+          "legendFormat": "{{ bot_id }}/{{ provider }}"
+        }
+      ]
+    }
+  ]
+}

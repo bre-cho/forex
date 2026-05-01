@@ -15,6 +15,7 @@ from app.core.db import AsyncSessionLocal
 from app.core.middleware import RequestIDMiddleware
 from app.core.registry import set_registry
 from app.services.environment_runtime_policy import allow_stub_runtime, production_like_env
+from app.core.metrics import prometheus_available
 from app.services.reconciliation_daemon_health_service import ReconciliationDaemonHealthService
 from app.services.submit_outbox_recovery_health_service import SubmitOutboxRecoveryHealthService
 
@@ -217,6 +218,17 @@ async def health_ready():
         "env": settings.app_env,
         "runtime_health": runtime_health,
     }
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics_endpoint():
+    """Prometheus metrics scrape endpoint."""
+    if not prometheus_available():
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse("# prometheus_client not installed\n", media_type="text/plain")
+    from fastapi.responses import Response
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health/live")

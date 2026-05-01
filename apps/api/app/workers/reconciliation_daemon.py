@@ -298,6 +298,13 @@ async def _process_item(
                     item.id,
                     item.bot_instance_id,
                 )
+            if RECONCILIATION_RESOLVED_TOTAL is not None:
+                try:
+                    RECONCILIATION_RESOLVED_TOTAL.labels(
+                        bot_id=str(item.bot_instance_id), provider="unknown", resolution_code=resolution_code
+                    ).inc()
+                except Exception:
+                    pass
                 return
         else:
             resolution_code = "grace_period"
@@ -319,6 +326,11 @@ async def _process_item(
             )
             await _create_critical_incident(db, item, reason)
             await _lock_bot_daily_state(db, item.bot_instance_id)
+            if RECONCILIATION_OVERDUE_TOTAL is not None:
+                try:
+                    RECONCILIATION_OVERDUE_TOTAL.labels(bot_id=str(item.bot_instance_id)).inc()
+                except Exception:
+                    pass
             return
 
         if age_seconds >= _RETRY_AFTER_AGE_SECONDS:
@@ -377,6 +389,11 @@ async def _run_once(worker_id: str) -> None:
 
         queue_svc = ReconciliationQueueService(db)
         items = await queue_svc.list_all_pending_due(limit=200)
+        if RECONCILIATION_QUEUE_DEPTH is not None:
+            try:
+                RECONCILIATION_QUEUE_DEPTH.set(len(items))
+            except Exception:
+                pass
 
     if not items:
         return
