@@ -17,6 +17,7 @@ from app.services.daily_trading_state import DailyTradingStateService
 from app.services.live_readiness_guard import LiveReadinessGuard
 from app.services.policy_service import PolicyService
 from app.services.provider_certification_service import ProviderCertificationService
+from app.services.experiment_registry_service import ExperimentRegistryService
 
 # Minimum required keys for a live-approved risk policy
 _REQUIRED_LIVE_POLICY_KEYS = {
@@ -55,6 +56,7 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
         "broker_health": False,
         "broker_capability_proof": False,
         "provider_certified": False,
+        "burn_in_passed": False,
         "reconciliation_daemon_healthy": False,
         "submit_outbox_recovery_healthy": False,
         "submit_outbox_not_stuck": False,
@@ -136,6 +138,25 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
     snapshot = getattr(active_policy, "policy_snapshot", None) or {}
     _validate_policy_has_live_keys(snapshot)
     checks["active_policy"] = True
+
+    # P0.7: Burn-in promotion gate before real-money live start.
+    # Enforced fail-closed in production when live_burn_in_required=true.
+    if bool(getattr(settings, "is_production", False)) and bool(getattr(settings, "live_burn_in_required", False)):
+        latest_experiments = await ExperimentRegistryService(db).list_experiments(str(bot.id), limit=1)
+        if not latest_experiments:
+            raise LiveStartPreflightError("burn_in_missing")
+        latest = latest_experiments[0]
+        stage = str(getattr(latest, "stage", "") or "").upper()
+        if stage != "LIVE_APPROVED":
+            metrics = dict(getattr(latest, "metrics_snapshot", {}) or {})
+            if not bool(metrics.get("burn_in_passed", False)):
+                raise LiveStartPreflightError("burn_in_not_passed")
+            unresolved_unknown = int(metrics.get("unresolved_unknown_orders", 0) or 0)
+            if unresolved_unknown > 0:
+                raise LiveStartPreflightError("burn_in_unknown_orders_unresolved")
+            if bool(metrics.get("ledger_divergence", False)):
+                raise LiveStartPreflightError("burn_in_ledger_divergence")
+        checks["burn_in_passed"] = True
 
     # Sync broker equity — in live mode, fail-closed: no fallback to stale state
     daily = DailyTradingStateService(db)

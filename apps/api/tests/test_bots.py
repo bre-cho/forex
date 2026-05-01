@@ -323,6 +323,7 @@ async def test_live_start_hard_fails_when_guard_blocks_runtime(monkeypatch: pyte
         start_resp = await client.post(
             f"/v1/workspaces/{workspace_id}/bots/{bot_id}/start",
             headers=headers,
+            json={"reason": "live_guard_validation"},
         )
         assert start_resp.status_code == 503
         assert "guard blocked" in start_resp.json()["detail"].lower()
@@ -432,6 +433,7 @@ async def test_live_start_hard_fails_when_preflight_blocks(monkeypatch: pytest.M
         start_resp = await client.post(
             f"/v1/workspaces/{workspace_id}/bots/{bot_id}/start",
             headers=headers,
+            json={"reason": "preflight_validation"},
         )
         assert start_resp.status_code == 503
         assert "daily_state_stale" in start_resp.json()["detail"]

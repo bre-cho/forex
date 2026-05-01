@@ -8,7 +8,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
 from app.dependencies.permissions import require_workspace_role
-from app.models import BotInstance, BotInstanceConfig, BotRuntimeSnapshot, BrokerConnection, Strategy, User
+from app.models import (
+    AuditLog,
+    BotInstance,
+    BotInstanceConfig,
+    BotRuntimeSnapshot,
+    BrokerConnection,
+    Strategy,
+    User,
+    WorkspaceMember,
+)
 from app.services.live_start_preflight import LiveStartPreflightError, run_live_start_preflight
 from app.services.live_readiness_guard import LiveReadinessGuard
 from app.schemas import (
@@ -125,6 +134,29 @@ async def _validate_live_mode_requirements(
         )
 
 
+async def _assert_live_action_admin(
+    workspace_id: str,
+    current_user: User,
+    db: AsyncSession,
+) -> None:
+    if bool(getattr(current_user, "is_superuser", False)):
+        return
+    membership = (
+        (
+            await db.execute(
+                select(WorkspaceMember).where(
+                    WorkspaceMember.workspace_id == workspace_id,
+                    WorkspaceMember.user_id == str(getattr(current_user, "id", "") or ""),
+                )
+            )
+        )
+        .scalar_one_or_none()
+    )
+    role = str(getattr(membership, "role", "") or "").lower()
+    if role not in {"owner", "admin"}:
+        raise HTTPException(status_code=403, detail="Admin permission required for live start")
+
+
 @router.post("", response_model=BotOut, status_code=status.HTTP_201_CREATED)
 async def create_bot(
     workspace_id: str,
@@ -228,6 +260,7 @@ async def start_bot(
     workspace_id: str,
     bot_id: str,
     request: Request,
+    payload: dict | None = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     _member=Depends(require_workspace_role("trader")),
@@ -240,6 +273,14 @@ async def start_bot(
     if registry.get(bot_id) is None:
         from app.services.bot_service import create_runtime_for_bot
         await create_runtime_for_bot(bot, registry, db)
+
+    live_start_reason: str | None = None
+    if bot.mode == "live":
+        await _assert_live_action_admin(workspace_id, current_user, db)
+        live_start_reason = str((payload or {}).get("reason") or "").strip()
+        if not live_start_reason:
+            raise HTTPException(status_code=400, detail="Live start reason required")
+
     try:
         if bot.mode == "live":
             runtime = registry.get(bot_id)
@@ -256,8 +297,40 @@ async def start_bot(
             from app.services.bot_service import assert_runtime_live_guard
 
             await assert_runtime_live_guard(bot, registry)
+            db.add(
+                AuditLog(
+                    user_id=str(getattr(current_user, "id", "") or ""),
+                    action="live_start",
+                    resource_type="bot_instance",
+                    resource_id=str(bot.id),
+                    details={
+                        "workspace_id": workspace_id,
+                        "reason": str(live_start_reason or ""),
+                        "mode": "live",
+                        "result": "allowed",
+                    },
+                )
+            )
+            await db.commit()
     except RuntimeError as exc:
         bot.status = "error"
+        if bot.mode == "live":
+            db.add(
+                AuditLog(
+                    user_id=str(getattr(current_user, "id", "") or ""),
+                    action="live_start",
+                    resource_type="bot_instance",
+                    resource_id=str(bot.id),
+                    details={
+                        "workspace_id": workspace_id,
+                        "reason": str(live_start_reason or ""),
+                        "mode": "live",
+                        "result": "blocked",
+                        "error": str(exc),
+                    },
+                )
+            )
+            await db.commit()
         raise HTTPException(status_code=503, detail=str(exc))
     bot.status = "running"
     return _lifecycle_response("running", bot_id, already_running)

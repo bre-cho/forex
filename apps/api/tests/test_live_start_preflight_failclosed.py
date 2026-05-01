@@ -228,3 +228,119 @@ async def test_preflight_blocks_when_provider_certification_expired():
          patch("app.services.live_start_preflight.ProviderCertificationService.get_live_gate_status", AsyncMock(return_value={"ok": False, "reason": "provider_certification_expired", "record": None})):
         with pytest.raises(LiveStartPreflightError, match="provider_certification_expired"):
             await run_live_start_preflight(bot=bot, provider=provider, db=db)
+
+
+@pytest.mark.asyncio
+async def test_preflight_blocks_when_burn_in_missing_in_production():
+    bot = MagicMock()
+    bot.id = "bot-6"
+
+    acct = MagicMock()
+    acct.equity = 1000.0
+    provider = MagicMock()
+    provider.provider_name = "ctrader_live"
+    provider.get_account_info = AsyncMock(return_value=acct)
+
+    db = AsyncMock(spec=AsyncSession)
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))
+
+    readiness_ok = MagicMock(ok=True)
+    readiness_contract_ok = MagicMock(ok=True)
+    readiness_proof_ok = MagicMock(ok=True, details={"proof": "ok"})
+
+    policy_mock = MagicMock()
+    policy_mock.is_policy_approved_for_live = AsyncMock(return_value=True)
+    active_policy = MagicMock()
+    active_policy.policy_snapshot = _make_valid_policy_snapshot()
+    policy_mock.get_active_policy = AsyncMock(return_value=active_policy)
+
+    daily_state = MagicMock()
+    daily_state.updated_at = datetime.now(timezone.utc)
+    daily_state.locked = False
+    daily_state.lock_reason = None
+    daily_svc = MagicMock()
+    daily_svc.recompute_from_broker_equity = AsyncMock(return_value=daily_state)
+
+    queue_svc = MagicMock()
+    queue_svc.has_unresolved = AsyncMock(return_value=False)
+
+    settings = MagicMock()
+    settings.unknown_gate_timeout_seconds = 60
+    settings.is_production = True
+    settings.live_burn_in_required = True
+
+    with patch("app.services.live_start_preflight.get_settings", return_value=settings), \
+         patch("app.services.live_start_preflight.LiveReadinessGuard.check_provider", AsyncMock(return_value=readiness_ok)), \
+         patch("app.services.live_start_preflight.LiveReadinessGuard.assert_live_provider_contract", AsyncMock(return_value=readiness_contract_ok)), \
+         patch("app.services.live_start_preflight.LiveReadinessGuard.require_capability_proof", AsyncMock(return_value=readiness_proof_ok)), \
+         patch("app.services.live_start_preflight.BrokerCapabilityProofService.record_proof", AsyncMock(return_value="hash")), \
+         patch("app.services.live_start_preflight.ProviderCertificationService.get_live_gate_status", AsyncMock(return_value={"ok": True, "reason": "ok", "record": None})), \
+         patch("app.services.live_start_preflight.ReconciliationDaemonHealthService.is_healthy", AsyncMock(return_value=True)), \
+         patch("app.services.live_start_preflight.SubmitOutboxRecoveryHealthService.is_healthy", AsyncMock(return_value=True)), \
+         patch("app.services.live_start_preflight.SubmitOutboxService.list_stale_submit_phases", AsyncMock(return_value=[])), \
+         patch("app.services.live_start_preflight.PolicyService", return_value=policy_mock), \
+         patch("app.services.live_start_preflight.DailyTradingStateService", return_value=daily_svc), \
+         patch("app.services.live_start_preflight.ReconciliationQueueService", return_value=queue_svc), \
+         patch("app.services.live_start_preflight.ExperimentRegistryService.list_experiments", AsyncMock(return_value=[])):
+        with pytest.raises(LiveStartPreflightError, match="burn_in_missing"):
+            await run_live_start_preflight(bot=bot, provider=provider, db=db)
+
+
+@pytest.mark.asyncio
+async def test_preflight_passes_when_live_approved_stage_in_production():
+    bot = MagicMock()
+    bot.id = "bot-7"
+
+    acct = MagicMock()
+    acct.equity = 1000.0
+    provider = MagicMock()
+    provider.provider_name = "ctrader_live"
+    provider.get_account_info = AsyncMock(return_value=acct)
+
+    db = AsyncMock(spec=AsyncSession)
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))
+
+    readiness_ok = MagicMock(ok=True)
+    readiness_contract_ok = MagicMock(ok=True)
+    readiness_proof_ok = MagicMock(ok=True, details={"proof": "ok"})
+
+    policy_mock = MagicMock()
+    policy_mock.is_policy_approved_for_live = AsyncMock(return_value=True)
+    active_policy = MagicMock()
+    active_policy.policy_snapshot = _make_valid_policy_snapshot()
+    policy_mock.get_active_policy = AsyncMock(return_value=active_policy)
+
+    daily_state = MagicMock()
+    daily_state.updated_at = datetime.now(timezone.utc)
+    daily_state.locked = False
+    daily_state.lock_reason = None
+    daily_svc = MagicMock()
+    daily_svc.recompute_from_broker_equity = AsyncMock(return_value=daily_state)
+
+    queue_svc = MagicMock()
+    queue_svc.has_unresolved = AsyncMock(return_value=False)
+
+    settings = MagicMock()
+    settings.unknown_gate_timeout_seconds = 60
+    settings.is_production = True
+    settings.live_burn_in_required = True
+
+    approved_exp = MagicMock()
+    approved_exp.stage = "LIVE_APPROVED"
+    approved_exp.metrics_snapshot = {}
+
+    with patch("app.services.live_start_preflight.get_settings", return_value=settings), \
+         patch("app.services.live_start_preflight.LiveReadinessGuard.check_provider", AsyncMock(return_value=readiness_ok)), \
+         patch("app.services.live_start_preflight.LiveReadinessGuard.assert_live_provider_contract", AsyncMock(return_value=readiness_contract_ok)), \
+         patch("app.services.live_start_preflight.LiveReadinessGuard.require_capability_proof", AsyncMock(return_value=readiness_proof_ok)), \
+         patch("app.services.live_start_preflight.BrokerCapabilityProofService.record_proof", AsyncMock(return_value="hash")), \
+         patch("app.services.live_start_preflight.ProviderCertificationService.get_live_gate_status", AsyncMock(return_value={"ok": True, "reason": "ok", "record": None})), \
+         patch("app.services.live_start_preflight.ReconciliationDaemonHealthService.is_healthy", AsyncMock(return_value=True)), \
+         patch("app.services.live_start_preflight.SubmitOutboxRecoveryHealthService.is_healthy", AsyncMock(return_value=True)), \
+         patch("app.services.live_start_preflight.SubmitOutboxService.list_stale_submit_phases", AsyncMock(return_value=[])), \
+         patch("app.services.live_start_preflight.PolicyService", return_value=policy_mock), \
+         patch("app.services.live_start_preflight.DailyTradingStateService", return_value=daily_svc), \
+         patch("app.services.live_start_preflight.ReconciliationQueueService", return_value=queue_svc), \
+         patch("app.services.live_start_preflight.ExperimentRegistryService.list_experiments", AsyncMock(return_value=[approved_exp])):
+        checks = await run_live_start_preflight(bot=bot, provider=provider, db=db)
+        assert checks["burn_in_passed"] is True

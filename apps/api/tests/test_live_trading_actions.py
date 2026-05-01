@@ -288,11 +288,17 @@ async def test_live_trading_action_endpoints() -> None:
         assert reset_ack.status_code == 200
         assert reset_ack.json()["scope"] == "bot"
 
-        kill = await client.post("/v1/workspaces/ws-1/bots/bot-1/kill-switch")
+        kill = await client.post(
+            "/v1/workspaces/ws-1/bots/bot-1/kill-switch",
+            json={"reason": "operator_emergency_stop"},
+        )
         assert kill.status_code == 200
         assert kill.json()["kill_switch"] is True
 
-        unkill = await client.post("/v1/workspaces/ws-1/bots/bot-1/reset-kill-switch")
+        unkill = await client.post(
+            "/v1/workspaces/ws-1/bots/bot-1/reset-kill-switch",
+            json={"reason": "incident_cleared"},
+        )
         assert unkill.status_code == 200
         assert unkill.json()["kill_switch"] is False
 

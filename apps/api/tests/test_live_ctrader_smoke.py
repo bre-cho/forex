@@ -197,6 +197,7 @@ def test_live_ctrader_demo_smoke_e2e(monkeypatch: pytest.MonkeyPatch):
         started = client.post(
             f"/v1/workspaces/{workspace_id}/bots/{bot_id}/start",
             headers=headers,
+            json={"reason": "smoke_live_start"},
         )
         assert started.status_code == 200, started.text
 

@@ -518,8 +518,15 @@ async def set_kill_switch(
     workspace_id: str,
     bot_id: str,
     request: Request,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if not bool(getattr(current_user, "is_superuser", False)):
+        raise HTTPException(status_code=403, detail="Admin permission required")
+    reason = str((payload or {}).get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Kill-switch reason required")
     registry = _get_registry(request)
     runtime = registry.get(bot_id) if registry is not None else None
     if runtime is None:
@@ -531,6 +538,19 @@ async def set_kill_switch(
     metadata["kill_switch"] = True
     if state_obj is not None:
         state_obj.error_message = "kill_switch_enabled_by_operator"
+    db.add(
+        AuditLog(
+            user_id=str(getattr(current_user, "id", "") or ""),
+            action="kill_switch_enable",
+            resource_type="bot_instance",
+            resource_id=str(bot_id),
+            details={
+                "workspace_id": workspace_id,
+                "reason": reason,
+            },
+        )
+    )
+    await db.commit()
     return {"bot_instance_id": bot_id, "kill_switch": True}
 
 
@@ -539,8 +559,15 @@ async def reset_kill_switch(
     workspace_id: str,
     bot_id: str,
     request: Request,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if not bool(getattr(current_user, "is_superuser", False)):
+        raise HTTPException(status_code=403, detail="Admin permission required")
+    reason = str((payload or {}).get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Kill-switch reset reason required")
     registry = _get_registry(request)
     runtime = registry.get(bot_id) if registry is not None else None
     if runtime is None:
@@ -550,4 +577,17 @@ async def reset_kill_switch(
     if not isinstance(metadata, dict):
         raise HTTPException(status_code=500, detail="Runtime metadata unavailable")
     metadata["kill_switch"] = False
+    db.add(
+        AuditLog(
+            user_id=str(getattr(current_user, "id", "") or ""),
+            action="kill_switch_reset",
+            resource_type="bot_instance",
+            resource_id=str(bot_id),
+            details={
+                "workspace_id": workspace_id,
+                "reason": reason,
+            },
+        )
+    )
+    await db.commit()
     return {"bot_instance_id": bot_id, "kill_switch": False}
