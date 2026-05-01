@@ -87,11 +87,26 @@ async def compute_live_failover_reason_digest(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"invalid_live_failover_reason_payload:{exc}")
 
+    suggested_request_payload = {
+        "action_type": "live_provider_failover",
+        "bot_id": normalized["bot_instance_id"],
+        "reason": (
+            f"live failover {normalized['primary_provider']} → "
+            + ", ".join(normalized["backup_providers"])
+            + f" | {normalized['symbol']} {normalized['side'].upper()}"
+        ),
+        "request_payload": {
+            **normalized,
+            "reason_digest": digest,
+        },
+    }
+
     return {
         "workspace_id": workspace_id,
         "action_type": "live_provider_failover",
         "reason_digest": digest,
         "normalized_payload": normalized,
+        "suggested_request_payload": suggested_request_payload,
     }
 
 

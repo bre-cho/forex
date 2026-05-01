@@ -208,6 +208,16 @@ async def test_live_failover_reason_digest_helper_endpoint(monkeypatch: pytest.M
         assert digest_resp_2.status_code == 200
         assert digest_resp_2.json()["reason_digest"] == body_1["reason_digest"]
 
+        # suggested_request_payload must be ready-to-use for POST /approvals
+        srp = body_1["suggested_request_payload"]
+        assert srp["action_type"] == "live_provider_failover"
+        assert srp["bot_id"] == "bot-live-1"
+        assert srp["request_payload"]["reason_digest"] == body_1["reason_digest"]
+        assert srp["request_payload"]["symbol"] == "EURUSD"
+        assert srp["request_payload"]["primary_provider"] == "ctrader"
+        assert srp["request_payload"]["backup_providers"] == ["ctrader_backup", "mt5"]
+        assert "reason" in srp
+
         invalid_resp = await client.post(
             f"/v1/workspaces/{workspace_id}/approvals/reason-digest/live-failover",
             headers=owner_headers,
