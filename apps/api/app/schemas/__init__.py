@@ -102,11 +102,13 @@ class AddMemberRequest(BaseModel):
 class BrokerConnectionCreate(BaseModel):
     name: str
     broker_type: Literal["paper", "ctrader", "mt5", "bybit"]
+    credential_scope: Literal["demo", "testnet", "live"] = "demo"
     credentials: Dict[str, Any] = Field(default_factory=dict)
 
 
 class BrokerConnectionUpdate(BaseModel):
     name: Optional[str] = None
+    credential_scope: Optional[Literal["demo", "testnet", "live"]] = None
     credentials: Optional[Dict[str, Any]] = None
     is_active: Optional[bool] = None
 
@@ -116,6 +118,7 @@ class BrokerConnectionOut(BaseModel):
     workspace_id: str
     name: str
     broker_type: str
+    credential_scope: str
     is_active: bool
     last_synced_at: Optional[datetime] = None
     created_at: datetime

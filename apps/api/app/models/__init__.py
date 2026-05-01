@@ -96,6 +96,7 @@ class BrokerConnection(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     broker_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    credential_scope: Mapped[str] = mapped_column(String(16), default="demo", nullable=False)
     credentials_encrypted: Mapped[str] = mapped_column(Text, default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(

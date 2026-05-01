@@ -7,7 +7,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.credentials_crypto import decrypt_credentials, encrypt_credentials, redact_credentials
+from app.core.credentials_crypto import (
+    decrypt_credentials,
+    encrypt_credentials,
+    redact_credentials,
+    rotate_credentials_encryption,
+)
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
 from app.dependencies.permissions import require_workspace_role
@@ -34,6 +39,7 @@ async def create_connection(
         workspace_id=workspace_id,
         name=body.name,
         broker_type=body.broker_type,
+        credential_scope=body.credential_scope,
         credentials_encrypted=encrypt_credentials(body.credentials),
     )
     db.add(conn)
@@ -95,6 +101,8 @@ async def update_connection(
     updates = body.model_dump(exclude_none=True)
     if "name" in updates:
         conn.name = updates["name"]
+    if "credential_scope" in updates:
+        conn.credential_scope = updates["credential_scope"]
     if "is_active" in updates:
         conn.is_active = updates["is_active"]
     if "credentials" in updates:
@@ -113,6 +121,43 @@ async def update_connection(
             actor_user_id=str(getattr(current_user, "id", "") or "") or None,
         )
         conn.credentials_encrypted = encrypt_credentials(credentials_update)
+    return conn
+
+
+@router.post("/{conn_id}/rotate-credentials", response_model=BrokerConnectionOut)
+async def rotate_connection_credentials(
+    workspace_id: str,
+    conn_id: str,
+    payload: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_workspace_role("admin")),
+):
+    result = await db.execute(
+        select(BrokerConnection).where(
+            BrokerConnection.id == conn_id,
+            BrokerConnection.workspace_id == workspace_id,
+        )
+    )
+    conn = result.scalar_one_or_none()
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    approval_id_raw = (payload or {}).get("approval_id")
+    try:
+        approval_id = int(approval_id_raw) if approval_id_raw is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invalid_approval_id")
+    approval_svc = ActionApprovalService(db)
+    await approval_svc.validate_and_consume_approval(
+        approval_id=approval_id,
+        workspace_id=workspace_id,
+        action_type="change_provider_credential",
+        bot_instance_id=None,
+        actor_user_id=str(getattr(current_user, "id", "") or "") or None,
+    )
+
+    conn.credentials_encrypted = rotate_credentials_encryption(conn.credentials_encrypted)
     return conn
 
 

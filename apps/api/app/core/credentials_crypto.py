@@ -62,20 +62,43 @@ def _fernet() -> MultiFernet:
     return MultiFernet(fernets)
 
 
+def _parse_envelope(value: str) -> tuple[str | None, str]:
+    text = str(value or "").strip()
+    if not text:
+        return None, ""
+    if ":" not in text:
+        return None, text
+    version, ciphertext = text.split(":", 1)
+    if not version.strip() or not ciphertext.strip():
+        return None, text
+    return version.strip(), ciphertext.strip()
+
+
 def encrypt_credentials(credentials: dict[str, Any]) -> str:
+    settings = get_settings()
+    version = str(getattr(settings, "fernet_key_version", "v1") or "v1").strip() or "v1"
     payload = json.dumps(credentials or {}, separators=(",", ":"), sort_keys=True)
-    return _fernet().encrypt(payload.encode("utf-8")).decode("utf-8")
+    token = _fernet().encrypt(payload.encode("utf-8")).decode("utf-8")
+    return f"{version}:{token}"
 
 
 def decrypt_credentials(credentials_encrypted: str | None) -> dict[str, Any]:
     if not credentials_encrypted:
         return {}
+    _version, ciphertext = _parse_envelope(str(credentials_encrypted or ""))
+    if not ciphertext:
+        return {}
     try:
-        plaintext = _fernet().decrypt(credentials_encrypted.encode("utf-8")).decode("utf-8")
+        plaintext = _fernet().decrypt(ciphertext.encode("utf-8")).decode("utf-8")
         value = json.loads(plaintext)
         return value if isinstance(value, dict) else {}
     except (InvalidToken, ValueError, TypeError, json.JSONDecodeError):
         return {}
+
+
+def rotate_credentials_encryption(credentials_encrypted: str | None) -> str:
+    plaintext = decrypt_credentials(credentials_encrypted)
+    return encrypt_credentials(plaintext)
 
 
 def redact_credentials(credentials: dict[str, Any] | None) -> dict[str, Any]:

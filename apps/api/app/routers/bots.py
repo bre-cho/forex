@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
+from app.core.config import get_settings
 from app.dependencies.auth import get_current_user
 from app.dependencies.permissions import require_workspace_role
 from app.models import (
@@ -147,6 +148,14 @@ async def _validate_live_mode_requirements(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Live mode requires an active broker connection",
         )
+    settings = get_settings()
+    if bool(getattr(settings, "is_production", False)):
+        scope = str(getattr(conn, "credential_scope", "") or "").lower()
+        if scope != "live":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Live mode requires broker credential_scope=live in production",
+            )
 
 
 async def _assert_live_action_admin(

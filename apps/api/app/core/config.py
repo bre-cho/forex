@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     # Credential encryption
     fernet_key: str = ""
     fernet_key_previous: str = ""
+    fernet_key_version: str = "v1"
 
     @property
     def cors_origins_list(self) -> List[str]:
