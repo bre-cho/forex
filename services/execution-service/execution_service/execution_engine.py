@@ -56,6 +56,62 @@ class ExecutionEngine:
         self._mark_submitting_hook = mark_submitting_hook
         self._mark_submit_phase_hook = mark_submit_phase_hook
         self._enqueue_unknown_hook = enqueue_unknown_hook
+        self._provider_latency_ema_ms: Dict[str, float] = {}
+
+    def _smart_policy(self) -> Dict[str, Any]:
+        p = self._gate.policy if isinstance(self._gate.policy, dict) else {}
+        return {
+            "enabled": bool(p.get("smart_execution_enabled", True)),
+            "latency_aware": bool(p.get("smart_execution_latency_aware", True)),
+            "max_retries": int(p.get("smart_execution_max_retries", 0) or 0),
+            "retry_live": bool(p.get("smart_execution_retry_live", False)),
+        }
+
+    def _record_provider_latency(self, provider_name: str, latency_ms: float) -> None:
+        name = str(provider_name or "").strip()
+        if not name:
+            return
+        value = float(latency_ms or 0.0)
+        if value <= 0.0:
+            return
+        prev = self._provider_latency_ema_ms.get(name)
+        alpha = 0.3
+        self._provider_latency_ema_ms[name] = value if prev is None else ((1.0 - alpha) * prev + alpha * value)
+
+    def _resolve_provider_candidates(self, payload: Union[OrderRequest, ExecutionCommand]) -> List[str]:
+        candidates: List[str] = [str(self._provider_name)]
+        if isinstance(payload, ExecutionCommand):
+            intent = payload.intent if isinstance(payload.intent, dict) else {}
+            raw = intent.get("provider_candidates")
+            if isinstance(raw, list):
+                for item in raw:
+                    name = str(item or "").strip()
+                    if name:
+                        candidates.append(name)
+
+        # Safety: keep live routing pinned to primary provider unless explicitly allowed later.
+        if self._runtime_mode == "live":
+            return [str(self._provider_name)]
+
+        deduped: List[str] = []
+        for name in candidates:
+            if name not in deduped:
+                deduped.append(name)
+
+        available: List[str] = []
+        for name in deduped:
+            try:
+                self._router.get(name)
+                available.append(name)
+            except KeyError:
+                continue
+        if not available:
+            return [str(self._provider_name)]
+
+        policy = self._smart_policy()
+        if not policy["enabled"] or not policy["latency_aware"]:
+            return available
+        return sorted(available, key=lambda n: self._provider_latency_ema_ms.get(n, 1e12))
 
     async def start(self) -> None:
         await self._provider.connect()
@@ -470,14 +526,100 @@ class ExecutionEngine:
                     fill_status="UNKNOWN",
                 )
 
-        started = time.perf_counter()
-        try:
-            result = await asyncio.wait_for(
-                self._router.route(self._provider_name, request),
-                timeout=self._submit_timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            _result = OrderResult(
+        policy = self._smart_policy()
+        provider_candidates = self._resolve_provider_candidates(payload)
+        max_retries = int(policy.get("max_retries", 0) or 0)
+        if self._runtime_mode == "live" and not bool(policy.get("retry_live", False)):
+            max_retries = 0
+
+        last_failure: OrderResult | None = None
+        final_provider_name = str(self._provider_name)
+        for provider_name in provider_candidates:
+            final_provider_name = str(provider_name)
+            for attempt in range(max_retries + 1):
+                started = time.perf_counter()
+                try:
+                    result = await asyncio.wait_for(
+                        self._router.route(provider_name, request),
+                        timeout=self._submit_timeout_seconds,
+                    )
+                    latency_ms = round((time.perf_counter() - started) * 1000.0, 2)
+                    self._record_provider_latency(provider_name, latency_ms)
+                    if result.raw_response is None:
+                        result.raw_response = {}
+                    result.raw_response.setdefault("latency_ms", latency_ms)
+                    result.raw_response.setdefault("provider_name", provider_name)
+                    result.raw_response.setdefault("smart_execution_attempt", attempt + 1)
+                    if callable(self._mark_submit_phase_hook) and self._runtime_mode == "live" and _bot_id and _idem_key:
+                        try:
+                            await self._mark_submit_phase_hook(
+                                _bot_id,
+                                _idem_key,
+                                "BROKER_SEND_RETURNED",
+                                request_hash,
+                                provider_name,
+                                {
+                                    "signal_id": _signal_id,
+                                    "submit_status": str(getattr(result, "submit_status", "") or ""),
+                                    "fill_status": str(getattr(result, "fill_status", "") or ""),
+                                    "broker_order_id": str(getattr(result, "broker_order_id", "") or "") or None,
+                                },
+                            )
+                        except Exception as _phase_exc:
+                            logger.error("mark_submit_phase_hook failed phase=BROKER_SEND_RETURNED idem=%s: %s", _idem_key, _phase_exc)
+                            result.success = False
+                            result.submit_status = "UNKNOWN"
+                            result.fill_status = "UNKNOWN"
+                            result.error_message = f"critical_submit_outbox_after_send_failed:{_phase_exc}"
+                    if self._runtime_mode == "live":
+                        result = self._enforce_live_receipt_contract(result=result, request=request, context=ctx)
+                    return result
+                except asyncio.TimeoutError:
+                    latency_ms = round((time.perf_counter() - started) * 1000.0, 2)
+                    self._record_provider_latency(provider_name, latency_ms)
+                    last_failure = OrderResult(
+                        order_id="",
+                        symbol=request.symbol,
+                        side=request.side,
+                        volume=request.volume,
+                        fill_price=float(request.price or 0.0),
+                        commission=0.0,
+                        success=False,
+                        error_message="broker_submit_timeout",
+                        submit_status="UNKNOWN",
+                        fill_status="UNKNOWN",
+                        raw_response={
+                            "latency_ms": latency_ms,
+                            "provider_name": provider_name,
+                            "smart_execution_attempt": attempt + 1,
+                        },
+                    )
+                except Exception as exc:
+                    latency_ms = round((time.perf_counter() - started) * 1000.0, 2)
+                    self._record_provider_latency(provider_name, latency_ms)
+                    last_failure = OrderResult(
+                        order_id="",
+                        symbol=request.symbol,
+                        side=request.side,
+                        volume=request.volume,
+                        fill_price=float(request.price or 0.0),
+                        commission=0.0,
+                        success=False,
+                        error_message=f"broker_submit_error:{exc}",
+                        submit_status="UNKNOWN",
+                        fill_status="UNKNOWN",
+                        raw_response={
+                            "latency_ms": latency_ms,
+                            "provider_name": provider_name,
+                            "smart_execution_attempt": attempt + 1,
+                        },
+                    )
+
+                if attempt < max_retries:
+                    continue
+
+        if last_failure is None:
+            last_failure = OrderResult(
                 order_id="",
                 symbol=request.symbol,
                 side=request.side,
@@ -485,104 +627,45 @@ class ExecutionEngine:
                 fill_price=float(request.price or 0.0),
                 commission=0.0,
                 success=False,
-                error_message="broker_submit_timeout",
+                error_message="broker_submit_error:no_provider_available",
                 submit_status="UNKNOWN",
                 fill_status="UNKNOWN",
-                raw_response={"latency_ms": round((time.perf_counter() - started) * 1000.0, 2)},
+                raw_response={"provider_name": final_provider_name},
             )
-            # P0.4 — Enqueue for reconciliation after timeout
-            if self._runtime_mode == "live" and _bot_id and _idem_key:
-                if callable(self._mark_submit_phase_hook):
-                    try:
-                        await self._mark_submit_phase_hook(
-                            _bot_id,
-                            _idem_key,
-                            "UNKNOWN_AFTER_SEND",
-                            request_hash,
-                            self._provider_name,
-                            {"reason": "broker_submit_timeout", "signal_id": _signal_id},
-                        )
-                    except Exception as _phase_exc:
-                        logger.error("mark_submit_phase_hook failed phase=UNKNOWN_AFTER_SEND idem=%s: %s", _idem_key, _phase_exc)
-                if not callable(self._enqueue_unknown_hook):
-                    _result.error_message = "critical_unknown_enqueue_failed:missing_enqueue_unknown_hook"
-                    return _result
+
+        # P0.4 — Enqueue for reconciliation after final broker send failure.
+        if self._runtime_mode == "live" and _bot_id and _idem_key:
+            if callable(self._mark_submit_phase_hook):
                 try:
-                    await self._enqueue_unknown_hook(
-                        _bot_id, _idem_key, _signal_id,
-                        {"reason": "broker_submit_timeout", "symbol": request.symbol, "idempotency_key": _idem_key},
+                    await self._mark_submit_phase_hook(
+                        _bot_id,
+                        _idem_key,
+                        "UNKNOWN_AFTER_SEND",
+                        request_hash,
+                        final_provider_name,
+                        {"reason": str(last_failure.error_message or "broker_submit_error"), "signal_id": _signal_id},
                     )
-                except Exception as _q_exc:
-                    logger.error("enqueue_unknown_hook failed idem=%s: %s", _idem_key, _q_exc)
-                    _result.error_message = f"critical_unknown_enqueue_failed:broker_submit_timeout:{_q_exc}"
-            return _result
-        except Exception as exc:
-            _result = OrderResult(
-                order_id="",
-                symbol=request.symbol,
-                side=request.side,
-                volume=request.volume,
-                fill_price=float(request.price or 0.0),
-                commission=0.0,
-                success=False,
-                error_message=f"broker_submit_error:{exc}",
-                submit_status="UNKNOWN",
-                fill_status="UNKNOWN",
-                raw_response={"latency_ms": round((time.perf_counter() - started) * 1000.0, 2)},
-            )
-            # P0.4 — Enqueue for reconciliation after broker error
-            if self._runtime_mode == "live" and _bot_id and _idem_key:
-                if callable(self._mark_submit_phase_hook):
-                    try:
-                        await self._mark_submit_phase_hook(
-                            _bot_id,
-                            _idem_key,
-                            "UNKNOWN_AFTER_SEND",
-                            request_hash,
-                            self._provider_name,
-                            {"reason": f"broker_submit_error:{exc}", "signal_id": _signal_id},
-                        )
-                    except Exception as _phase_exc:
-                        logger.error("mark_submit_phase_hook failed phase=UNKNOWN_AFTER_SEND idem=%s: %s", _idem_key, _phase_exc)
-                if not callable(self._enqueue_unknown_hook):
-                    _result.error_message = "critical_unknown_enqueue_failed:missing_enqueue_unknown_hook"
-                    return _result
-                try:
-                    await self._enqueue_unknown_hook(
-                        _bot_id, _idem_key, _signal_id,
-                        {"reason": f"broker_submit_error:{exc}", "symbol": request.symbol, "idempotency_key": _idem_key},
-                    )
-                except Exception as _q_exc:
-                    logger.error("enqueue_unknown_hook failed idem=%s: %s", _idem_key, _q_exc)
-                    _result.error_message = f"critical_unknown_enqueue_failed:broker_submit_error:{_q_exc}"
-            return _result
-        if result.raw_response is None:
-            result.raw_response = {}
-        result.raw_response.setdefault("latency_ms", round((time.perf_counter() - started) * 1000.0, 2))
-        if self._runtime_mode == "live" and _bot_id and _idem_key and callable(self._mark_submit_phase_hook):
+                except Exception as _phase_exc:
+                    logger.error("mark_submit_phase_hook failed phase=UNKNOWN_AFTER_SEND idem=%s: %s", _idem_key, _phase_exc)
+            if not callable(self._enqueue_unknown_hook):
+                last_failure.error_message = "critical_unknown_enqueue_failed:missing_enqueue_unknown_hook"
+                return last_failure
             try:
-                await self._mark_submit_phase_hook(
+                await self._enqueue_unknown_hook(
                     _bot_id,
                     _idem_key,
-                    "BROKER_SEND_RETURNED",
-                    request_hash,
-                    self._provider_name,
+                    _signal_id,
                     {
-                        "signal_id": _signal_id,
-                        "submit_status": str(getattr(result, "submit_status", "") or ""),
-                        "fill_status": str(getattr(result, "fill_status", "") or ""),
-                        "broker_order_id": str(getattr(result, "broker_order_id", "") or "") or None,
+                        "reason": str(last_failure.error_message or "broker_submit_error"),
+                        "symbol": request.symbol,
+                        "idempotency_key": _idem_key,
+                        "provider_name": final_provider_name,
                     },
                 )
-            except Exception as _phase_exc:
-                logger.error("mark_submit_phase_hook failed phase=BROKER_SEND_RETURNED idem=%s: %s", _idem_key, _phase_exc)
-                result.success = False
-                result.submit_status = "UNKNOWN"
-                result.fill_status = "UNKNOWN"
-                result.error_message = f"critical_submit_outbox_after_send_failed:{_phase_exc}"
-        if self._runtime_mode == "live":
-            result = self._enforce_live_receipt_contract(result=result, request=request, context=ctx)
-        return result
+            except Exception as _q_exc:
+                logger.error("enqueue_unknown_hook failed idem=%s: %s", _idem_key, _q_exc)
+                last_failure.error_message = f"critical_unknown_enqueue_failed:{_q_exc}"
+        return last_failure
 
     async def close_position(self, position_id: str) -> OrderResult:
         return await self._router.close(self._provider_name, position_id)

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
 from app.models import BotInstance, Subscription, User, Workspace
+from app.services.disaster_recovery_service import DisasterRecoveryService
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
 
@@ -116,3 +117,47 @@ async def health_live_hard(
     }
     status_code = 200 if all_ok else 503
     return JSONResponse(content=payload, status_code=status_code)
+
+
+@router.get("/dr/snapshots")
+async def list_dr_snapshots(
+    limit: int = 50,
+    admin: User = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = DisasterRecoveryService(db)
+    return {"snapshots": svc.list_snapshots(limit=limit)}
+
+
+@router.post("/dr/snapshot")
+async def create_dr_snapshot(
+    payload: dict | None = None,
+    admin: User = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    body = payload or {}
+    include_runtime = bool(body.get("include_runtime", True))
+    svc = DisasterRecoveryService(db)
+    result = await svc.create_snapshot(include_runtime=include_runtime)
+    return {"status": "created", **result}
+
+
+@router.post("/dr/restore/{snapshot_id}")
+async def restore_dr_snapshot(
+    snapshot_id: str,
+    payload: dict | None = None,
+    admin: User = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    body = payload or {}
+    svc = DisasterRecoveryService(db)
+    try:
+        result = await svc.restore_snapshot(
+            snapshot_id=snapshot_id,
+            dry_run=bool(body.get("dry_run", True)),
+            restore_workspace_pause_flag=bool(body.get("restore_workspace_pause_flag", True)),
+            stop_non_running_runtimes=bool(body.get("stop_non_running_runtimes", True)),
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="snapshot_not_found")
+    return {"status": "ok", **result}
