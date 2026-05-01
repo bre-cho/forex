@@ -34,6 +34,7 @@ class ExecutionEngine:
         runtime_mode: str = "paper",
         gate_policy: Optional[Dict[str, Any]] = None,
         verify_idempotency_reservation=None,
+        on_live_failover_approval_hook=None,
         submit_timeout_seconds: float = 10.0,
         mark_submitting_hook=None,
         mark_submit_phase_hook=None,
@@ -48,6 +49,7 @@ class ExecutionEngine:
         self._runtime_mode = str(runtime_mode or "paper").lower()
         self._gate = PreExecutionGate(gate_policy or {})
         self._verify_idempotency_reservation = verify_idempotency_reservation
+        self._on_live_failover_approval_hook = on_live_failover_approval_hook
         self._submit_timeout_seconds = float(submit_timeout_seconds)
         # P0.4 hooks: async callables invoked at SUBMITTING and UNKNOWN
         # mark_submitting_hook(bot_instance_id, idempotency_key) -> None
@@ -65,7 +67,32 @@ class ExecutionEngine:
             "latency_aware": bool(p.get("smart_execution_latency_aware", True)),
             "max_retries": int(p.get("smart_execution_max_retries", 0) or 0),
             "retry_live": bool(p.get("smart_execution_retry_live", False)),
+            "live_failover_enabled": bool(p.get("smart_execution_live_failover_enabled", False)),
+            "live_failover_requires_approval": bool(p.get("smart_execution_live_failover_requires_approval", True)),
+            "live_failover_approval_ttl_seconds": int(p.get("smart_execution_live_failover_approval_ttl_seconds", 300) or 300),
+            "live_failover_require_reason_digest": bool(p.get("smart_execution_live_failover_require_reason_digest", True)),
         }
+
+    def _build_live_failover_reason_digest(
+        self,
+        *,
+        context: PreExecutionContext,
+        primary_provider: str,
+        backup_providers: List[str],
+        signal_id: str | None,
+    ) -> str:
+        payload = {
+            "bot_instance_id": str(getattr(context, "bot_instance_id", "") or ""),
+            "idempotency_key": str(getattr(context, "idempotency_key", "") or ""),
+            "brain_cycle_id": str(getattr(context, "brain_cycle_id", "") or ""),
+            "signal_id": str(signal_id or "") or None,
+            "symbol": str((getattr(context, "gate_context", {}) or {}).get("symbol") or "").upper(),
+            "side": str((getattr(context, "gate_context", {}) or {}).get("side") or "").lower(),
+            "primary_provider": str(primary_provider or "").strip().lower(),
+            "backup_providers": sorted(str(x or "").strip().lower() for x in backup_providers if str(x or "").strip()),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     def _record_provider_latency(self, provider_name: str, latency_ms: float) -> None:
         name = str(provider_name or "").strip()
@@ -78,7 +105,11 @@ class ExecutionEngine:
         alpha = 0.3
         self._provider_latency_ema_ms[name] = value if prev is None else ((1.0 - alpha) * prev + alpha * value)
 
-    def _resolve_provider_candidates(self, payload: Union[OrderRequest, ExecutionCommand]) -> List[str]:
+    async def _resolve_provider_candidates(
+        self,
+        payload: Union[OrderRequest, ExecutionCommand],
+        context: Optional[PreExecutionContext],
+    ) -> List[str]:
         candidates: List[str] = [str(self._provider_name)]
         if isinstance(payload, ExecutionCommand):
             intent = payload.intent if isinstance(payload.intent, dict) else {}
@@ -88,10 +119,6 @@ class ExecutionEngine:
                     name = str(item or "").strip()
                     if name:
                         candidates.append(name)
-
-        # Safety: keep live routing pinned to primary provider unless explicitly allowed later.
-        if self._runtime_mode == "live":
-            return [str(self._provider_name)]
 
         deduped: List[str] = []
         for name in candidates:
@@ -109,6 +136,61 @@ class ExecutionEngine:
             return [str(self._provider_name)]
 
         policy = self._smart_policy()
+
+        if self._runtime_mode == "live":
+            primary = str(self._provider_name)
+            backups = [name for name in available if name != primary]
+            if not bool(policy.get("enabled", True)):
+                return [primary]
+            if not bool(policy.get("live_failover_enabled", False)):
+                return [primary]
+            if not backups:
+                return [primary]
+            if bool(policy.get("live_failover_requires_approval", True)):
+                if not callable(self._on_live_failover_approval_hook):
+                    return [primary]
+                if context is None:
+                    return [primary]
+                intent = payload.intent if isinstance(payload, ExecutionCommand) and isinstance(payload.intent, dict) else {}
+                approval_block = intent.get("live_failover_approval") if isinstance(intent.get("live_failover_approval"), dict) else {}
+                approval_id = approval_block.get("approval_id") or intent.get("live_failover_approval_id")
+                actor_user_id = approval_block.get("actor_user_id") or intent.get("live_failover_actor_user_id")
+                signal_id = intent.get("signal_id") if isinstance(intent, dict) else None
+                reason_digest = self._build_live_failover_reason_digest(
+                    context=context,
+                    primary_provider=primary,
+                    backup_providers=backups,
+                    signal_id=str(signal_id or "") or None,
+                )
+                approved = False
+                try:
+                    approved = bool(
+                        await self._on_live_failover_approval_hook(
+                            str(getattr(context, "bot_instance_id", "") or ""),
+                            {
+                                "approval_id": approval_id,
+                                "actor_user_id": actor_user_id,
+                                "idempotency_key": str(getattr(context, "idempotency_key", "") or ""),
+                                "brain_cycle_id": str(getattr(context, "brain_cycle_id", "") or ""),
+                                "signal_id": str(signal_id or "") or None,
+                                "primary_provider": primary,
+                                "backup_providers": list(backups),
+                                "approval_ttl_seconds": int(policy.get("live_failover_approval_ttl_seconds", 300) or 300),
+                                "reason_digest": reason_digest,
+                                "require_reason_digest": bool(policy.get("live_failover_require_reason_digest", True)),
+                            },
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("live_failover_approval_hook_failed bot=%s: %s", getattr(context, "bot_instance_id", ""), exc)
+                    approved = False
+                if not approved:
+                    return [primary]
+
+            if bool(policy.get("latency_aware", True)):
+                backups = sorted(backups, key=lambda n: self._provider_latency_ema_ms.get(n, 1e12))
+            return [primary, *backups]
+
         if not policy["enabled"] or not policy["latency_aware"]:
             return available
         return sorted(available, key=lambda n: self._provider_latency_ema_ms.get(n, 1e12))
@@ -527,7 +609,7 @@ class ExecutionEngine:
                 )
 
         policy = self._smart_policy()
-        provider_candidates = self._resolve_provider_candidates(payload)
+        provider_candidates = await self._resolve_provider_candidates(payload, ctx)
         max_retries = int(policy.get("max_retries", 0) or 0)
         if self._runtime_mode == "live" and not bool(policy.get("retry_live", False)):
             max_retries = 0

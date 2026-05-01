@@ -72,6 +72,7 @@ class BotRuntime:
         get_db_open_trades: Optional[Callable[[], Awaitable[list[Dict[str, Any]]]]] = None,
         get_unknown_order_attempts: Optional[Callable[[], Awaitable[list[Dict[str, Any]]]]] = None,
         get_policy_approval_status: Optional[Callable[[], Awaitable[bool]]] = None,
+        on_live_failover_approval_hook: Optional[Callable[[str, Dict[str, Any]], Awaitable[bool]]] = None,
         close_db_trade: Optional[Callable[[str], Awaitable[None]]] = None,
         on_reconciliation_result: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
         on_reconciliation_incident: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
@@ -106,6 +107,7 @@ class BotRuntime:
         self._get_db_open_trades = get_db_open_trades
         self._get_unknown_order_attempts = get_unknown_order_attempts
         self._get_policy_approval_status = get_policy_approval_status
+        self._on_live_failover_approval_hook = on_live_failover_approval_hook
         self._close_db_trade = close_db_trade
         self._on_reconciliation_result = on_reconciliation_result
         self._on_reconciliation_incident = on_reconciliation_incident
@@ -182,6 +184,7 @@ class BotRuntime:
                     runtime_mode=self.runtime_mode,
                     gate_policy=gate_policy,
                     verify_idempotency_reservation=self._verify_idempotency_reservation,
+                    on_live_failover_approval_hook=self._on_live_failover_approval_hook,
                     mark_submitting_hook=self._mark_submitting_hook,
                     mark_submit_phase_hook=self._mark_submit_phase_hook,
                     enqueue_unknown_hook=self._enqueue_unknown_hook,

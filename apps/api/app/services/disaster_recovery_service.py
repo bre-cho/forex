@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +32,22 @@ def _json_default(value: Any):
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
+
+
+class SnapshotIntegrityError(ValueError):
+    pass
+
+
+def _snapshot_signing_secret() -> str:
+    return str(os.getenv("DR_SNAPSHOT_SIGNING_KEY") or "").strip()
+
+
+def _canonical_json(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=_json_default)
+
+
+def _payload_hash(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
 class DisasterRecoveryService:
@@ -129,12 +148,31 @@ class DisasterRecoveryService:
             "runtime": runtime,
         }
 
+        secret = _snapshot_signing_secret()
+        if not secret:
+            raise SnapshotIntegrityError("snapshot_signing_key_missing")
+
+        digest = _payload_hash(payload)
+        signature = hmac.new(secret.encode("utf-8"), digest.encode("utf-8"), hashlib.sha256).hexdigest()
+        envelope = {
+            "snapshot_id": snapshot_id,
+            "schema_version": "dr_snapshot_envelope_v1",
+            "created_at": payload["created_at"],
+            "integrity": {
+                "payload_hash_sha256": digest,
+                "signature_hmac_sha256": signature,
+                "algorithm": "hmac_sha256",
+            },
+            "payload": payload,
+        }
+
         path = _snapshot_dir() / f"{snapshot_id}.json"
-        path.write_text(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), default=_json_default), encoding="utf-8")
+        path.write_text(_canonical_json(envelope), encoding="utf-8")
         return {
             "snapshot_id": snapshot_id,
             "path": str(path),
             "counts": payload["counts"],
+            "signed": True,
         }
 
     def list_snapshots(self, *, limit: int = 50) -> list[dict[str, Any]]:
@@ -156,7 +194,33 @@ class DisasterRecoveryService:
         path = _snapshot_dir() / f"{snapshot_id}.json"
         if not path.exists():
             raise FileNotFoundError(snapshot_id)
-        return json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise SnapshotIntegrityError("snapshot_invalid_format")
+
+        envelope_payload = raw.get("payload")
+        integrity = raw.get("integrity")
+        if not isinstance(envelope_payload, dict) or not isinstance(integrity, dict):
+            raise SnapshotIntegrityError("snapshot_unsigned_or_legacy_format")
+
+        expected_hash = str(integrity.get("payload_hash_sha256") or "")
+        actual_hash = _payload_hash(envelope_payload)
+        if not expected_hash or not hmac.compare_digest(expected_hash, actual_hash):
+            raise SnapshotIntegrityError("snapshot_payload_hash_mismatch")
+
+        algorithm = str(integrity.get("algorithm") or "").lower()
+        signature = str(integrity.get("signature_hmac_sha256") or "")
+        if algorithm != "hmac_sha256" or not signature:
+            raise SnapshotIntegrityError("snapshot_signature_metadata_invalid")
+
+        secret = _snapshot_signing_secret()
+        if not secret:
+            raise SnapshotIntegrityError("snapshot_signing_key_missing")
+        expected_signature = hmac.new(secret.encode("utf-8"), actual_hash.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected_signature):
+            raise SnapshotIntegrityError("snapshot_signature_mismatch")
+
+        return envelope_payload
 
     async def restore_snapshot(
         self,

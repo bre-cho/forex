@@ -18,6 +18,7 @@ ACTION_POLICY: dict[str, dict[str, str]] = {
     "disable_kill_switch": {"requester": "operator", "approver": "risk_admin"},
     "change_provider_credential": {"requester": "operator", "approver": "super_admin"},
     "retry_unknown_order": {"requester": "operator", "approver": "risk_admin"},
+    "live_provider_failover": {"requester": "operator", "approver": "risk_admin"},
     "promote_strategy_live": {"requester": "trader", "approver": "risk_admin"},
 }
 
@@ -192,6 +193,9 @@ class ActionApprovalService:
         action_type: str,
         bot_instance_id: str | None,
         actor_user_id: str | None,
+        expected_payload: dict[str, Any] | None = None,
+        approval_ttl_seconds: int | None = None,
+        required_reason_digest: str | None = None,
     ) -> ActionApprovalRequest:
         if approval_id is None:
             raise HTTPException(status_code=403, detail=f"approval_required:{action_type}")
@@ -222,6 +226,36 @@ class ActionApprovalService:
         if row.expires_at is not None and row.expires_at <= now:
             raise HTTPException(status_code=403, detail="approval_expired")
 
+        if approval_ttl_seconds is not None and int(approval_ttl_seconds) > 0:
+            anchor = row.decided_at or row.created_at
+            if anchor is None:
+                raise HTTPException(status_code=403, detail="approval_missing_ttl_anchor")
+            if (now - anchor).total_seconds() > int(approval_ttl_seconds):
+                raise HTTPException(status_code=403, detail="approval_ttl_exceeded")
+
+        payload = dict(getattr(row, "request_payload", {}) or {})
+
+        if expected_payload:
+            for key, expected in expected_payload.items():
+                if key == "backup_providers":
+                    actual_list = payload.get(key)
+                    if not isinstance(actual_list, list):
+                        raise HTTPException(status_code=403, detail="approval_payload_mismatch:backup_providers")
+                    lhs = sorted(str(x or "").strip().lower() for x in actual_list if str(x or "").strip())
+                    rhs = sorted(str(x or "").strip().lower() for x in (expected if isinstance(expected, list) else []) if str(x or "").strip())
+                    if lhs != rhs:
+                        raise HTTPException(status_code=403, detail="approval_payload_mismatch:backup_providers")
+                    continue
+
+                actual = payload.get(key)
+                if str(actual or "").strip() != str(expected or "").strip():
+                    raise HTTPException(status_code=403, detail=f"approval_payload_mismatch:{key}")
+
+        if required_reason_digest:
+            payload_digest = str(payload.get("reason_digest") or "").strip()
+            if payload_digest != str(required_reason_digest).strip():
+                raise HTTPException(status_code=403, detail="approval_reason_digest_mismatch")
+
         row.status = "consumed"
         row.consumed_at = now
         row.consumed_by_user_id = actor_user_id
@@ -235,6 +269,7 @@ class ActionApprovalService:
                     "workspace_id": workspace_id,
                     "action_type": action_type,
                     "bot_instance_id": bot_instance_id,
+                    "approval_ttl_seconds": approval_ttl_seconds,
                 },
             )
         )

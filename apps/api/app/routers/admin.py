@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.dependencies.auth import get_current_user
 from app.models import BotInstance, Subscription, User, Workspace
-from app.services.disaster_recovery_service import DisasterRecoveryService
+from app.services.disaster_recovery_service import DisasterRecoveryService, SnapshotIntegrityError
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
 
@@ -138,7 +138,10 @@ async def create_dr_snapshot(
     body = payload or {}
     include_runtime = bool(body.get("include_runtime", True))
     svc = DisasterRecoveryService(db)
-    result = await svc.create_snapshot(include_runtime=include_runtime)
+    try:
+        result = await svc.create_snapshot(include_runtime=include_runtime)
+    except SnapshotIntegrityError as exc:
+        raise HTTPException(status_code=503, detail=f"snapshot_signing_unavailable:{exc}")
     return {"status": "created", **result}
 
 
@@ -160,4 +163,6 @@ async def restore_dr_snapshot(
         )
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="snapshot_not_found")
+    except SnapshotIntegrityError as exc:
+        raise HTTPException(status_code=422, detail=f"snapshot_integrity_check_failed:{exc}")
     return {"status": "ok", **result}

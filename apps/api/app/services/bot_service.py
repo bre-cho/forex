@@ -34,6 +34,7 @@ from app.services.submit_outbox_service import SubmitOutboxService
 from app.services.live_readiness_guard import LiveReadinessGuard
 from app.services.environment_runtime_policy import enforce_stub_runtime_allowed
 from app.services.policy_service import PolicyService
+from app.services.action_approval_service import ActionApprovalService
 from execution_service.order_state_machine import validate_transition
 
 logger = logging.getLogger(__name__)
@@ -619,6 +620,51 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
             svc = PolicyService(db)
             return await svc.is_policy_approved_for_live(bot_id)
 
+    async def validate_live_failover_approval(bot_instance_id: str, payload: dict) -> bool:
+        approval_id = payload.get("approval_id")
+        if approval_id is None:
+            return False
+        actor_user_id = str(payload.get("actor_user_id") or "") or None
+        primary_provider = str(payload.get("primary_provider") or "").strip().lower()
+        backup_providers = [
+            str(x or "").strip().lower()
+            for x in list(payload.get("backup_providers") or [])
+            if str(x or "").strip()
+        ]
+        approval_ttl_seconds = int(payload.get("approval_ttl_seconds") or 300)
+        reason_digest = str(payload.get("reason_digest") or "").strip()
+        require_reason_digest = bool(payload.get("require_reason_digest", True))
+        if not primary_provider or not backup_providers:
+            return False
+        if require_reason_digest and not reason_digest:
+            return False
+        async with AsyncSessionLocal() as db:
+            bot_row = (
+                await db.execute(select(BotInstance).where(BotInstance.id == bot_instance_id).limit(1))
+            ).scalar_one_or_none()
+            if bot_row is None:
+                return False
+            svc = ActionApprovalService(db)
+            try:
+                await svc.validate_and_consume_approval(
+                    approval_id=int(approval_id),
+                    workspace_id=str(bot_row.workspace_id),
+                    action_type="live_provider_failover",
+                    bot_instance_id=str(bot_instance_id),
+                    actor_user_id=actor_user_id,
+                    expected_payload={
+                        "primary_provider": primary_provider,
+                        "backup_providers": backup_providers,
+                    },
+                    approval_ttl_seconds=approval_ttl_seconds,
+                    required_reason_digest=(reason_digest if require_reason_digest else None),
+                )
+            except Exception as exc:
+                logger.warning("live_failover_approval_denied bot=%s approval=%s err=%s", bot_instance_id, approval_id, exc)
+                return False
+            await db.commit()
+            return True
+
     async def get_portfolio_risk_snapshot() -> dict | None:
         async with AsyncSessionLocal() as db:
             bot_row = (
@@ -891,6 +937,7 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
         "get_db_open_trades": get_db_open_trades,
         "get_unknown_order_attempts": get_unknown_order_attempts,
         "get_policy_approval_status": get_policy_approval_status,
+        "validate_live_failover_approval": validate_live_failover_approval,
         "close_db_trade": close_db_trade,
         "on_reconciliation_result": on_reconciliation_result,
         "on_reconciliation_incident": on_reconciliation_incident,
@@ -987,6 +1034,7 @@ async def create_runtime_for_bot(
             get_db_open_trades=hooks["get_db_open_trades"],
             get_unknown_order_attempts=hooks["get_unknown_order_attempts"],
             get_policy_approval_status=hooks["get_policy_approval_status"],
+            on_live_failover_approval_hook=hooks["validate_live_failover_approval"],
             close_db_trade=hooks["close_db_trade"],
             on_reconciliation_result=hooks["on_reconciliation_result"],
             on_reconciliation_incident=hooks["on_reconciliation_incident"],
