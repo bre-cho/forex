@@ -152,6 +152,7 @@ async def _recompute_and_persist_analytics(db: AsyncSession, bot_id: str) -> Non
 
 
 def _runtime_hooks(bot_id: str, bot_mode: str):
+    async def _record_transition_with_validation(
         ledger: SafetyLedgerService,
         *,
         signal_id: str,
