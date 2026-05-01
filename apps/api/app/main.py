@@ -148,6 +148,7 @@ app.add_middleware(
 
 # Routers
 from app.routers import (
+    action_approvals,
     admin,
     analytics,
     auth,
@@ -172,6 +173,7 @@ from app.routers import (
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(workspaces.router)
+app.include_router(action_approvals.router)
 app.include_router(broker_connections.router)
 app.include_router(strategies.router)
 app.include_router(bots.router)

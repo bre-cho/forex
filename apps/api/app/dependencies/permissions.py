@@ -11,7 +11,19 @@ from app.core.db import get_db
 from app.dependencies.auth import get_current_user
 from app.models import User, WorkspaceMember
 
-ROLE_HIERARCHY = {"owner": 4, "admin": 3, "trader": 2, "viewer": 1}
+ROLE_HIERARCHY = {
+    "viewer": 1,
+    "trader": 2,
+    "operator": 3,
+    "risk_admin": 4,
+    "admin": 5,
+    "owner": 6,
+    "super_admin": 7,
+}
+
+
+def role_level(role: str | None) -> int:
+    return ROLE_HIERARCHY.get(str(role or "").strip().lower(), 0)
 
 
 def require_workspace_role(min_role: str = "viewer") -> Callable:
@@ -31,7 +43,7 @@ def require_workspace_role(min_role: str = "viewer") -> Callable:
         member = result.scalar_one_or_none()
         if member is None:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a member")
-        if ROLE_HIERARCHY.get(member.role, 0) < ROLE_HIERARCHY.get(min_role, 0):
+        if role_level(member.role) < role_level(min_role):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Requires {min_role} role or above",

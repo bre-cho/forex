@@ -342,6 +342,28 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
+class ActionApprovalRequest(Base):
+    __tablename__ = "action_approval_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    bot_instance_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    action_type: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True, nullable=False)
+    requested_by_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    approved_by_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    rejected_by_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    reason: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    request_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    decision_note: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_by_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
 class TradingDecisionLedger(Base):
     __tablename__ = "trading_decision_ledger"
     __table_args__ = (UniqueConstraint("bot_instance_id", "signal_id", name="uq_decision_ledger_bot_signal"),)

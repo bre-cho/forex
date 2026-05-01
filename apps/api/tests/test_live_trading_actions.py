@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.core.db import Base, get_db
 from app.dependencies.auth import get_current_user
 from app.models import (
+    ActionApprovalRequest,
     BotInstance,
     BrokerAccountSnapshot,
     BrokerExecutionReceipt,
@@ -199,6 +200,12 @@ async def test_live_trading_action_endpoints() -> None:
                 metrics_snapshot={"winrate": 0.55},
             )
         )
+        session.add(ActionApprovalRequest(id=101, workspace_id="ws-1", bot_instance_id="bot-1", action_type="unlock_daily_lock", status="approved", reason="unlock-1"))
+        session.add(ActionApprovalRequest(id=102, workspace_id="ws-1", bot_instance_id="bot-1", action_type="unlock_daily_lock", status="approved", reason="unlock-2"))
+        session.add(ActionApprovalRequest(id=103, workspace_id="ws-1", bot_instance_id="bot-1", action_type="unlock_daily_lock", status="approved", reason="unlock-3"))
+        session.add(ActionApprovalRequest(id=104, workspace_id="ws-1", bot_instance_id="bot-1", action_type="unlock_daily_lock", status="approved", reason="unlock-4"))
+        session.add(ActionApprovalRequest(id=105, workspace_id="ws-1", bot_instance_id="bot-1", action_type="unlock_daily_lock", status="approved", reason="unlock-5"))
+        session.add(ActionApprovalRequest(id=106, workspace_id="ws-1", bot_instance_id="bot-1", action_type="disable_kill_switch", status="approved", reason="unkill"))
         await session.commit()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -250,7 +257,7 @@ async def test_live_trading_action_endpoints() -> None:
 
         reset = await client.post(
             "/v1/workspaces/ws-1/bots/bot-1/daily-state/reset-lock",
-            json={"reason": "incident_resolved"},
+            json={"reason": "incident_resolved", "approval_id": 101},
         )
         assert reset.status_code == 409
         assert reset.json()["detail"] == "operator_ack_required_for_open_critical_daily_lock_incident"
@@ -259,6 +266,7 @@ async def test_live_trading_action_endpoints() -> None:
             "/v1/workspaces/ws-1/bots/bot-1/daily-state/reset-lock",
             json={
                 "reason": "incident_resolved",
+                "approval_id": 102,
                 "acknowledge_operator_action": True,
             },
         )
@@ -267,13 +275,13 @@ async def test_live_trading_action_endpoints() -> None:
 
         bad_reset = await client.post(
             "/v1/workspaces/ws-1/bots/bot-1/daily-state/reset-lock",
-            json={},
+            json={"approval_id": 103},
         )
         assert bad_reset.status_code == 400
 
         blocked_reset = await client.post(
             "/v1/workspaces/ws-1/bots/bot-1/daily-state/reset-lock",
-            json={"reason": "operator_reset_no_ack", "scope": "bot"},
+            json={"reason": "operator_reset_no_ack", "scope": "bot", "approval_id": 104},
         )
         assert blocked_reset.status_code == 409
 
@@ -282,6 +290,7 @@ async def test_live_trading_action_endpoints() -> None:
             json={
                 "reason": "operator_reset_with_ack",
                 "scope": "bot",
+                "approval_id": 105,
                 "acknowledge_operator_action": True,
             },
         )
@@ -297,7 +306,7 @@ async def test_live_trading_action_endpoints() -> None:
 
         unkill = await client.post(
             "/v1/workspaces/ws-1/bots/bot-1/reset-kill-switch",
-            json={"reason": "incident_cleared"},
+            json={"reason": "incident_cleared", "approval_id": 106},
         )
         assert unkill.status_code == 200
         assert unkill.json()["kill_switch"] is False
@@ -377,12 +386,14 @@ async def test_reset_daily_lock_portfolio_scope_requires_ack_and_unlocks_workspa
                 status="open",
             )
         )
+        session.add(ActionApprovalRequest(id=201, workspace_id="ws-1", bot_instance_id="bot-1", action_type="unlock_daily_lock", status="approved", reason="portfolio-unlock-1"))
+        session.add(ActionApprovalRequest(id=202, workspace_id="ws-1", bot_instance_id="bot-1", action_type="unlock_daily_lock", status="approved", reason="portfolio-unlock-2"))
         await session.commit()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         blocked = await client.post(
             "/v1/workspaces/ws-1/bots/bot-1/daily-state/reset-lock",
-            json={"reason": "operator_portfolio_reset_no_ack", "scope": "portfolio"},
+            json={"reason": "operator_portfolio_reset_no_ack", "scope": "portfolio", "approval_id": 201},
         )
         assert blocked.status_code == 409
         assert blocked.json()["detail"] == "operator_ack_required_for_open_critical_daily_lock_incident"
@@ -392,6 +403,7 @@ async def test_reset_daily_lock_portfolio_scope_requires_ack_and_unlocks_workspa
             json={
                 "reason": "operator_portfolio_reset",
                 "scope": "portfolio",
+                "approval_id": 202,
                 "acknowledge_operator_action": True,
             },
         )
@@ -468,12 +480,15 @@ async def test_manual_reconciliation_requires_structured_broker_proof() -> None:
                 payload={"reason": "manual_resolution_required"},
             )
         )
+        session.add(ActionApprovalRequest(id=301, workspace_id="ws-1", bot_instance_id="bot-1", action_type="retry_unknown_order", status="approved", reason="retry-1"))
+        session.add(ActionApprovalRequest(id=302, workspace_id="ws-1", bot_instance_id="bot-1", action_type="retry_unknown_order", status="approved", reason="retry-2"))
         await session.commit()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         bad = await client.post(
             "/v1/workspaces/ws-1/bots/bot-1/reconciliation/1/resolve",
             json={
+                "approval_id": 301,
                 "outcome": "filled",
                 "broker_proof": {"provider": "ctrader"},
             },
@@ -488,6 +503,7 @@ async def test_manual_reconciliation_requires_structured_broker_proof() -> None:
             good = await client.post(
                 "/v1/workspaces/ws-1/bots/bot-1/reconciliation/1/resolve",
                 json={
+                    "approval_id": 302,
                     "outcome": "filled",
                     "broker_proof": {
                         "provider": "ctrader",

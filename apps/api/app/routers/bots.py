@@ -20,6 +20,7 @@ from app.models import (
 )
 from app.services.live_start_preflight import LiveStartPreflightError, run_live_start_preflight
 from app.services.live_readiness_guard import LiveReadinessGuard
+from app.services.action_approval_service import ActionApprovalService
 from app.schemas import (
     BotConfigUpdate,
     BotCreate,
@@ -59,6 +60,20 @@ def _runtime_snapshot_not_running(bot_id: str) -> dict:
         "metadata": {},
         "uptime_seconds": 0.0,
     }
+
+
+def _extract_risk_pct(payload: dict | None) -> float | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("max_risk_pct", "risk_pct", "risk_percent", "risk_percentage"):
+        raw = payload.get(key)
+        if raw is None:
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 async def _get_bot_or_404(bot_id: str, workspace_id: str, db: AsyncSession) -> BotInstance:
@@ -280,6 +295,19 @@ async def start_bot(
         live_start_reason = str((payload or {}).get("reason") or "").strip()
         if not live_start_reason:
             raise HTTPException(status_code=400, detail="Live start reason required")
+        approval_id_raw = (payload or {}).get("approval_id")
+        try:
+            approval_id = int(approval_id_raw) if approval_id_raw is not None else None
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="invalid_approval_id")
+        approval_svc = ActionApprovalService(db)
+        await approval_svc.validate_and_consume_approval(
+            approval_id=approval_id,
+            workspace_id=workspace_id,
+            action_type="start_live_bot",
+            bot_instance_id=bot_id,
+            actor_user_id=str(getattr(current_user, "id", "") or "") or None,
+        )
 
     try:
         if bot.mode == "live":
@@ -538,6 +566,30 @@ async def update_bot_config(
     config = result.scalar_one_or_none()
     if not config:
         raise HTTPException(status_code=404, detail="Config not found")
-    for field, value in body.model_dump(exclude_none=True).items():
+    updates = body.model_dump(exclude_none=True)
+    incoming_risk = updates.get("risk_json") if isinstance(updates.get("risk_json"), dict) else None
+    if incoming_risk is not None:
+        current_risk_pct = _extract_risk_pct(config.risk_json if isinstance(config.risk_json, dict) else {})
+        next_risk_pct = _extract_risk_pct(incoming_risk)
+        if (
+            current_risk_pct is not None
+            and next_risk_pct is not None
+            and next_risk_pct > current_risk_pct
+        ):
+            approval_id_raw = incoming_risk.get("approval_id")
+            try:
+                approval_id = int(approval_id_raw) if approval_id_raw is not None else None
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="invalid_approval_id")
+            svc = ActionApprovalService(db)
+            await svc.validate_and_consume_approval(
+                approval_id=approval_id,
+                workspace_id=workspace_id,
+                action_type="increase_risk_pct",
+                bot_instance_id=bot_id,
+                actor_user_id=str(getattr(current_user, "id", "") or "") or None,
+            )
+            incoming_risk.pop("approval_id", None)
+    for field, value in updates.items():
         setattr(config, field, value)
     return {"message": "Config updated"}

@@ -12,6 +12,7 @@ from app.services.daily_trading_state import DailyTradingStateService
 from app.services.order_ledger_service import OrderLedgerService
 from app.services.reconciliation_queue_service import ReconciliationQueueService
 from app.services.safety_ledger import SafetyLedgerService
+from app.services.action_approval_service import ActionApprovalService
 
 router = APIRouter(prefix="/v1/workspaces/{workspace_id}/bots/{bot_id}", tags=["live-trading"])
 
@@ -237,6 +238,20 @@ async def manual_resolve_reconciliation_item(
     if not bool(getattr(current_user, "is_superuser", False)):
         raise HTTPException(status_code=403, detail="Admin permission required")
 
+    approval_id_raw = (payload or {}).get("approval_id")
+    try:
+        approval_id = int(approval_id_raw) if approval_id_raw is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invalid_approval_id")
+    approval_svc = ActionApprovalService(db)
+    await approval_svc.validate_and_consume_approval(
+        approval_id=approval_id,
+        workspace_id=workspace_id,
+        action_type="retry_unknown_order",
+        bot_instance_id=bot_id,
+        actor_user_id=str(getattr(current_user, "id", "") or "") or None,
+    )
+
     outcome = str((payload or {}).get("outcome") or "").lower().strip()
     if outcome not in {"filled", "rejected"}:
         raise HTTPException(status_code=400, detail="outcome must be filled|rejected")
@@ -419,6 +434,19 @@ async def reset_daily_state_lock(
 ):
     if not bool(getattr(current_user, "is_superuser", False)):
         raise HTTPException(status_code=403, detail="Admin permission required")
+    approval_id_raw = (payload or {}).get("approval_id")
+    try:
+        approval_id = int(approval_id_raw) if approval_id_raw is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invalid_approval_id")
+    approval_svc = ActionApprovalService(db)
+    await approval_svc.validate_and_consume_approval(
+        approval_id=approval_id,
+        workspace_id=workspace_id,
+        action_type="unlock_daily_lock",
+        bot_instance_id=bot_id,
+        actor_user_id=str(getattr(current_user, "id", "") or "") or None,
+    )
     reason = str((payload or {}).get("reason") or "").strip()
     if not reason:
         raise HTTPException(status_code=400, detail="Reset reason required")
@@ -565,6 +593,19 @@ async def reset_kill_switch(
 ):
     if not bool(getattr(current_user, "is_superuser", False)):
         raise HTTPException(status_code=403, detail="Admin permission required")
+    approval_id_raw = (payload or {}).get("approval_id")
+    try:
+        approval_id = int(approval_id_raw) if approval_id_raw is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invalid_approval_id")
+    approval_svc = ActionApprovalService(db)
+    await approval_svc.validate_and_consume_approval(
+        approval_id=approval_id,
+        workspace_id=workspace_id,
+        action_type="disable_kill_switch",
+        bot_instance_id=bot_id,
+        actor_user_id=str(getattr(current_user, "id", "") or "") or None,
+    )
     reason = str((payload or {}).get("reason") or "").strip()
     if not reason:
         raise HTTPException(status_code=400, detail="Kill-switch reset reason required")

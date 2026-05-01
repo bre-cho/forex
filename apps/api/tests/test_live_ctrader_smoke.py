@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.core import token_revocation
 from app.core.db import Base, get_db
 from app.events import publishers
-from app.routers import auth, bots, broker_connections, signals, workspaces, ws
+from app.routers import action_approvals, auth, bots, broker_connections, signals, workspaces, ws
 from app.services import bot_service
 
 
@@ -96,6 +96,7 @@ def test_live_ctrader_demo_smoke_e2e(monkeypatch: pytest.MonkeyPatch):
     app = FastAPI()
     app.include_router(auth.router)
     app.include_router(workspaces.router)
+    app.include_router(action_approvals.router)
     app.include_router(broker_connections.router)
     app.include_router(bots.router)
     app.include_router(signals.signals_router)
@@ -194,10 +195,28 @@ def test_live_ctrader_demo_smoke_e2e(monkeypatch: pytest.MonkeyPatch):
         assert bot_create.status_code == 201
         bot_id = bot_create.json()["id"]
 
+        approval_req = client.post(
+            f"/v1/workspaces/{workspace_id}/approvals",
+            headers=headers,
+            json={
+                "action_type": "start_live_bot",
+                "bot_id": bot_id,
+                "reason": "smoke_live_start",
+            },
+        )
+        assert approval_req.status_code == 200
+        approval_id = int(approval_req.json()["id"])
+        approval_ok = client.post(
+            f"/v1/workspaces/{workspace_id}/approvals/{approval_id}/approve",
+            headers=headers,
+            json={"note": "approved_for_smoke"},
+        )
+        assert approval_ok.status_code == 200
+
         started = client.post(
             f"/v1/workspaces/{workspace_id}/bots/{bot_id}/start",
             headers=headers,
-            json={"reason": "smoke_live_start"},
+            json={"reason": "smoke_live_start", "approval_id": approval_id},
         )
         assert started.status_code == 200, started.text
 

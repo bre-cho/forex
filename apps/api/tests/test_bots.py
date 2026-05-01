@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core import token_revocation
 from app.core.db import Base, get_db
-from app.routers import auth, bots, broker_connections, workspaces
+from app.routers import action_approvals, auth, bots, broker_connections, workspaces
 from app.services import bot_service
 
 
@@ -79,6 +79,7 @@ async def test_workspace_isolation_and_bot_lifecycle_idempotency(monkeypatch: py
     app = FastAPI()
     app.include_router(auth.router)
     app.include_router(workspaces.router)
+    app.include_router(action_approvals.router)
     app.include_router(broker_connections.router)
     app.include_router(bots.router)
     app.state.registry = _FakeRegistry()
@@ -235,6 +236,7 @@ async def test_live_start_hard_fails_when_guard_blocks_runtime(monkeypatch: pyte
     app = FastAPI()
     app.include_router(auth.router)
     app.include_router(workspaces.router)
+    app.include_router(action_approvals.router)
     app.include_router(broker_connections.router)
     app.include_router(bots.router)
     app.state.registry = _FakeRegistry()
@@ -320,10 +322,36 @@ async def test_live_start_hard_fails_when_guard_blocks_runtime(monkeypatch: pyte
         assert bot_resp.status_code == 201
         bot_id = bot_resp.json()["id"]
 
-        start_resp = await client.post(
+        missing_approval = await client.post(
             f"/v1/workspaces/{workspace_id}/bots/{bot_id}/start",
             headers=headers,
             json={"reason": "live_guard_validation"},
+        )
+        assert missing_approval.status_code == 403
+        assert "approval_required:start_live_bot" in missing_approval.json()["detail"]
+
+        approval_req = await client.post(
+            f"/v1/workspaces/{workspace_id}/approvals",
+            headers=headers,
+            json={
+                "action_type": "start_live_bot",
+                "bot_id": bot_id,
+                "reason": "live_guard_validation",
+            },
+        )
+        assert approval_req.status_code == 200
+        approval_id = int(approval_req.json()["id"])
+        approval_ok = await client.post(
+            f"/v1/workspaces/{workspace_id}/approvals/{approval_id}/approve",
+            headers=headers,
+            json={"note": "approved_for_test"},
+        )
+        assert approval_ok.status_code == 200
+
+        start_resp = await client.post(
+            f"/v1/workspaces/{workspace_id}/bots/{bot_id}/start",
+            headers=headers,
+            json={"reason": "live_guard_validation", "approval_id": approval_id},
         )
         assert start_resp.status_code == 503
         assert "guard blocked" in start_resp.json()["detail"].lower()
@@ -346,6 +374,7 @@ async def test_live_start_hard_fails_when_preflight_blocks(monkeypatch: pytest.M
     app = FastAPI()
     app.include_router(auth.router)
     app.include_router(workspaces.router)
+    app.include_router(action_approvals.router)
     app.include_router(broker_connections.router)
     app.include_router(bots.router)
     app.state.registry = _FakeRegistry()
@@ -430,10 +459,28 @@ async def test_live_start_hard_fails_when_preflight_blocks(monkeypatch: pytest.M
         assert bot_resp.status_code == 201
         bot_id = bot_resp.json()["id"]
 
+        approval_req = await client.post(
+            f"/v1/workspaces/{workspace_id}/approvals",
+            headers=headers,
+            json={
+                "action_type": "start_live_bot",
+                "bot_id": bot_id,
+                "reason": "preflight_validation",
+            },
+        )
+        assert approval_req.status_code == 200
+        approval_id = int(approval_req.json()["id"])
+        approval_ok = await client.post(
+            f"/v1/workspaces/{workspace_id}/approvals/{approval_id}/approve",
+            headers=headers,
+            json={"note": "approved_for_test"},
+        )
+        assert approval_ok.status_code == 200
+
         start_resp = await client.post(
             f"/v1/workspaces/{workspace_id}/bots/{bot_id}/start",
             headers=headers,
-            json={"reason": "preflight_validation"},
+            json={"reason": "preflight_validation", "approval_id": approval_id},
         )
         assert start_resp.status_code == 503
         assert "daily_state_stale" in start_resp.json()["detail"]
@@ -449,6 +496,7 @@ async def test_bot_readiness_endpoint_returns_modes(monkeypatch: pytest.MonkeyPa
     app = FastAPI()
     app.include_router(auth.router)
     app.include_router(workspaces.router)
+    app.include_router(action_approvals.router)
     app.include_router(bots.router)
     app.state.registry = _FakeRegistry()
 

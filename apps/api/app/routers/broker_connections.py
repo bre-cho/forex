@@ -13,6 +13,7 @@ from app.dependencies.auth import get_current_user
 from app.dependencies.permissions import require_workspace_role
 from app.models import BrokerConnection, User
 from app.schemas import BrokerConnectionCreate, BrokerConnectionOut, BrokerConnectionUpdate
+from app.services.action_approval_service import ActionApprovalService
 
 router = APIRouter(
     prefix="/v1/workspaces/{workspace_id}/broker-connections",
@@ -97,7 +98,21 @@ async def update_connection(
     if "is_active" in updates:
         conn.is_active = updates["is_active"]
     if "credentials" in updates:
-        conn.credentials_encrypted = encrypt_credentials(updates["credentials"])
+        credentials_update = dict(updates["credentials"] or {})
+        approval_id_raw = credentials_update.pop("approval_id", None)
+        try:
+            approval_id = int(approval_id_raw) if approval_id_raw is not None else None
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="invalid_approval_id")
+        approval_svc = ActionApprovalService(db)
+        await approval_svc.validate_and_consume_approval(
+            approval_id=approval_id,
+            workspace_id=workspace_id,
+            action_type="change_provider_credential",
+            bot_instance_id=None,
+            actor_user_id=str(getattr(current_user, "id", "") or "") or None,
+        )
+        conn.credentials_encrypted = encrypt_credentials(credentials_update)
     return conn
 
 
