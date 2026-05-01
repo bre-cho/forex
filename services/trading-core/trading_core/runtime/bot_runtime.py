@@ -912,6 +912,10 @@ class BotRuntime:
                                 "portfolio_daily_loss_pct": float(portfolio_snapshot.get("portfolio_daily_loss_pct", 0.0) or 0.0),
                                 "portfolio_open_positions": int(portfolio_snapshot.get("portfolio_open_positions", 0) or 0),
                                 "portfolio_kill_switch": bool(portfolio_snapshot.get("portfolio_kill_switch", False)),
+                                "workspace_new_orders_paused": bool(portfolio_snapshot.get("workspace_new_orders_paused", False)),
+                                "workspace_active_brokers": int(portfolio_snapshot.get("workspace_active_brokers", 0) or 0),
+                                "workspace_current_broker_positions": int(portfolio_snapshot.get("workspace_current_broker_positions", 0) or 0),
+                                "workspace_broker_concentration_pct": float(portfolio_snapshot.get("workspace_broker_concentration_pct", 0.0) or 0.0),
                             }
                         )
                 except Exception as exc:

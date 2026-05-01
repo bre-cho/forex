@@ -47,6 +47,10 @@ class GateContextV1:
     portfolio_daily_loss_pct: float = 0.0
     portfolio_open_positions: int = 0
     portfolio_kill_switch: bool = False
+    workspace_new_orders_paused: bool = False
+    workspace_active_brokers: int = 0
+    workspace_current_broker_positions: int = 0
+    workspace_broker_concentration_pct: float = 0.0
     policy_version_approved: bool = True
     new_orders_paused: bool = False
     stop_loss: float = 0.0
@@ -109,6 +113,10 @@ class GateContextV1:
             portfolio_daily_loss_pct=float(context.get("portfolio_daily_loss_pct", 0.0) or 0.0),
             portfolio_open_positions=int(context.get("portfolio_open_positions", 0) or 0),
             portfolio_kill_switch=bool(context.get("portfolio_kill_switch", False)),
+            workspace_new_orders_paused=bool(context.get("workspace_new_orders_paused", False)),
+            workspace_active_brokers=int(context.get("workspace_active_brokers", 0) or 0),
+            workspace_current_broker_positions=int(context.get("workspace_current_broker_positions", 0) or 0),
+            workspace_broker_concentration_pct=float(context.get("workspace_broker_concentration_pct", 0.0) or 0.0),
             policy_version_approved=bool(context.get("policy_version_approved", True)),
             new_orders_paused=bool(context.get("new_orders_paused", False)),
             stop_loss=float(context.get("stop_loss", 0.0) or 0.0),
@@ -211,6 +219,8 @@ class PreExecutionGate:
             return GateResult("BLOCK", "kill_switch_enabled", severity="critical", lock_scope="bot", operator_action="reset_required")
         if context.get("portfolio_kill_switch") is True:
             return GateResult("BLOCK", "portfolio_kill_switch_enabled", severity="critical", lock_scope="portfolio", operator_action="reset_required")
+        if context.get("workspace_new_orders_paused") is True:
+            return GateResult("BLOCK", "workspace_new_orders_paused", severity="critical", lock_scope="portfolio", operator_action="reset_required")
         # explicit daily_locked from DailyTradingState
         if context.get("daily_locked") is True:
             lock_reason = str(context.get("daily_lock_reason") or "daily_locked")
@@ -323,6 +333,11 @@ class PreExecutionGate:
             return GateResult("BLOCK", "max_open_positions_hit", severity="warning", operator_action="review")
         if int(context.get("portfolio_open_positions", 0) or 0) >= int(self.policy.get("max_portfolio_open_positions", 12)):
             return GateResult("BLOCK", "max_portfolio_open_positions_hit", severity="warning", operator_action="review")
+        if int(context.get("workspace_active_brokers", 0) or 0) > int(self.policy.get("max_workspace_active_brokers", 8)):
+            return GateResult("BLOCK", "workspace_active_brokers_limit_hit", severity="critical", lock_scope="portfolio", operator_action="review")
+        concentration_pct = float(context.get("workspace_broker_concentration_pct", 0.0) or 0.0)
+        if concentration_pct > float(self.policy.get("max_workspace_broker_concentration_pct", 85.0)):
+            return GateResult("BLOCK", "workspace_broker_concentration_too_high", severity="critical", lock_scope="portfolio", operator_action="review")
         if context.get("idempotency_exists") is True:
             return GateResult("BLOCK", "duplicate_order_blocked", severity="warning", operator_action="review")
         if float(context.get("confidence", 0)) < float(self.policy.get("min_confidence", 0.65)):

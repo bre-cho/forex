@@ -20,6 +20,7 @@ from app.models import (
     DailyTradingState,
     Signal,
     Trade,
+    Workspace,
 )
 from app.services.incident_notifier import notify_incident
 from app.services.daily_trading_state import DailyTradingStateService
@@ -626,21 +627,56 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
             if bot_row is None:
                 return None
 
-            workspace_bot_ids = (
+            workspace_row = (
+                await db.execute(select(Workspace).where(Workspace.id == bot_row.workspace_id).limit(1))
+            ).scalar_one_or_none()
+            workspace_settings = dict(getattr(workspace_row, "settings", {}) or {})
+            workspace_new_orders_paused = bool(workspace_settings.get("portfolio_new_orders_paused", False))
+
+            workspace_bots = (
                 (
                     await db.execute(
-                        select(BotInstance.id).where(BotInstance.workspace_id == bot_row.workspace_id)
+                        select(BotInstance).where(BotInstance.workspace_id == bot_row.workspace_id)
                     )
                 )
                 .scalars()
                 .all()
             )
+            workspace_bot_ids = [str(b.id) for b in workspace_bots]
             if not workspace_bot_ids:
                 return {
                     "portfolio_daily_loss_pct": 0.0,
                     "portfolio_open_positions": 0,
                     "portfolio_kill_switch": False,
+                    "workspace_new_orders_paused": workspace_new_orders_paused,
+                    "workspace_active_brokers": 0,
+                    "workspace_current_broker_positions": 0,
+                    "workspace_broker_concentration_pct": 0.0,
                 }
+
+            broker_connection_ids = [str(b.broker_connection_id) for b in workspace_bots if getattr(b, "broker_connection_id", None)]
+            connections = (
+                (
+                    await db.execute(
+                        select(BrokerConnection).where(BrokerConnection.id.in_(broker_connection_ids))
+                    )
+                )
+                .scalars()
+                .all()
+            ) if broker_connection_ids else []
+            broker_type_by_conn = {str(c.id): str(getattr(c, "broker_type", "") or "").lower() for c in connections}
+            broker_type_by_bot: dict[str, str] = {}
+            for b in workspace_bots:
+                conn_id = str(getattr(b, "broker_connection_id", "") or "")
+                broker_type_by_bot[str(b.id)] = broker_type_by_conn.get(conn_id, "paper")
+
+            current_bot_broker = broker_type_by_bot.get(str(bot_row.id), "paper")
+            active_broker_types = {
+                broker_type_by_bot.get(str(b.id), "paper")
+                for b in workspace_bots
+                if str(getattr(b, "mode", "") or "").lower() == "live"
+            }
+            workspace_active_brokers = len({x for x in active_broker_types if x})
 
             today = datetime.now(timezone.utc).date()
             states = (
@@ -669,10 +705,27 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                 .scalars()
                 .all()
             )
+            total_open_positions = int(len(open_positions))
+            current_broker_positions = int(
+                sum(
+                    1
+                    for t in open_positions
+                    if broker_type_by_bot.get(str(getattr(t, "bot_instance_id", "") or ""), "paper") == current_bot_broker
+                )
+            )
+            concentration_pct = (
+                (float(current_broker_positions) * 100.0 / float(total_open_positions))
+                if total_open_positions > 0
+                else 0.0
+            )
             return {
                 "portfolio_daily_loss_pct": float(portfolio_daily_loss_pct),
-                "portfolio_open_positions": int(len(open_positions)),
+                "portfolio_open_positions": total_open_positions,
                 "portfolio_kill_switch": bool(portfolio_kill_switch),
+                "workspace_new_orders_paused": workspace_new_orders_paused,
+                "workspace_active_brokers": int(workspace_active_brokers),
+                "workspace_current_broker_positions": int(current_broker_positions),
+                "workspace_broker_concentration_pct": float(concentration_pct),
             }
 
     async def get_unknown_order_attempts() -> list[dict]:

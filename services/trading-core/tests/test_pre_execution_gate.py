@@ -232,6 +232,26 @@ def test_portfolio_daily_loss_blocks():
     assert result.reason == "portfolio_daily_loss_limit_hit"
 
 
+def test_workspace_new_orders_paused_blocks(gate):
+    result = gate.evaluate(_ctx(workspace_new_orders_paused=True))
+    assert result.action == "BLOCK"
+    assert result.reason == "workspace_new_orders_paused"
+
+
+def test_workspace_active_brokers_limit_blocks():
+    gate = PreExecutionGate(policy={**DEFAULT_POLICY, "max_workspace_active_brokers": 2})
+    result = gate.evaluate(_ctx(workspace_active_brokers=3))
+    assert result.action == "BLOCK"
+    assert result.reason == "workspace_active_brokers_limit_hit"
+
+
+def test_workspace_broker_concentration_limit_blocks():
+    gate = PreExecutionGate(policy={**DEFAULT_POLICY, "max_workspace_broker_concentration_pct": 70.0})
+    result = gate.evaluate(_ctx(workspace_broker_concentration_pct=71.0))
+    assert result.action == "BLOCK"
+    assert result.reason == "workspace_broker_concentration_too_high"
+
+
 def test_gate_context_hash_is_canonical_for_key_order() -> None:
     ctx_a = {
         "schema_version": "gate_context_v2",
