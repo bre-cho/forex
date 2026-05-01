@@ -81,7 +81,8 @@ class MockDataProvider:
             raise RuntimeError(
                 "MockDataProvider is forbidden in production environments "
                 "(APP_ENV={!r}). Use a real broker provider from "
-                "execution_service.providers instead.".format(_APP_ENV)
+                "execution_service.providers instead — CTraderProvider, "
+                "MT5Provider, or BybitProvider.".format(_APP_ENV)
             )
         if _APP_ENV not in _PRODUCTION_ENVS:
             warnings.warn(

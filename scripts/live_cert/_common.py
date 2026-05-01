@@ -149,7 +149,9 @@ async def _run_smoke_suite(ctx: LiveCertContext) -> dict[str, bool]:
     except Exception as exc:
         logger.error("[smoke] get_candles failed: %s", exc)
 
-    # 5–7. Place + verify + close (best-effort; may not be possible on all demo accounts)
+    # 5–7. Place + verify + close
+    # These steps require a properly configured demo account that supports trading.
+    # If the provider does not support the operation, the check fails explicitly.
     order_id: str | None = None
     try:
         from execution_service.providers.base import OrderRequest  # type: ignore[import]
@@ -176,14 +178,19 @@ async def _run_smoke_suite(ctx: LiveCertContext) -> dict[str, bool]:
             checks["order_terminal_state"] = True
             logger.info("[smoke] order placed: id=%s fill_price=%.5f", order_id, result.fill_price)
         else:
-            logger.warning("[smoke] place_order returned success=False: %s", result.error_message)
-            # Mark as soft-pass for demo: some demo accounts disable trading
-            checks["place_order_min_size"] = True
-            checks["order_terminal_state"] = True
+            logger.error(
+                "[smoke] place_order returned success=False: %s — "
+                "ensure the demo account has sufficient margin and trading is enabled.",
+                result.error_message,
+            )
+    except ImportError as exc:
+        logger.error("[smoke] execution_service not available: %s", exc)
     except Exception as exc:
-        logger.warning("[smoke] place_order failed (non-fatal for demo cert): %s", exc)
-        checks["place_order_min_size"] = True   # soft pass for demo
-        checks["order_terminal_state"] = True
+        logger.error(
+            "[smoke] place_order raised an exception: %s — "
+            "ensure the demo account credentials are correct and trading is enabled.",
+            exc,
+        )
 
     # 7. Close open position if one was opened
     try:
@@ -196,23 +203,24 @@ async def _run_smoke_suite(ctx: LiveCertContext) -> dict[str, bool]:
                     if close_result.success:
                         checks["close_or_cancel"] = True
                         logger.info("[smoke] position closed: %s", pos_id)
+                    else:
+                        logger.error("[smoke] close_position failed for %s: %s", pos_id, close_result.error_message)
         else:
-            checks["close_or_cancel"] = True  # nothing to close
+            # No open positions — nothing to close; mark pass (no order was placed)
+            checks["close_or_cancel"] = True
     except Exception as exc:
-        logger.warning("[smoke] close_position failed (non-fatal for demo): %s", exc)
-        checks["close_or_cancel"] = True
+        logger.error("[smoke] close_position raised an exception: %s", exc)
 
     # 8. Reconcile
     try:
         remaining = await provider.get_open_positions()
         checks["reconcile"] = len(remaining) == 0
         if not checks["reconcile"]:
-            logger.warning("[smoke] reconcile: %d positions still open after close", len(remaining))
+            logger.error("[smoke] reconcile: %d positions still open after close", len(remaining))
         else:
             logger.info("[smoke] reconcile: clean")
     except Exception as exc:
-        logger.warning("[smoke] reconcile check failed: %s", exc)
-        checks["reconcile"] = True  # soft pass for demo
+        logger.error("[smoke] reconcile check failed: %s", exc)
 
     # Disconnect
     try:

@@ -251,7 +251,7 @@ class BotRuntime:
                     await heartbeat_task
                 except asyncio.CancelledError:
                     pass
-            self._heartbeat_task = None  # type: ignore[attr-defined]
+            self._heartbeat_task = None
             if self._engine_task:
                 self._engine_task.cancel()
                 try:
@@ -1418,7 +1418,17 @@ class BotRuntime:
         expected_price = float(request.price or result.fill_price or 0.0)
         fill_price = float(result.fill_price or 0.0)
         if expected_price > 0 and fill_price > 0:
+            # Use broker instrument spec pip_size if available; fall back to standard FX values.
+            # Hardcoded 0.0001/0.01 are standard defaults only — actual spec is preferred.
             pip_size = 0.01 if "JPY" in str(result.symbol).upper() else 0.0001
+            spec_fn = getattr(self.broker_provider, "get_instrument_spec", None)
+            if callable(spec_fn):
+                try:
+                    spec = await spec_fn(str(result.symbol))
+                    if isinstance(spec, dict) and float(spec.get("pip_size") or 0.0) > 0:
+                        pip_size = float(spec["pip_size"])
+                except Exception:
+                    pass  # fall through to standard default
             slippage_pips = abs(fill_price - expected_price) / pip_size
             slippage_payload = {
                 "bot_instance_id": self.bot_instance_id,

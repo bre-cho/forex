@@ -203,6 +203,9 @@ class CTraderTokenRefresher:
                 method="POST",
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
+            # nosec B310: URL is controlled by the constructor parameter `token_url`
+            # which defaults to the official cTrader OpenAPI endpoint and is never
+            # derived from untrusted user input.
             with urllib.request.urlopen(req, timeout=20) as resp:  # nosec B310
                 return json.loads(resp.read().decode("utf-8"))
 
