@@ -56,6 +56,26 @@ services:
     deploy:
       replicas: 1
 
+  # Submit-outbox recovery worker — retries orders stuck in submit-phase.
+  # Runs continuously; safe to run alongside reconciliation-worker.
+  submit-outbox-recovery:
+    image: ${API_IMAGE:-forex-api:latest}
+    command: ["python", "-m", "app.workers.submit_outbox_recovery_worker_entrypoint"]
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - APP_ENV=production
+      - DEBUG=false
+      - WORKER_MODE=outbox_recovery
+    env_file:
+      - ../../.env
+    depends_on:
+      - postgres
+      - redis
+    restart: always
+    deploy:
+      replicas: 1
+
   # Nightly integrity worker — verifies ledger/outbox/reconciliation invariants
   # and raises critical incidents on hard violations.
   integrity-worker:

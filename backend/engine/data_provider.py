@@ -5,14 +5,22 @@ Produces realistic Forex-like price series with:
   - Identifiable bull / bear trends
   - Sideways consolidation periods
   - Corrections (sub-waves) within trends
+
+⚠️  PRODUCTION WARNING:
+    This module generates entirely synthetic price data.  It MUST NOT be used
+    as the primary data source in a live trading environment.  The real broker
+    provider (cTrader / MT5 / Bybit) must supply market data in production.
+    Use `execution_service.providers` for live data.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import os
 import random
 import time
+import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -20,6 +28,11 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# Block instantiation in production environments to prevent accidental mock use.
+_APP_ENV = str(os.getenv("APP_ENV", "development") or "development").strip().lower()
+_ALLOW_STUB = str(os.getenv("ALLOW_STUB_RUNTIME", "false") or "false").strip().lower() == "true"
+_PRODUCTION_ENVS = {"production", "prod", "staging"}
 
 
 @dataclass
@@ -64,6 +77,20 @@ class MockDataProvider:
         seed: Optional[int] = 42,
         candle_seconds: int = 300,   # M5
     ) -> None:
+        if _APP_ENV in _PRODUCTION_ENVS and not _ALLOW_STUB:
+            raise RuntimeError(
+                "MockDataProvider is forbidden in production environments "
+                "(APP_ENV={!r}). Use a real broker provider from "
+                "execution_service.providers instead — CTraderProvider, "
+                "MT5Provider, or BybitProvider.".format(_APP_ENV)
+            )
+        if _APP_ENV not in _PRODUCTION_ENVS:
+            warnings.warn(
+                "MockDataProvider generates SYNTHETIC data and must NOT be used "
+                "in live trading. Switch to a real broker provider before going live.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         self.symbol = symbol
         self.pip_size = pip_size
         self.spread_pips = spread_pips

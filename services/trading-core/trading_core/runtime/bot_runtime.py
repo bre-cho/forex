@@ -119,6 +119,10 @@ class BotRuntime:
         self._known_trade_volumes: Dict[str, float] = {}
         self._known_remaining_volumes: Dict[str, float] = {}
         self._closed_trade_ids: set[str] = set()
+        # P1.1: Heartbeat / reconnection loop task (live mode only)
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._heartbeat_interval: float = 30.0
+        self._heartbeat_backoff_steps: tuple[float, ...] = (5.0, 30.0, 120.0)
 
         # Lazy-initialised engines (created on start)
         self._wave_detector = None
@@ -226,6 +230,11 @@ class BotRuntime:
             self.state.started_at = time.time()
             self.state.status = RuntimeStatus.RUNNING
             self._engine_task = asyncio.create_task(self._run_loop())
+            if self.runtime_mode == "live":
+                # P1.1: Start heartbeat loop to detect and recover broker disconnections
+                self._heartbeat_task = asyncio.create_task(
+                    self._broker_heartbeat_loop(), name=f"heartbeat_{self.bot_instance_id}"
+                )
             logger.info("BotRuntime started: %s", self.bot_instance_id)
 
     async def stop(self) -> None:
@@ -234,6 +243,15 @@ class BotRuntime:
                 return
             self.state.status = RuntimeStatus.STOPPED
             self.state.stopped_at = time.time()
+            # Cancel heartbeat loop first (prevents reconnect races during shutdown)
+            heartbeat_task = getattr(self, "_heartbeat_task", None)
+            if heartbeat_task and not heartbeat_task.done():
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+            self._heartbeat_task = None
             if self._engine_task:
                 self._engine_task.cancel()
                 try:
@@ -305,6 +323,14 @@ class BotRuntime:
     async def tick(self) -> None:
         """Single trading cycle tick."""
         try:
+            # P1.2: Market hours gate — block new signals outside trading session.
+            # SessionManager is built from strategy_config["session"] and only
+            # blocks new order signals; trade management (SL, TP, trailing) continues.
+            if self.runtime_mode == "live" and not self._is_trading_session_open():
+                self.state.metadata["market_hours_blocked"] = True
+                return
+            self.state.metadata["market_hours_blocked"] = False
+
             df = await self._fetch_market_data()
             if df is None or df.empty:
                 return
@@ -371,6 +397,62 @@ class BotRuntime:
 
     def _analyse_market(self, df):
         return self._wave_detector.analyse(df)
+
+    def _is_trading_session_open(self) -> bool:
+        """Check whether the current UTC time falls within the configured trading session.
+
+        Uses SessionManager from backend/engine/session_manager when available.
+        Defaults to True (allow trading) when the engine cannot be imported or
+        when no session config is provided (full 24/7 for crypto / full-week FX).
+        """
+        try:
+            from engine.session_manager import (  # type: ignore[import]
+                SessionManager,
+                TradingSession,
+                DSTMode,
+                CustomSessionConfig,
+            )
+        except ImportError:
+            try:
+                from trading_core.engines.session_manager import (  # type: ignore[import,no-redef]
+                    SessionManager,
+                    TradingSession,
+                    DSTMode,
+                    CustomSessionConfig,
+                )
+            except ImportError:
+                # SessionManager unavailable — fail open (allow trading)
+                return True
+
+        session_cfg = (self.strategy_config or {}).get("session", {}) if isinstance(self.strategy_config, dict) else {}
+        if not session_cfg:
+            return True
+
+        try:
+            session_name = str(session_cfg.get("name", "ALL_DAY") or "ALL_DAY").upper()
+            session = TradingSession[session_name] if session_name in TradingSession.__members__ else TradingSession.ALL_DAY
+            dst_mode_name = str(session_cfg.get("dst_mode", "NO_DST") or "NO_DST").upper()
+            dst_mode = DSTMode[dst_mode_name] if dst_mode_name in DSTMode.__members__ else DSTMode.NO_DST
+            gmt_offset = float(session_cfg.get("gmt_offset", 0.0) or 0.0)
+            custom_cfg = None
+            if session == TradingSession.CUSTOM:
+                custom_raw = session_cfg.get("custom", {}) or {}
+                custom_cfg = CustomSessionConfig(
+                    start_hour=int(custom_raw.get("start_hour", 8)),
+                    start_minute=int(custom_raw.get("start_minute", 0)),
+                    end_hour=int(custom_raw.get("end_hour", 17)),
+                    end_minute=int(custom_raw.get("end_minute", 0)),
+                )
+            mgr = SessionManager(
+                session=session,
+                dst_mode=dst_mode,
+                gmt_offset=gmt_offset,
+                custom_config=custom_cfg,
+            )
+            return bool(mgr.is_trading_time())
+        except Exception as exc:
+            logger.warning("Session gate check failed for %s: %s — defaulting to open", self.bot_instance_id, exc)
+            return True
 
     async def _generate_signal(self, df, wave):
         wave_state = str(getattr(getattr(wave, "main_wave", ""), "value", getattr(wave, "main_wave", "")))
@@ -501,6 +583,9 @@ class BotRuntime:
             equity = float(self.state.equity or 0.0)
             if equity <= 0:
                 equity = float(self.state.balance or 0.0)
+            # P0.7: In live mode use "reject" policy — never silently inflate lot size
+            # to meet min_lot; block the trade instead so risk intent is honoured.
+            rounding_policy = "reject" if self.runtime_mode == "live" else "floor"
             sizing = calculate_position_size(
                 PositionSizingInput(
                     equity=equity,
@@ -512,8 +597,27 @@ class BotRuntime:
                     min_lot=float(self.risk_config.get("min_lot", 0.01) or 0.01),
                     max_lot=float(self.risk_config.get("max_lot", 100.0) or 100.0),
                     lot_step=float(self.risk_config.get("lot_step", 0.01) or 0.01),
+                    rounding_policy=rounding_policy,
                 )
             )
+            if sizing.blocked:
+                logger.warning(
+                    "Position sizing blocked for signal %s (live mode, policy=reject): %s",
+                    signal.get("signal_id", ""),
+                    sizing.block_reason,
+                )
+                return TradeSignal(
+                    signal_id=str(signal.get("signal_id")),
+                    symbol=str(signal.get("symbol", "EURUSD")),
+                    direction="HOLD",
+                    entry_price=entry_price,
+                    sl=float(sl),
+                    tp=float(tp),
+                    lot_size=0.0,
+                    entry_mode="runtime_auto",
+                    priority=5,
+                    meta={"block_reason": sizing.block_reason, "blocked": True},
+                )
             if sizing.lot > 0:
                 lot_size = sizing.lot
 
@@ -1310,6 +1414,50 @@ class BotRuntime:
             "closed_volume": 0.0,
             "remaining_volume": result.volume,
         }
+        # P1.5: Slippage tracking — record (expected_price, fill_price, slippage_pips)
+        expected_price = float(request.price or result.fill_price or 0.0)
+        fill_price = float(result.fill_price or 0.0)
+        if expected_price > 0 and fill_price > 0:
+            # Use broker instrument spec pip_size if available; fall back to standard FX values.
+            # Hardcoded 0.0001/0.01 are standard defaults only — actual spec is preferred.
+            pip_size = 0.01 if "JPY" in str(result.symbol).upper() else 0.0001
+            spec_fn = getattr(self.broker_provider, "get_instrument_spec", None)
+            if callable(spec_fn):
+                try:
+                    spec = await spec_fn(str(result.symbol))
+                    if isinstance(spec, dict) and float(spec.get("pip_size") or 0.0) > 0:
+                        pip_size = float(spec["pip_size"])
+                except Exception:
+                    pass  # fall through to standard default
+            slippage_pips = abs(fill_price - expected_price) / pip_size
+            slippage_payload = {
+                "bot_instance_id": self.bot_instance_id,
+                "signal_id": str(signal.signal_id),
+                "idempotency_key": idempotency_key,
+                "broker_order_id": str(result.order_id or ""),
+                "symbol": result.symbol,
+                "side": result.side.upper(),
+                "expected_price": round(expected_price, 6),
+                "fill_price": round(fill_price, 6),
+                "slippage_pips": round(slippage_pips, 2),
+                "broker": str(getattr(self.broker_provider, "provider_name", "unknown")),
+                "runtime_mode": self.runtime_mode,
+                "ts": time.time(),
+            }
+            self.state.metadata["last_slippage"] = slippage_payload
+            await self._emit_event("slippage_recorded", slippage_payload)
+            if self.runtime_mode == "live":
+                max_slippage = float(
+                    self.risk_config.get("max_slippage_pips", 5.0)
+                    if isinstance(self.risk_config, dict)
+                    else 5.0
+                )
+                if slippage_pips > max_slippage:
+                    logger.warning(
+                        "Slippage breach for %s: %.2f pips > max %.2f pips (fill=%.5f expected=%.5f)",
+                        self.bot_instance_id, slippage_pips, max_slippage, fill_price, expected_price,
+                    )
+                    await self._emit_event("slippage_breach", {**slippage_payload, "max_slippage_pips": max_slippage})
         self.state.metadata["last_trade"] = trade_payload
         self._known_trade_volumes[result.order_id] = float(result.volume)
         self._known_remaining_volumes[result.order_id] = float(result.volume)
@@ -1601,6 +1749,147 @@ class BotRuntime:
             if self.state.status != RuntimeStatus.ERROR:
                 self.state.status = RuntimeStatus.ERROR
             raise
+
+    # ── P1.1: Broker heartbeat / reconnection loop ─────────────────────── #
+
+    async def _broker_heartbeat_loop(self) -> None:
+        """Periodically ping the broker; attempt reconnection with exponential backoff
+        when the connection is lost.  Emits an alert event and pauses the bot
+        on disconnect; resumes when re-connection succeeds and LiveReadinessGuard
+        approves.
+        """
+        logger.info("Broker heartbeat loop started: %s", self.bot_instance_id)
+        while True:
+            if self.state.status == RuntimeStatus.STOPPED:
+                break
+            await asyncio.sleep(self._heartbeat_interval)
+            if self.state.status == RuntimeStatus.STOPPED:
+                break
+
+            connected = bool(getattr(self.broker_provider, "is_connected", False))
+            if connected:
+                # Run health check to detect degraded-but-connected states
+                health_fn = getattr(self.broker_provider, "health_check", None)
+                if callable(health_fn):
+                    try:
+                        details = await health_fn()
+                        if isinstance(details, dict):
+                            status = str(details.get("status", "healthy")).lower()
+                            if status in {"auth_failed", "disconnected", "degraded", "error"}:
+                                connected = False
+                                logger.warning(
+                                    "Heartbeat: broker health degraded for %s: %s",
+                                    self.bot_instance_id, status,
+                                )
+                    except Exception as exc:
+                        logger.warning("Heartbeat: health_check raised for %s: %s", self.bot_instance_id, exc)
+                        connected = False
+
+            if connected:
+                self.state.metadata["broker_heartbeat_ok"] = True
+                continue
+
+            # --- Broker disconnected: enter reconnect sequence ---
+            logger.warning(
+                "Heartbeat: broker disconnected for %s — pausing and attempting reconnection",
+                self.bot_instance_id,
+            )
+            if self.state.status == RuntimeStatus.RUNNING:
+                self.state.status = RuntimeStatus.PAUSED
+            await self._emit_event(
+                "broker_disconnected",
+                {
+                    "bot_instance_id": self.bot_instance_id,
+                    "broker": str(getattr(self.broker_provider, "provider_name", "unknown")),
+                    "ts": time.time(),
+                },
+            )
+            self.state.metadata["broker_heartbeat_ok"] = False
+
+            reconnected = False
+            for backoff in self._heartbeat_backoff_steps:
+                if self.state.status == RuntimeStatus.STOPPED:
+                    return
+                await asyncio.sleep(backoff)
+                if self.state.status == RuntimeStatus.STOPPED:
+                    return
+                connect_fn = getattr(self.broker_provider, "connect", None)
+                if callable(connect_fn):
+                    try:
+                        await connect_fn()
+                    except Exception as exc:
+                        logger.warning(
+                            "Heartbeat: reconnect attempt failed for %s (backoff=%.0fs): %s",
+                            self.bot_instance_id, backoff, exc,
+                        )
+                        continue
+                if bool(getattr(self.broker_provider, "is_connected", False)):
+                    # Run LiveReadinessGuard before resuming trading
+                    try:
+                        from apps.api.app.services.live_readiness_guard import LiveReadinessGuard
+                    except ImportError:
+                        try:
+                            from app.services.live_readiness_guard import LiveReadinessGuard  # type: ignore[import,no-redef]
+                        except ImportError:
+                            LiveReadinessGuard = None  # type: ignore[assignment]
+                    readiness_ok = True
+                    if LiveReadinessGuard is not None:
+                        try:
+                            r = await LiveReadinessGuard.check_provider(
+                                self.broker_provider, require_live=True
+                            )
+                            readiness_ok = bool(r.ok)
+                            if not readiness_ok:
+                                logger.warning(
+                                    "Heartbeat: readiness check failed after reconnect for %s: %s",
+                                    self.bot_instance_id, r.reason,
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "Heartbeat: LiveReadinessGuard check failed for %s: %s",
+                                self.bot_instance_id, exc,
+                            )
+                            readiness_ok = False
+                    if readiness_ok:
+                        reconnected = True
+                        break
+
+            if reconnected:
+                if self.state.status == RuntimeStatus.PAUSED:
+                    self.state.status = RuntimeStatus.RUNNING
+                self.state.metadata["broker_heartbeat_ok"] = True
+                logger.info(
+                    "Heartbeat: broker reconnected and readiness confirmed for %s — resuming",
+                    self.bot_instance_id,
+                )
+                await self._emit_event(
+                    "broker_reconnected",
+                    {
+                        "bot_instance_id": self.bot_instance_id,
+                        "broker": str(getattr(self.broker_provider, "provider_name", "unknown")),
+                        "ts": time.time(),
+                    },
+                )
+            else:
+                # Exhausted retries: escalate to ERROR so operator must intervene
+                self.state.status = RuntimeStatus.ERROR
+                self.state.error_message = "broker_reconnection_failed"
+                self.state.metadata["broker_heartbeat_ok"] = False
+                logger.error(
+                    "Heartbeat: all reconnect attempts exhausted for %s — runtime set to ERROR",
+                    self.bot_instance_id,
+                )
+                await self._emit_event(
+                    "broker_reconnection_failed",
+                    {
+                        "bot_instance_id": self.bot_instance_id,
+                        "broker": str(getattr(self.broker_provider, "provider_name", "unknown")),
+                        "ts": time.time(),
+                    },
+                )
+                break
+
+        logger.info("Broker heartbeat loop stopped: %s", self.bot_instance_id)
 
     async def _start_reconciliation_worker(self) -> None:
         if self._reconciliation_worker is not None:

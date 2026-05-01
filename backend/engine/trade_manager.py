@@ -50,12 +50,14 @@ class TradeRecord:
     def is_open(self) -> bool:
         return self.status == TradeStatus.OPEN
 
-    def calculate_pnl(self, current_price: float, pip_value: float = 10.0) -> float:
-        pip_size = 0.0001
+    def calculate_pnl(self, current_price: float, pip_value: float = 10.0, pip_size: float = 0.0001) -> float:
+        # pip_size defaults to 0.0001 (standard FX); caller should pass the real
+        # broker instrument spec value to avoid using a hardcoded constant.
+        effective_pip_size = pip_size if pip_size > 0 else 0.0001
         if self.direction.upper() == "BUY":
-            pips = (current_price - self.entry_price) / pip_size
+            pips = (current_price - self.entry_price) / effective_pip_size
         else:
-            pips = (self.entry_price - current_price) / pip_size
+            pips = (self.entry_price - current_price) / effective_pip_size
         return round(pips * pip_value * self.remaining_lots, 2)
 
 
@@ -554,7 +556,7 @@ class TradeManager:
         trade.close_price = price
         trade.close_time = time.time()
         trade.status = TradeStatus.CLOSED
-        trade.pnl = trade.calculate_pnl(price, self.pip_value)
+        trade.pnl = trade.calculate_pnl(price, self.pip_value, self.pip_size)
         trade.comment = f"Closed by {reason}"
         self._closed_trades.append(trade)
         if trade.trade_id in self._trades:

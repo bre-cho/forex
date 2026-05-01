@@ -1,0 +1,202 @@
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker image tag to deploy (e.g. sha-abc1234 or v1.2.3)"
+        required: true
+      environment:
+        description: "Target environment"
+        required: true
+        default: "production"
+        type: choice
+        options:
+          - production
+          - staging
+
+permissions:
+  contents: read
+  id-token: write   # for OIDC cloud authentication (if used)
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Pre-flight safety gates — all must pass before deployment starts
+  # ─────────────────────────────────────────────────────────────────────────
+  preflight:
+    name: Production safety gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install minimal deps
+        run: |
+          pip install --quiet alembic sqlalchemy
+
+      - name: Verify no stub/mock providers in production paths
+        run: |
+          python scripts/ci/verify_no_stub_in_prod.py
+        env:
+          APP_ENV: production
+
+      - name: Verify no live stub provider imports
+        run: |
+          python scripts/ci/verify_no_live_stub_provider.py
+
+      - name: Verify single Alembic migration head
+        run: |
+          cd apps/api && python -m scripts.verify_alembic_single_head 2>/dev/null || \
+          python -c "
+          import subprocess, sys
+          r = subprocess.run(['alembic', 'heads'], capture_output=True, text=True)
+          heads = [l for l in r.stdout.splitlines() if '(head)' in l]
+          if len(heads) != 1:
+              print('ERROR: expected 1 alembic head, got:', heads)
+              sys.exit(1)
+          print('Alembic head OK:', heads)
+          "
+
+      - name: Confirm no default/placeholder secrets in config
+        run: |
+          python - <<'EOF'
+          import os, sys
+          dangerous = [
+              "change_me_to_a_long_random_string_in_production",
+              "change_me_to_another_long_random_string",
+          ]
+          env_vars = {
+              "SECRET_KEY": os.getenv("SECRET_KEY", ""),
+              "JWT_SECRET": os.getenv("JWT_SECRET", ""),
+              "FERNET_KEY": os.getenv("FERNET_KEY", ""),
+          }
+          failed = []
+          for name, val in env_vars.items():
+              if not val or any(d in val for d in dangerous):
+                  failed.append(name)
+          if failed:
+              print(f"ERROR: Production secrets not configured: {failed}")
+              sys.exit(1)
+          print("Secrets check passed")
+          EOF
+        env:
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          FERNET_KEY: ${{ secrets.FERNET_KEY }}
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Database migration
+  # ─────────────────────────────────────────────────────────────────────────
+  migrate:
+    name: Run Alembic migrations
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          cd apps/api
+          pip install --quiet -e ".[dev]" 2>/dev/null || pip install --quiet -r requirements.txt 2>/dev/null || true
+          pip install --quiet alembic asyncpg
+
+      - name: Run alembic upgrade head
+        run: |
+          cd apps/api && alembic upgrade head
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Deploy
+  # ─────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy services
+    needs: migrate
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Export image tag env var
+        run: echo "IMAGE_TAG=${{ github.event.inputs.image_tag }}" >> "$GITHUB_ENV"
+
+      - name: Deploy API + workers via docker-compose
+        run: |
+          export API_IMAGE="ghcr.io/${{ github.repository }}/forex-api:${IMAGE_TAG}"
+          export WEB_IMAGE="ghcr.io/${{ github.repository }}/forex-web:${IMAGE_TAG}"
+          docker-compose \
+            -f infra/docker/docker-compose.prod.yml \
+            up -d \
+            --no-build \
+            --remove-orphans \
+            api reconciliation-worker submit-outbox-recovery integrity-worker web nginx
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          APP_URL: ${{ secrets.APP_URL }}
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Post-deploy health check + auto-rollback
+  # ─────────────────────────────────────────────────────────────────────────
+  healthcheck:
+    name: Post-deploy health check
+    needs: deploy
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Wait for API to stabilise
+        run: sleep 30
+
+      - name: API health check
+        id: healthcheck
+        run: |
+          set +e
+          for i in 1 2 3 4 5; do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL/health" --max-time 10)
+            echo "Attempt $i: HTTP $status"
+            if [ "$status" = "200" ]; then
+              echo "healthy=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "healthy=false" >> "$GITHUB_OUTPUT"
+          exit 1
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+
+      - name: Rollback on failure
+        if: failure() || steps.healthcheck.outputs.healthy == 'false'
+        run: |
+          echo "Health check failed — initiating rollback"
+          # Roll back to the previous image by redeploying with previous tag
+          # (requires PREVIOUS_IMAGE_TAG to be set in env/secrets)
+          ROLLBACK_TAG="${{ secrets.PREVIOUS_IMAGE_TAG }}"
+          if [ -z "$ROLLBACK_TAG" ]; then
+            echo "WARNING: PREVIOUS_IMAGE_TAG not set; manual rollback required"
+            exit 1
+          fi
+          export API_IMAGE="ghcr.io/${{ github.repository }}/forex-api:${ROLLBACK_TAG}"
+          export WEB_IMAGE="ghcr.io/${{ github.repository }}/forex-web:${ROLLBACK_TAG}"
+          docker-compose \
+            -f infra/docker/docker-compose.prod.yml \
+            up -d \
+            --no-build \
+            api reconciliation-worker submit-outbox-recovery integrity-worker web nginx
+          echo "Rollback complete to ${ROLLBACK_TAG}"
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          APP_URL: ${{ secrets.APP_URL }}
