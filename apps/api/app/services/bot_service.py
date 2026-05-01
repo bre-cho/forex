@@ -920,6 +920,32 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
                 payload=dict(payload),
             )
 
+    # P1.1: Redis-backed risk state persistence hooks.
+    # Key: bot:{bot_id}:risk_state — TTL 25 hours so state survives overnight restart.
+    _RISK_STATE_TTL = 90_000  # ~25 hours
+
+    async def load_risk_state(bid: str) -> dict | None:
+        try:
+            from app.core.cache import get_redis
+            redis = await get_redis()
+            raw = await redis.get(f"bot:{bid}:risk_state")
+            if raw is None:
+                return None
+            import json
+            return json.loads(raw)
+        except Exception as exc:
+            logger.warning("load_risk_state [%s] failed: %s", bid, exc)
+            return None
+
+    async def save_risk_state(bid: str, payload: dict) -> None:
+        try:
+            from app.core.cache import get_redis
+            import json
+            redis = await get_redis()
+            await redis.set(f"bot:{bid}:risk_state", json.dumps(payload), ex=_RISK_STATE_TTL)
+        except Exception as exc:
+            logger.warning("save_risk_state [%s] failed: %s", bid, exc)
+
     return {
         "on_signal": on_signal,
         "on_order": on_order,
@@ -945,6 +971,8 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
         "mark_submitting_hook": mark_submitting_hook,
         "mark_submit_phase_hook": mark_submit_phase_hook,
         "enqueue_unknown_hook": enqueue_unknown_hook,
+        "load_risk_state": load_risk_state,
+        "save_risk_state": save_risk_state,
     }
 
 
@@ -1042,6 +1070,8 @@ async def create_runtime_for_bot(
             mark_submitting_hook=hooks["mark_submitting_hook"],
             mark_submit_phase_hook=hooks["mark_submit_phase_hook"],
             enqueue_unknown_hook=hooks["enqueue_unknown_hook"],
+            load_risk_state=hooks["load_risk_state"],
+            save_risk_state=hooks["save_risk_state"],
         )
         logger.info("Runtime created for bot: %s (mode=%s)", bot.id, bot.mode)
 

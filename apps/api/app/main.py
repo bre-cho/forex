@@ -160,6 +160,7 @@ from app.routers import (
     incidents,
     live_trading,
     notifications,
+    operator,
     provider_certification,
     public,
     qa_parity,
@@ -194,6 +195,7 @@ app.include_router(provider_certification.router)
 app.include_router(risk_policy.router)
 app.include_router(experiments.router)
 app.include_router(qa_parity.router)
+app.include_router(operator.router)
 if settings.enable_legacy_routes:
     from app.routers import legacy
 

@@ -73,6 +73,8 @@ class RuntimeRegistry:
         mark_submitting_hook=None,
         mark_submit_phase_hook=None,
         enqueue_unknown_hook=None,
+        load_risk_state=None,
+        save_risk_state=None,
     ) -> BotRuntime:
         """Register a new BotRuntime.  Raises ValueError if one already exists."""
         async with self._lock:
@@ -109,6 +111,8 @@ class RuntimeRegistry:
                 mark_submitting_hook=mark_submitting_hook,
                 mark_submit_phase_hook=mark_submit_phase_hook,
                 enqueue_unknown_hook=enqueue_unknown_hook,
+                load_risk_state=load_risk_state,
+                save_risk_state=save_risk_state,
             )
             self._runtimes[bot_instance_id] = runtime
         logger.info(

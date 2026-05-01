@@ -16,6 +16,7 @@ from app.models import (
     BotRuntimeSnapshot,
     BrokerConnection,
     Strategy,
+    Subscription,
     User,
     WorkspaceMember,
 )
@@ -191,6 +192,52 @@ async def create_bot(
 ):
     await _assert_same_workspace(workspace_id, body.strategy_id, body.broker_connection_id, db)
     await _validate_live_mode_requirements(workspace_id, body.mode, body.broker_connection_id, db)
+
+    # P5.1: Entitlement enforcement — check plan limits before creating bot.
+    try:
+        from billing_service.entitlements import EntitlementService
+
+        sub_result = await db.execute(
+            select(Subscription).where(Subscription.user_id == str(current_user.id))
+        )
+        sub = sub_result.scalar_one_or_none()
+        plan = str(getattr(sub, "plan", "free") or "free") if sub else "free"
+        sub_status = str(getattr(sub, "status", "active") or "active") if sub else "active"
+
+        entitlement = EntitlementService()
+
+        # Check live trading entitlement
+        if str(body.mode or "").lower() == "live" and not entitlement.can_use_live_trading(plan):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Plan '{plan}' does not allow live trading. Upgrade to Starter or higher.",
+            )
+
+        # Check bot count limit
+        bot_count_result = await db.execute(
+            select(BotInstance).where(BotInstance.workspace_id == workspace_id)
+        )
+        current_bot_count = len(bot_count_result.scalars().all())
+        if not entitlement.can_create_bot(plan, current_bot_count):
+            limits = entitlement.get_limits(plan)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Plan '{plan}' allows a maximum of {limits['max_bots']} bot(s). "
+                    "Upgrade your plan to create more bots."
+                ),
+            )
+
+        if sub_status not in {"active", "trialing"}:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Subscription is not active (status={sub_status}). Renew your subscription.",
+            )
+    except HTTPException:
+        raise
+    except ImportError:
+        pass  # billing_service not installed — allow in development/test environments
+
     bot = BotInstance(
         workspace_id=workspace_id,
         name=body.name,

@@ -2,9 +2,13 @@
 
 Requires ``pybit`` package (pip install pybit).
 In live mode without the package the provider refuses to connect.
+
+All pybit HTTP SDK calls are blocking (synchronous).  They are run in a
+thread via ``asyncio.to_thread`` so the asyncio event loop is never blocked.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -66,6 +70,10 @@ class BybitProvider(BrokerProvider):
                 "BybitProvider requires the pybit package. Install: pip install pybit"
             )
 
+    async def _sdk(self, fn: Any, /, **kwargs: Any) -> Any:
+        """Run a blocking pybit SDK method in a thread to avoid blocking the event loop."""
+        return await asyncio.to_thread(fn, **kwargs)
+
     def _normalize_qty(self, qty: float) -> float:
         info = self._instrument_info or {}
         lot = info.get("lotSizeFilter", {}) if isinstance(info, dict) else {}
@@ -108,10 +116,12 @@ class BybitProvider(BrokerProvider):
             api_key=self.api_key,
             api_secret=self.api_secret,
         )
-        resp = self._session.get_wallet_balance(accountType="UNIFIED")
+        resp = await self._sdk(self._session.get_wallet_balance, accountType="UNIFIED")
         if resp.get("retCode") != 0:
             raise ConnectionError(self._normalize_error(resp, "bybit_connect_failed"))
-        info_resp = self._session.get_instruments_info(category="linear", symbol=self.symbol)
+        info_resp = await self._sdk(
+            self._session.get_instruments_info, category="linear", symbol=self.symbol
+        )
         if info_resp.get("retCode") == 0 and info_resp.get("result", {}).get("list"):
             self._instrument_info = info_resp["result"]["list"][0]
         if not self._instrument_info:
@@ -125,7 +135,7 @@ class BybitProvider(BrokerProvider):
 
     async def get_account_info(self) -> AccountInfo:
         self._require_sdk()
-        resp = self._session.get_wallet_balance(accountType="UNIFIED")
+        resp = await self._sdk(self._session.get_wallet_balance, accountType="UNIFIED")
         if resp.get("retCode") != 0:
             raise RuntimeError(self._normalize_error(resp, "bybit_wallet_failed"))
         wallet = (resp.get("result", {}).get("list") or [{}])[0]
@@ -145,7 +155,9 @@ class BybitProvider(BrokerProvider):
     async def get_candles(self, symbol: str, timeframe: str, limit: int = 200) -> pd.DataFrame:
         self._require_sdk()
         interval = _TF_MAP.get(timeframe, "5")
-        resp = self._session.get_kline(category="linear", symbol=symbol, interval=interval, limit=limit)
+        resp = await self._sdk(
+            self._session.get_kline, category="linear", symbol=symbol, interval=interval, limit=limit
+        )
         if resp.get("retCode") != 0:
             return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
         rows = resp["result"]["list"]
@@ -161,7 +173,9 @@ class BybitProvider(BrokerProvider):
         if self._session is None:
             return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(request.volume), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message="Bybit session not connected", submit_status="UNKNOWN", fill_status="UNKNOWN")
         if not self._instrument_info:
-            info_resp = self._session.get_instruments_info(category="linear", symbol=request.symbol)
+            info_resp = await self._sdk(
+                self._session.get_instruments_info, category="linear", symbol=request.symbol
+            )
             if info_resp.get("retCode") == 0 and info_resp.get("result", {}).get("list"):
                 self._instrument_info = info_resp["result"]["list"][0]
         status = str(self._instrument_info.get("status") or "Trading")
@@ -172,7 +186,8 @@ class BybitProvider(BrokerProvider):
             return OrderResult(order_id="", symbol=request.symbol, side=request.side, volume=float(request.volume), fill_price=float(request.price or 0.0), commission=0.0, success=False, error_message="Bybit preflight failed: insufficient_available_balance", submit_status="REJECTED", fill_status="UNKNOWN")
         qty = self._normalize_qty(float(request.volume))
         link_id = str(request.comment or f"{request.symbol}-{int(__import__('time').time()*1000)}")[:36]
-        resp = self._session.place_order(
+        resp = await self._sdk(
+            self._session.place_order,
             category="linear",
             symbol=request.symbol,
             side="Buy" if request.side.lower() == "buy" else "Sell",
@@ -192,14 +207,19 @@ class BybitProvider(BrokerProvider):
         # Verify submit state after broker acknowledgement.
         order_status = None
         try:
-            verify_resp = self._session.get_open_orders(category="linear", symbol=request.symbol, orderId=order_id, limit=1)
+            verify_resp = await self._sdk(
+                self._session.get_open_orders,
+                category="linear", symbol=request.symbol, orderId=order_id, limit=1,
+            )
             if verify_resp.get("retCode") == 0 and verify_resp.get("result", {}).get("list"):
                 order_status = str(verify_resp["result"]["list"][0].get("orderStatus") or "")
         except Exception:
             order_status = None
         if order_status and order_status.lower() in {"rejected", "cancelled", "deactivated"}:
             return OrderResult(order_id=order_id, symbol=request.symbol, side=request.side, volume=float(qty), fill_price=float(fill_price or 0.0), commission=0.0, success=False, error_message=f"bybit_order_failed:status_{order_status}", submit_status="REJECTED", fill_status="UNKNOWN", raw_response={"place": dict(resp), "verify": verify_resp if 'verify_resp' in locals() else {}})
-        exec_resp = self._session.get_executions(category="linear", orderId=order_id, limit=1)
+        exec_resp = await self._sdk(
+            self._session.get_executions, category="linear", orderId=order_id, limit=1
+        )
         if exec_resp.get("retCode") == 0 and exec_resp.get("result", {}).get("list"):
             exec_row = exec_resp["result"]["list"][0]
             fill_price = float(exec_row.get("execPrice", fill_price))
@@ -225,7 +245,8 @@ class BybitProvider(BrokerProvider):
         if pos is None:
             return OrderResult(order_id=position_id, symbol="", side="close", volume=0.0, fill_price=0.0, commission=0.0, success=False, error_message=f"Position {position_id} not found")
         close_side = "Sell" if pos["side"] == "BUY" else "Buy"
-        resp = self._session.place_order(
+        resp = await self._sdk(
+            self._session.place_order,
             category="linear",
             symbol=pos["symbol"],
             side=close_side,
@@ -239,7 +260,7 @@ class BybitProvider(BrokerProvider):
 
     async def get_open_positions(self) -> List[Dict[str, Any]]:
         self._require_sdk()
-        resp = self._session.get_positions(category="linear", symbol=self.symbol)
+        resp = await self._sdk(self._session.get_positions, category="linear", symbol=self.symbol)
         if resp.get("retCode") != 0:
             return []
         return [
@@ -259,7 +280,7 @@ class BybitProvider(BrokerProvider):
 
     async def get_trade_history(self, limit: int = 100) -> List[Dict[str, Any]]:
         self._require_sdk()
-        resp = self._session.get_executions(category="linear", limit=limit)
+        resp = await self._sdk(self._session.get_executions, category="linear", limit=limit)
         if resp.get("retCode") != 0:
             return []
         return [
@@ -283,7 +304,7 @@ class BybitProvider(BrokerProvider):
         if self.testnet and self.mode != "demo":
             return {"status": "degraded", "reason": "provider_mode_mismatch"}
         try:
-            wallet = self._session.get_wallet_balance(accountType="UNIFIED")
+            wallet = await self._sdk(self._session.get_wallet_balance, accountType="UNIFIED")
             if wallet.get("retCode") != 0:
                 return {"status": "auth_failed", "reason": self._normalize_error(wallet, "wallet_failed")}
             return {"status": "healthy", "reason": ""}
@@ -300,7 +321,7 @@ class BybitProvider(BrokerProvider):
 
     async def get_instrument_spec(self, symbol: str) -> Optional[Dict[str, Any]]:
         self._require_sdk()
-        resp = self._session.get_instruments_info(category="linear", symbol=symbol)
+        resp = await self._sdk(self._session.get_instruments_info, category="linear", symbol=symbol)
         if resp.get("retCode") == 0 and resp.get("result", {}).get("list"):
             info = resp["result"]["list"][0]
             lot = info.get("lotSizeFilter", {})
@@ -330,10 +351,14 @@ class BybitProvider(BrokerProvider):
     async def get_order_by_client_id(self, client_order_id: str) -> Optional[Dict[str, Any]]:
         self._require_sdk()
         try:
-            resp = self._session.get_open_orders(category="linear", orderLinkId=client_order_id, limit=1)
+            resp = await self._sdk(
+                self._session.get_open_orders, category="linear", orderLinkId=client_order_id, limit=1
+            )
             if resp.get("retCode") == 0 and resp.get("result", {}).get("list"):
                 return dict(resp["result"]["list"][0])
-            resp = self._session.get_order_history(category="linear", orderLinkId=client_order_id, limit=1)
+            resp = await self._sdk(
+                self._session.get_order_history, category="linear", orderLinkId=client_order_id, limit=1
+            )
             if resp.get("retCode") == 0 and resp.get("result", {}).get("list"):
                 return dict(resp["result"]["list"][0])
         except Exception:
@@ -347,7 +372,9 @@ class BybitProvider(BrokerProvider):
             order_id = order.get("orderId")
             if order_id:
                 try:
-                    resp = self._session.get_executions(category="linear", orderId=order_id, limit=50)
+                    resp = await self._sdk(
+                        self._session.get_executions, category="linear", orderId=order_id, limit=50
+                    )
                     if resp.get("retCode") == 0 and resp.get("result", {}).get("list"):
                         return [dict(r) for r in resp["result"]["list"]]
                 except Exception:
@@ -367,7 +394,7 @@ class BybitProvider(BrokerProvider):
     async def get_server_time(self) -> Optional[float]:
         self._require_sdk()
         try:
-            resp = self._session.get_server_time()
+            resp = await self._sdk(self._session.get_server_time)
             if resp.get("retCode") == 0:
                 ts = resp.get("result", {}).get("timeSecond") or resp.get("result", {}).get("timeNano")
                 if ts:
@@ -380,7 +407,7 @@ class BybitProvider(BrokerProvider):
     async def get_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
         self._require_sdk()
         try:
-            resp = self._session.get_tickers(category="linear", symbol=symbol)
+            resp = await self._sdk(self._session.get_tickers, category="linear", symbol=symbol)
             if resp.get("retCode") == 0 and resp.get("result", {}).get("list"):
                 t = resp["result"]["list"][0]
                 bid = float(t.get("bid1Price") or t.get("lastPrice") or 0)

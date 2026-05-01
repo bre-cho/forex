@@ -1082,11 +1082,14 @@ class GameTheoryEngine:
         self,
         config: Optional[EcosystemConfig] = None,
         seed:   Optional[int]              = None,
+        timeout_seconds: float             = 5.0,
     ) -> None:
         self.config           = config or EcosystemConfig()
         self.seed             = seed
         self._rng             = random.Random(seed)
         self._last_result: Optional[GameTheoryResult] = None
+        # P3.2: Circuit breaker — abort computation if it exceeds this threshold.
+        self._timeout_seconds = max(0.5, float(timeout_seconds))
 
     @property
     def last_result(self) -> Optional[GameTheoryResult]:
@@ -1098,6 +1101,9 @@ class GameTheoryEngine:
 
         Returns GameTheoryResult with Nash equilibrium, best-response genome,
         exploitability scores, and ecosystem insights.
+
+        Raises TimeoutError if computation exceeds self._timeout_seconds.
+        Falls back to the last successful result if one is available.
         """
         t0 = time.time()
         cfg = self.config
@@ -1106,61 +1112,96 @@ class GameTheoryEngine:
             cfg.n_opponents, cfg.n_candidate_genomes, cfg.episodes,
         )
 
-        # ── Phase 1: Spawn opponents ──────────────────────────────── #
-        opponents = self._spawn_opponents(cfg)
+        def _elapsed() -> float:
+            return time.time() - t0
 
-        # ── Phase 2: Candidate genome pool ───────────────────────── #
-        candidates = self._sample_candidates(cfg)
+        def _check_timeout(phase: str) -> None:
+            """Raise TimeoutError if the wall-clock budget is exceeded."""
+            elapsed = _elapsed()
+            if elapsed > self._timeout_seconds:
+                raise TimeoutError(
+                    f"GameTheoryEngine timed out after {elapsed:.2f}s in {phase} "
+                    f"(limit={self._timeout_seconds}s)"
+                )
 
-        # ── Phase 3: Initial ecosystem evaluation (best response) ─── #
-        impact_model = MarketImpactModel(cfg.impact_coefficient, cfg.impact_decay)
-        eco_pnls, eco_rrs, eco_wins, impact_stats, best_genome = (
-            self._evaluate_ecosystem(candidates, opponents, cfg, impact_model)
-        )
-        ecosystem_pf = _compute_pf(eco_pnls)
+        try:
+            # ── Phase 1: Spawn opponents ──────────────────────────────── #
+            opponents = self._spawn_opponents(cfg)
+            _check_timeout("phase1_spawn_opponents")
 
-        # ── Phase 4: Isolation benchmark (no opponents) ──────────── #
-        # Pure single-agent MarketSimulator for comparison
-        isolation_sim  = MarketSimulator(
-            episodes=cfg.episodes, bars=cfg.bars_per_episode, seed=self.seed,
-        )
-        isolation_fit  = isolation_sim.evaluate(best_genome)
-        isolation_pf   = isolation_fit.profit_factor
+            # ── Phase 2: Candidate genome pool ───────────────────────── #
+            candidates = self._sample_candidates(cfg)
+            _check_timeout("phase2_candidate_genomes")
 
-        # ── Phase 5: Nash Equilibrium via IBR ────────────────────── #
-        nash_finder = NashEquilibriumFinder()
-        nash = nash_finder.find(candidates, opponents, cfg, self.seed)
+            # ── Phase 3: Initial ecosystem evaluation (best response) ─── #
+            impact_model = MarketImpactModel(cfg.impact_coefficient, cfg.impact_decay)
+            eco_pnls, eco_rrs, eco_wins, impact_stats, best_genome = (
+                self._evaluate_ecosystem(candidates, opponents, cfg, impact_model)
+            )
+            ecosystem_pf = _compute_pf(eco_pnls)
+            _check_timeout("phase3_ecosystem_eval")
 
-        # ── Phase 6: Exploitability scoring ──────────────────────── #
-        exp_scorer  = ExploitabilityScorer()
-        exploitability = exp_scorer.score(nash.our_strategy, opponents, cfg, self.seed)
+            # ── Phase 4: Isolation benchmark (no opponents) ──────────── #
+            # Pure single-agent MarketSimulator for comparison
+            isolation_sim  = MarketSimulator(
+                episodes=cfg.episodes, bars=cfg.bars_per_episode, seed=self.seed,
+            )
+            isolation_fit  = isolation_sim.evaluate(best_genome)
+            isolation_pf   = isolation_fit.profit_factor
+            _check_timeout("phase4_isolation_benchmark")
 
-        # ── Phase 7: Insights ─────────────────────────────────────── #
-        insights = self._build_insights(
-            nash, exploitability, ecosystem_pf, isolation_pf,
-            impact_stats, opponents, cfg,
-        )
+            # ── Phase 5: Nash Equilibrium via IBR ────────────────────── #
+            nash_finder = NashEquilibriumFinder()
+            nash = nash_finder.find(candidates, opponents, cfg, self.seed)
+            _check_timeout("phase5_nash_equilibrium")
 
-        duration = time.time() - t0
-        logger.info(
-            "GameTheoryEngine: done in %.2fs | nash_value=%.3f eco_pf=%.3f iso_pf=%.3f",
-            duration, nash.nash_value, ecosystem_pf, isolation_pf,
-        )
+            # ── Phase 6: Exploitability scoring ──────────────────────── #
+            exp_scorer  = ExploitabilityScorer()
+            exploitability = exp_scorer.score(nash.our_strategy, opponents, cfg, self.seed)
+            _check_timeout("phase6_exploitability")
 
-        result = GameTheoryResult(
-            best_response_genome = nash.our_strategy,
-            nash_equilibrium     = nash,
-            exploitability       = exploitability,
-            ecosystem_pf         = round(ecosystem_pf, 3),
-            isolation_pf         = round(isolation_pf, 3),
-            impact_stats         = impact_stats,
-            ecosystem_insights   = insights,
-            ecosystem_config     = cfg,
-            n_opponents          = len(opponents),
-            duration_secs        = round(duration, 3),
-        )
-        self._last_result = result
-        return result
+            # ── Phase 7: Insights ─────────────────────────────────────── #
+            insights = self._build_insights(
+                nash, exploitability, ecosystem_pf, isolation_pf,
+                impact_stats, opponents, cfg,
+            )
+
+            duration = _elapsed()
+            logger.info(
+                "GameTheoryEngine: done in %.2fs | nash_value=%.3f eco_pf=%.3f iso_pf=%.3f",
+                duration, nash.nash_value, ecosystem_pf, isolation_pf,
+            )
+
+            result = GameTheoryResult(
+                best_response_genome = nash.our_strategy,
+                nash_equilibrium     = nash,
+                exploitability       = exploitability,
+                ecosystem_pf         = round(ecosystem_pf, 3),
+                isolation_pf         = round(isolation_pf, 3),
+                impact_stats         = impact_stats,
+                ecosystem_insights   = insights,
+                ecosystem_config     = cfg,
+                n_opponents          = len(opponents),
+                duration_secs        = round(duration, 3),
+            )
+            self._last_result = result
+            return result
+
+        except TimeoutError as timeout_exc:
+            # P3.2: Circuit breaker — return last cached result or re-raise.
+            logger.error(
+                "GameTheoryEngine circuit breaker tripped: %s. "
+                "Returning last cached result if available.",
+                timeout_exc,
+            )
+            if self._last_result is not None:
+                logger.warning(
+                    "GameTheoryEngine: using stale result from previous run "
+                    "(duration=%.2fs)",
+                    self._last_result.duration_secs,
+                )
+                return self._last_result
+            raise
 
     # ── Internal helpers ─────────────────────────────────────────── #
 
