@@ -174,6 +174,9 @@ class BybitTickStream(ITickStream):
         try:
             import websockets
 
+            _reconnect_attempt = 0
+            _max_backoff = 30.0
+
             while self._running and self._ws is not None:
                 try:
                     raw = await asyncio.wait_for(self._ws.recv(), timeout=30.0)
@@ -182,12 +185,29 @@ class BybitTickStream(ITickStream):
                     if tick is not None:
                         await self._queue.put(tick)
                         self._record_tick()
+                    # Reset backoff counter on successful message.
+                    _reconnect_attempt = 0
                 except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
                     if self._running:
-                        logger.warning("BybitTickStream: connection lost, reconnecting...")
+                        # Exponential backoff: 1 s → 2 s → 4 s … capped at 30 s.
+                        backoff = min(_max_backoff, float(2 ** _reconnect_attempt))
+                        _reconnect_attempt += 1
                         self.stats.reconnects += 1
-                        await asyncio.sleep(self._reconnect_delay)
-                        await self._connect()
+                        logger.warning(
+                            "BybitTickStream: connection lost, reconnecting in %.1fs "
+                            "(attempt %d)...",
+                            backoff,
+                            _reconnect_attempt,
+                        )
+                        await asyncio.sleep(backoff)
+                        try:
+                            await self._connect()
+                        except Exception as reconnect_exc:
+                            logger.error(
+                                "BybitTickStream: reconnect attempt %d failed: %s",
+                                _reconnect_attempt,
+                                reconnect_exc,
+                            )
                 except Exception as exc:
                     self.stats.errors += 1
                     logger.warning("BybitTickStream reader error: %s", exc)

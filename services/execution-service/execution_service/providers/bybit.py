@@ -97,9 +97,12 @@ class BybitProvider(BrokerProvider):
             self._require_sdk()
             self._ensure_live_key_not_testnet_like()
         if not _BYBIT_AVAILABLE:
-            logger.warning("pybit SDK unavailable; BybitProvider in stub/paper mode only")
-            self._connected = False
-            return
+            # SDK is required for both demo and live modes.  Use PaperProvider
+            # when running without a real broker connection.
+            raise RuntimeError(
+                "BybitProvider requires the pybit package (pip install pybit). "
+                "Use PaperProvider for offline simulation."
+            )
         self._session = _BybitHTTP(
             testnet=self.testnet,
             api_key=self.api_key,
