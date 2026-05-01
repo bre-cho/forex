@@ -5,6 +5,7 @@ in a thread executor so they do not block the asyncio event loop).
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
@@ -12,6 +13,31 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# MT5 limits the comment field to 31 characters.  Idempotency keys are
+# typically UUIDs (36 chars) so we must shorten them without losing
+# uniqueness.  We produce a deterministic 31-char hex prefix that is
+# derived from the full key so that get_order_by_client_id can still
+# match via the comment field.  The full key must also be stored in DB
+# (SubmitOutbox / ReconciliationQueue) for audit purposes.
+
+_COMMENT_MAX_LEN = 31
+_COMMENT_HASH_LEN = 16  # hex chars from sha256 prefix
+
+
+def _truncate_comment(comment: str) -> str:
+    """Return a comment string that fits within MT5's 31-char limit.
+
+    If ``comment`` is already ≤31 chars it is returned unchanged.
+    Otherwise a deterministic 31-char string is produced:
+        ``K`` + first 16 hex chars of sha256(comment)
+    The ``K`` prefix lets lookups distinguish hashed keys from raw
+    short comments.
+    """
+    if len(comment) <= _COMMENT_MAX_LEN:
+        return comment
+    digest = hashlib.sha256(comment.encode("utf-8")).hexdigest()
+    return "K" + digest[:_COMMENT_MAX_LEN - 1]
 
 try:
     import MetaTrader5 as _mt5  # type: ignore[import]
@@ -216,7 +242,7 @@ class MT5Session:
             "price": price,
             "deviation": 20,
             "magic": 234000,
-            "comment": comment[:31],  # MT5 limits comment to 31 chars
+            "comment": _truncate_comment(comment),
             "type_time": _mt5.ORDER_TIME_GTC,
             "type_filling": _mt5.ORDER_FILLING_IOC,
         }
@@ -326,12 +352,16 @@ class MT5Session:
 
         from_date = datetime.now() - timedelta(days=7)
         orders = _mt5.history_orders_get(from_date, datetime.now()) or []
+        # Build both the raw key and its hashed comment form so we match
+        # regardless of whether the key was truncated at order submission.
+        truncated = _truncate_comment(str(client_order_id))
         for o in orders:
-            if str(getattr(o, "comment", "") or "") == str(client_order_id):
+            comment = str(getattr(o, "comment", "") or "")
+            if comment == str(client_order_id) or comment == truncated:
                 return {
                     "id": str(o.ticket),
                     "symbol": o.symbol,
-                    "comment": str(getattr(o, "comment", "")),
+                    "comment": comment,
                 }
         return None
 
@@ -341,6 +371,7 @@ class MT5Session:
 
         from_date = datetime.now() - timedelta(days=7)
         deals = _mt5.history_deals_get(from_date, datetime.now()) or []
+        truncated = _truncate_comment(str(client_order_id))
         return [
             {
                 "id": str(d.ticket),
@@ -351,7 +382,7 @@ class MT5Session:
                 "price": float(d.price),
             }
             for d in deals
-            if str(getattr(d, "comment", "") or "") == str(client_order_id)
+            if str(getattr(d, "comment", "") or "") in {str(client_order_id), truncated}
         ]
 
     def health_check(self) -> Dict[str, Any]:

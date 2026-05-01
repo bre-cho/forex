@@ -15,9 +15,16 @@ except Exception:  # noqa: BLE001
 class TradingBrainBridge:
     """Adapter that wires backend/core engines into the AI Trading Brain."""
 
-    def __init__(self, app_state: Any) -> None:
+    def __init__(self, app_state: Any, *, runtime_mode: str = "paper") -> None:
         self.app_state = app_state
+        self._runtime_mode = str(runtime_mode or "paper").lower()
         self.available = ForexBrainRuntime is not None
+        if not self.available and self._runtime_mode == "live":
+            raise RuntimeError(
+                "TradingBrainBridge: ai_trading_brain package is unavailable but "
+                "runtime_mode=live. Install the package or disable brain-assisted "
+                "trading for live mode."
+            )
         self.runtime = self._build_runtime() if self.available else None
 
     def _build_runtime(self) -> Any:
@@ -50,6 +57,11 @@ class TradingBrainBridge:
 
     def preview_cycle(self, *, symbol: str, broker: str, signal: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         if not self.available or self.runtime is None or BrainInput is None:
+            if self._runtime_mode == "live":
+                raise RuntimeError(
+                    "TradingBrainBridge: preview_cycle called in live mode but "
+                    "ai_trading_brain package is unavailable. Cannot return SKIP in live mode."
+                )
             return {"action": "SKIP", "reason": "brain_stub_unavailable", "mode": "stub"}
         item = BrainInput(
             symbol=symbol,

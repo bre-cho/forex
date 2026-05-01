@@ -105,9 +105,12 @@ class MT5Provider(BrokerProvider):
         if self.live:
             self._require_sdk()
         if not _MT5_AVAILABLE:
-            logger.warning("MT5 SDK unavailable; running in stub/paper mode only")
-            self._connected = False
-            return
+            # SDK is required for both demo and live modes.  Use PaperProvider
+            # when running without a real broker connection.
+            raise RuntimeError(
+                "MT5Provider requires the MetaTrader5 package (Windows-only). "
+                "Use PaperProvider for offline simulation."
+            )
         if not _mt5_sdk.initialize(login=self.login, password=self.password, server=self.server):
             raise ConnectionError(f"MT5 initialize failed: {_mt5_sdk.last_error()}")
         info = _mt5_sdk.account_info()

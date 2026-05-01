@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -31,6 +32,7 @@ class PaperProvider(BrokerProvider):
         self._positions: List[Dict[str, Any]] = []
         self._history: List[Dict[str, Any]] = []
         self._connected = False
+        self._last_candles: Optional[pd.DataFrame] = None
 
     async def connect(self) -> None:
         self._connected = True
@@ -53,20 +55,33 @@ class PaperProvider(BrokerProvider):
     async def get_candles(self, symbol: str, timeframe: str, limit: int = 200) -> pd.DataFrame:
         import numpy as np
 
-        rng = np.random.default_rng(seed=42)
+        # Use a time-based seed so each call produces different (but plausible) data.
+        seed = int(time.time() * 1000) % (2 ** 31)
+        rng = np.random.default_rng(seed=seed)
         closes = 1.10000 + rng.normal(0, 0.0005, limit).cumsum()
         opens = closes - rng.normal(0, 0.0002, limit)
         highs = np.maximum(closes, opens) + rng.uniform(0, 0.0003, limit)
         lows = np.minimum(closes, opens) - rng.uniform(0, 0.0003, limit)
         volumes = rng.integers(100, 1000, limit).astype(float)
 
-        return pd.DataFrame(
+        df = pd.DataFrame(
             {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes}
         )
+        self._last_candles = df
+        return df
+
+    def _current_mid_price(self) -> float:
+        """Return the latest close price from cached candles, or a neutral default."""
+        if self._last_candles is not None and not self._last_candles.empty:
+            return float(self._last_candles["close"].iloc[-1])
+        return 1.10000
 
     async def place_order(self, request: OrderRequest) -> OrderResult:
         order_id = str(uuid.uuid4())
-        fill_price = request.price or 1.10000
+        # Use the explicitly supplied price when given; otherwise derive the
+        # mid-price from the most recently fetched candle series so that paper
+        # fill prices are symbol-aware and vary over time.
+        fill_price = float(request.price) if request.price is not None and float(request.price) > 0 else self._current_mid_price()
         position = {
             "position_id": order_id,
             "symbol": request.symbol,
@@ -101,7 +116,7 @@ class PaperProvider(BrokerProvider):
                 error_message="Position not found",
             )
         self._positions = [p for p in self._positions if p["position_id"] != position_id]
-        close_price = position["open_price"] + 0.0002
+        close_price = self._current_mid_price()
         self._history.append({**position, "close_price": close_price})
         return OrderResult(
             order_id=position_id, symbol=position["symbol"], side="close",

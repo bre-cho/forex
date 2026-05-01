@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,51 @@ def _round_step(value: float, step: float) -> float:
     return round(round(value / step) * step, 8)
 
 
-def calculate_position_size(inp: PositionSizingInput) -> PositionSizingResult:
+def apply_instrument_spec(inp: PositionSizingInput, spec: Dict[str, Any]) -> PositionSizingInput:
+    """Return a new *PositionSizingInput* with broker-provided instrument limits.
+
+    ``spec`` is the dict returned by ``provider.get_instrument_spec(symbol)``
+    (or ``MT5Session.get_instrument_spec``).  Only the fields that are present
+    and positive in *spec* override the defaults in *inp*.
+
+    This ensures that lot sizing always respects the live broker's actual
+    ``min_lot``, ``max_lot``, ``lot_step``, ``pip_size``, and
+    ``pip_value_per_lot`` constraints rather than hard-coded defaults.
+    """
+    if not spec:
+        return inp
+
+    def _pos(key: str, fallback: float) -> float:
+        v = float(spec.get(key) or 0.0)
+        return v if v > 0 else fallback
+
+    return PositionSizingInput(
+        equity=inp.equity,
+        risk_pct=inp.risk_pct,
+        entry_price=inp.entry_price,
+        stop_loss=inp.stop_loss,
+        pip_size=_pos("pip_size", inp.pip_size),
+        pip_value_per_lot=_pos("pip_value_per_lot", inp.pip_value_per_lot),
+        min_lot=_pos("min_lot", inp.min_lot),
+        max_lot=_pos("max_lot", inp.max_lot),
+        lot_step=_pos("lot_step", inp.lot_step),
+        rounding_policy=inp.rounding_policy,
+    )
+
+
+def calculate_position_size(
+    inp: PositionSizingInput,
+    instrument_spec: Optional[Dict[str, Any]] = None,
+) -> PositionSizingResult:
+    """Calculate position size.
+
+    When *instrument_spec* is provided (live broker dict), its constraints
+    override the values in *inp* before calculation so that the resulting lot
+    always complies with the live broker's limits.
+    """
+    if instrument_spec:
+        inp = apply_instrument_spec(inp, instrument_spec)
+
     equity = max(0.0, float(inp.equity or 0.0))
     risk_pct = max(0.0, float(inp.risk_pct or 0.0))
     entry = float(inp.entry_price or 0.0)
