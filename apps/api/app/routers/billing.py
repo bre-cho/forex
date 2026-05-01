@@ -15,6 +15,9 @@ from app.schemas import CheckoutRequest, SubscriptionOut
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/billing", tags=["billing"])
 
+# Number of failed payment attempts before hard revocation of subscription.
+_MAX_PAYMENT_FAILURE_ATTEMPTS = 3
+
 
 @router.post("/checkout")
 async def create_checkout(
@@ -209,8 +212,8 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                     "subscription=%s status→past_due",
                     stripe_customer_id, attempt_count, sub.stripe_subscription_id,
                 )
-                # Hard revocation after 3 failed attempts (grace period exhausted).
-                if attempt_count >= 3:
+                # Hard revocation after max failed attempts (grace period exhausted).
+                if attempt_count >= _MAX_PAYMENT_FAILURE_ATTEMPTS:
                     sub.status = "canceled"
                     sub.plan = "free"
                     paused = await _pause_live_bots_for_user(sub.user_id, db)

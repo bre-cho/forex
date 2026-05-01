@@ -45,7 +45,7 @@ class PaperProvider(BrokerProvider):
         self.mode = "paper"
         self._balance = initial_balance
         self._equity = initial_balance
-        self._leverage = int(leverage) if leverage > 0 else _DEFAULT_LEVERAGE
+        self._leverage = int(leverage) if leverage and leverage > 0 else _DEFAULT_LEVERAGE
         self._positions: List[Dict[str, Any]] = []
         self._history: List[Dict[str, Any]] = []
         self._connected = False

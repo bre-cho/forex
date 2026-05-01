@@ -205,6 +205,7 @@ class BybitProvider(BrokerProvider):
         fill_price = request.price or 0.0
         commission = 0.0
         # Verify submit state after broker acknowledgement.
+        verify_resp: dict = {}
         order_status = None
         try:
             verify_resp = await self._sdk(
@@ -216,7 +217,7 @@ class BybitProvider(BrokerProvider):
         except Exception:
             order_status = None
         if order_status and order_status.lower() in {"rejected", "cancelled", "deactivated"}:
-            return OrderResult(order_id=order_id, symbol=request.symbol, side=request.side, volume=float(qty), fill_price=float(fill_price or 0.0), commission=0.0, success=False, error_message=f"bybit_order_failed:status_{order_status}", submit_status="REJECTED", fill_status="UNKNOWN", raw_response={"place": dict(resp), "verify": verify_resp if 'verify_resp' in locals() else {}})
+            return OrderResult(order_id=order_id, symbol=request.symbol, side=request.side, volume=float(qty), fill_price=float(fill_price or 0.0), commission=0.0, success=False, error_message=f"bybit_order_failed:status_{order_status}", submit_status="REJECTED", fill_status="UNKNOWN", raw_response={"place": dict(resp), "verify": verify_resp})
         exec_resp = await self._sdk(
             self._session.get_executions, category="linear", orderId=order_id, limit=1
         )
@@ -235,7 +236,7 @@ class BybitProvider(BrokerProvider):
             submit_status="ACKED",
             fill_status="FILLED" if fill_price and float(fill_price) > 0 else "PENDING",
             broker_deal_id=str((exec_resp.get("result", {}).get("list") or [{}])[0].get("execId") or "") or None,
-            raw_response={"place": dict(resp), "verify": verify_resp if 'verify_resp' in locals() else {}, "executions": dict(exec_resp)},
+            raw_response={"place": dict(resp), "verify": verify_resp, "executions": dict(exec_resp)},
         )
 
     async def close_position(self, position_id: str) -> OrderResult:

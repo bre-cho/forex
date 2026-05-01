@@ -922,7 +922,7 @@ def _runtime_hooks(bot_id: str, bot_mode: str):
 
     # P1.1: Redis-backed risk state persistence hooks.
     # Key: bot:{bot_id}:risk_state — TTL 25 hours so state survives overnight restart.
-    _RISK_STATE_TTL = 90_000  # ~25 hours
+    _RISK_STATE_TTL = 25 * 60 * 60  # 25 hours in seconds
 
     async def load_risk_state(bid: str) -> dict | None:
         try:

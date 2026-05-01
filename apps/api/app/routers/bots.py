@@ -1,6 +1,8 @@
 """Bots router — CRUD + lifecycle (start/stop/pause/resume) + runtime."""
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db
 from app.core.config import get_settings
 from app.dependencies.auth import get_current_user
+
+logger = logging.getLogger(__name__)
 from app.dependencies.permissions import require_workspace_role
 from app.models import (
     AuditLog,
@@ -236,7 +240,12 @@ async def create_bot(
     except HTTPException:
         raise
     except ImportError:
-        pass  # billing_service not installed — allow in development/test environments
+        # billing_service not installed — allow creation but log a warning so that
+        # operators are alerted if this happens unexpectedly in production.
+        logger.warning(
+            "billing_service not available; entitlement checks skipped for bot creation. "
+            "Ensure billing_service is installed in production environments."
+        )
 
     bot = BotInstance(
         workspace_id=workspace_id,

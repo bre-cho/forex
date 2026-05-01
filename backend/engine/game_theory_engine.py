@@ -1052,6 +1052,9 @@ class GameTheoryResult:
 
 # ── GameTheoryEngine ──────────────────────────────────────────────────────── #
 
+_MIN_TIMEOUT_SECONDS: float = 0.5  # P3.2: minimum allowed timeout for circuit breaker
+
+
 class GameTheoryEngine:
     """
     Multi-Agent Game Theory + Market Ecosystem Engine.
@@ -1088,8 +1091,7 @@ class GameTheoryEngine:
         self.seed             = seed
         self._rng             = random.Random(seed)
         self._last_result: Optional[GameTheoryResult] = None
-        # P3.2: Circuit breaker — abort computation if it exceeds this threshold.
-        self._timeout_seconds = max(0.5, float(timeout_seconds))
+        self._timeout_seconds = max(_MIN_TIMEOUT_SECONDS, float(timeout_seconds))
 
     @property
     def last_result(self) -> Optional[GameTheoryResult]:
