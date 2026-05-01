@@ -4,7 +4,7 @@ import pytest
 
 from execution_service.execution_engine import ExecutionEngine
 from execution_service.providers.base import ExecutionCommand, OrderRequest, PreExecutionContext, OrderResult
-from trading_core.runtime.pre_execution_gate import hash_gate_context
+from trading_core.runtime.pre_execution_gate import hash_gate_context, build_frozen_context_id, sign_gate_context
 
 
 class _LiveProvider:
@@ -53,7 +53,7 @@ class _LiveProvider:
 
 
 def _command() -> ExecutionCommand:
-    gate_context = {
+    gate_context: dict = {
         "schema_version": "gate_context_v2",
         "provider_mode": "live",
         "runtime_mode": "live",
@@ -88,7 +88,15 @@ def _command() -> ExecutionCommand:
         "risk_context_hash": "risk_hash_1",
         "idempotency_key": "idem-1",
         "approved_volume": 0.01,
+        "stop_loss": 1.0900,
+        "context_signature": "",
+        "frozen_context_id": "",
     }
+    # P0.3: compute frozen_context_id and sign the gate context before freezing
+    frozen_context_id = build_frozen_context_id(gate_context)
+    context_signature = sign_gate_context(gate_context, secret="test_secret_for_unit_tests") or "test_sig"
+    gate_context["frozen_context_id"] = frozen_context_id
+    gate_context["context_signature"] = context_signature
     ctx = PreExecutionContext(
         bot_instance_id="bot-1",
         runtime_mode="live",
@@ -116,6 +124,8 @@ def _command() -> ExecutionCommand:
         policy_version="v1",
         gate_context=gate_context,
         context_hash=hash_gate_context(gate_context),
+        frozen_context_id=frozen_context_id,
+        context_signature=context_signature,
     )
     return ExecutionCommand(
         request=OrderRequest(

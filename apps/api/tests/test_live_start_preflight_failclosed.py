@@ -86,6 +86,7 @@ async def test_preflight_fails_closed_if_equity_sync_raises():
              patch("app.services.live_start_preflight.ProviderCertificationService.get_live_gate_status", AsyncMock(return_value={"ok": True, "reason": "ok", "record": None})), \
          patch("app.services.live_start_preflight.ReconciliationDaemonHealthService.is_healthy", AsyncMock(return_value=True)), \
             patch("app.services.live_start_preflight.SubmitOutboxRecoveryHealthService.is_healthy", AsyncMock(return_value=True)), \
+         patch("app.services.live_start_preflight.SubmitOutboxService.list_stale_submit_phases", AsyncMock(return_value=[])), \
          patch("app.services.live_start_preflight.PolicyService", return_value=policy_mock):
         with pytest.raises(LiveStartPreflightError, match="broker_equity_sync_failed"):
             await run_live_start_preflight(bot=bot, provider=provider, db=db)
@@ -121,6 +122,7 @@ async def test_preflight_fails_if_equity_is_zero():
              patch("app.services.live_start_preflight.ProviderCertificationService.get_live_gate_status", AsyncMock(return_value={"ok": True, "reason": "ok", "record": None})), \
          patch("app.services.live_start_preflight.ReconciliationDaemonHealthService.is_healthy", AsyncMock(return_value=True)), \
             patch("app.services.live_start_preflight.SubmitOutboxRecoveryHealthService.is_healthy", AsyncMock(return_value=True)), \
+         patch("app.services.live_start_preflight.SubmitOutboxService.list_stale_submit_phases", AsyncMock(return_value=[])), \
          patch("app.services.live_start_preflight.PolicyService", return_value=policy_mock):
         with pytest.raises(LiveStartPreflightError, match="account_equity_invalid"):
             await run_live_start_preflight(bot=bot, provider=provider, db=db)
@@ -168,6 +170,7 @@ async def test_preflight_blocks_when_unknown_orders_unresolved():
              patch("app.services.live_start_preflight.ProviderCertificationService.get_live_gate_status", AsyncMock(return_value={"ok": True, "reason": "ok", "record": None})), \
          patch("app.services.live_start_preflight.ReconciliationDaemonHealthService.is_healthy", AsyncMock(return_value=True)), \
             patch("app.services.live_start_preflight.SubmitOutboxRecoveryHealthService.is_healthy", AsyncMock(return_value=True)), \
+         patch("app.services.live_start_preflight.SubmitOutboxService.list_stale_submit_phases", AsyncMock(return_value=[])), \
          patch("app.services.live_start_preflight.PolicyService", return_value=policy_mock), \
          patch("app.services.live_start_preflight.DailyTradingStateService", return_value=daily_svc), \
          patch("app.services.live_start_preflight.ReconciliationQueueService", return_value=queue_svc):

@@ -34,6 +34,12 @@ class LiveReadinessGuard:
             return ReadinessResult(False, "provider_not_connected")
 
         mode = str(getattr(provider, "mode", "unknown")).lower()
+        if require_live and mode != "live":
+            return ReadinessResult(
+                False,
+                f"provider_mode_must_be_live:{mode}",
+                details={"provider_mode": mode, "required_mode": "live"},
+            )
         if require_live and mode in cls.BAD_PROVIDER_MODES:
             return ReadinessResult(False, f"provider_mode_not_allowed:{mode}")
 

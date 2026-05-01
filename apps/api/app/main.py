@@ -29,6 +29,13 @@ async def lifespan(app: FastAPI):
     if settings.is_production and settings.enable_legacy_routes:
         raise RuntimeError("enable_legacy_routes must be false in production")
 
+    # P0.8: Workers are required in production for safety (reconciliation + outbox recovery)
+    if production_like_env():
+        if not settings.enable_reconciliation_daemon:
+            raise RuntimeError("enable_reconciliation_daemon must be true in production")
+        if not settings.enable_submit_outbox_recovery_worker:
+            raise RuntimeError("enable_submit_outbox_recovery_worker must be true in production")
+
     # Boot RuntimeRegistry
     try:
         from trading_core.runtime import RuntimeRegistry

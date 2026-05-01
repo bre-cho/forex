@@ -250,6 +250,12 @@ class PreExecutionGate:
                 return GateResult("BLOCK", "broker_snapshot_hash_missing", severity="critical", operator_action="broker_check")
             if str(context.get("risk_context_hash", "") or "") == "":
                 return GateResult("BLOCK", "risk_context_hash_missing", severity="critical", operator_action="review")
+            requested_volume = float(context.get("requested_volume", 0.0) or 0.0)
+            approved_volume = float(context.get("approved_volume", 0.0) or 0.0)
+            if requested_volume > 0.0 and approved_volume <= 0.0:
+                return GateResult("BLOCK", "approved_volume_missing", severity="critical", operator_action="review")
+            if requested_volume > 0.0 and abs(approved_volume - requested_volume) > 1e-9:
+                return GateResult("BLOCK", "approved_volume_mismatch", severity="critical", operator_action="review")
             if bool(context.get("unknown_orders_unresolved", False)):
                 return GateResult("BLOCK", "unknown_orders_unresolved", severity="critical", operator_action="reconcile")
             broker_server_time = float(context.get("broker_server_time", 0.0) or 0.0)
@@ -260,11 +266,9 @@ class PreExecutionGate:
                 quote_age_seconds = float(context.get("quote_age_seconds", context.get("data_age_seconds", 0.0)) or 0.0)
             if quote_age_seconds > float(self.policy.get("max_quote_age_seconds", 15.0)):
                 return GateResult("BLOCK", "quote_too_old", severity="critical", operator_action="broker_check")
-        # P0.3: SL required in live mode when explicitly configured or provided in context.
-        # This keeps backwards compatibility for legacy tests/contexts that do not include stop_loss.
+        # P0.3: SL required in live by default unless policy explicitly disables it.
         if context.get("runtime_mode") == "live":
-            has_stop_loss_field = "stop_loss" in context
-            sl_required = bool(self.policy.get("stop_loss_required_in_live", False)) or has_stop_loss_field
+            sl_required = bool(self.policy.get("stop_loss_required_in_live", True))
             if sl_required:
                 sl = float(context.get("stop_loss", 0.0) or 0.0)
                 if sl <= 0:

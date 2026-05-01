@@ -25,6 +25,10 @@ class BrokerConnectionProviderFactory:
         if bot is None or not bot.broker_connection_id:
             return None
 
+        bot_mode = str(getattr(bot, "mode", "paper") or "paper").strip().lower()
+        if bot_mode != "live":
+            return None
+
         bc = (
             (
                 await self.db.execute(
@@ -40,6 +44,10 @@ class BrokerConnectionProviderFactory:
 
         credentials = decrypt_credentials(str(getattr(bc, "credentials_encrypted", "") or ""))
         provider_type = str(getattr(bc, "broker_type", "") or "").lower()
+        if provider_type not in {"ctrader", "mt5", "bybit"}:
+            return None
+        if not isinstance(credentials, dict) or not credentials:
+            return None
 
         from trading_core.runtime import RuntimeFactory
 
@@ -50,4 +58,6 @@ class BrokerConnectionProviderFactory:
             timeframe=str(getattr(bot, "timeframe", "") or "M5"),
             runtime_mode="live",
         )
+        if str(getattr(provider, "mode", "") or "").lower() != "live":
+            return None
         return provider

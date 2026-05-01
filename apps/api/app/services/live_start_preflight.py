@@ -6,11 +6,13 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.models import BotInstance, TradingIncident
 from app.services.broker_capability_proof_service import BrokerCapabilityProofService
 from app.services.reconciliation_daemon_health_service import ReconciliationDaemonHealthService
 from app.services.submit_outbox_recovery_health_service import SubmitOutboxRecoveryHealthService
 from app.services.reconciliation_queue_service import ReconciliationQueueService
+from app.services.submit_outbox_service import SubmitOutboxService
 from app.services.daily_trading_state import DailyTradingStateService
 from app.services.live_readiness_guard import LiveReadinessGuard
 from app.services.policy_service import PolicyService
@@ -55,6 +57,7 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
         "provider_certified": False,
         "reconciliation_daemon_healthy": False,
         "submit_outbox_recovery_healthy": False,
+        "submit_outbox_not_stuck": False,
         "active_policy": False,
         "daily_state_fresh": False,
         "no_daily_lock": False,
@@ -116,6 +119,14 @@ async def run_live_start_preflight(*, bot: BotInstance, provider, db: AsyncSessi
     checks["submit_outbox_recovery_healthy"] = bool(outbox_recovery_healthy)
     if not outbox_recovery_healthy:
         raise LiveStartPreflightError("submit_outbox_recovery_unhealthy")
+
+    settings = get_settings()
+    stale_outbox = await SubmitOutboxService(db).list_stale_submit_phases(
+        older_than_seconds=float(getattr(settings, "unknown_gate_timeout_seconds", 60) or 60),
+    )
+    checks["submit_outbox_not_stuck"] = len(stale_outbox) == 0
+    if stale_outbox:
+        raise LiveStartPreflightError("submit_outbox_stuck")
 
     policy_svc = PolicyService(db)
     is_approved = await policy_svc.is_policy_approved_for_live(bot.id)

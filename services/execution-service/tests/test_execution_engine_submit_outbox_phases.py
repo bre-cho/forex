@@ -4,7 +4,7 @@ import pytest
 
 from execution_service.execution_engine import ExecutionEngine
 from execution_service.providers.base import ExecutionCommand, OrderRequest, OrderResult, PreExecutionContext
-from trading_core.runtime.pre_execution_gate import hash_gate_context
+from trading_core.runtime.pre_execution_gate import hash_gate_context, build_frozen_context_id, sign_gate_context
 
 
 class _LiveProvider:
@@ -88,7 +88,14 @@ def _live_command() -> ExecutionCommand:
         "broker_account_snapshot_hash": "acct_snap_hash_1",
         "risk_context_hash": "risk_hash_1",
         "unknown_orders_unresolved": False,
+        "stop_loss": 1.0900,
+        "context_signature": "",
+        "frozen_context_id": "",
     }
+    _fid = build_frozen_context_id(gate_context)
+    _sig = sign_gate_context(gate_context, secret="test_secret") or "test_sig"
+    gate_context["frozen_context_id"] = _fid
+    gate_context["context_signature"] = _sig
     ctx = PreExecutionContext(
         bot_instance_id="bot-1",
         runtime_mode="live",
@@ -116,6 +123,8 @@ def _live_command() -> ExecutionCommand:
         policy_version="v1",
         gate_context=gate_context,
         context_hash=hash_gate_context(gate_context),
+        frozen_context_id=_fid,
+        context_signature=_sig,
     )
     return ExecutionCommand(
         request=OrderRequest(

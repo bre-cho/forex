@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import hashlib
 import json
 import logging
@@ -272,6 +273,50 @@ class ExecutionEngine:
                         success=False,
                         error_message="execution_gate_blocked:gate_context_hash_mismatch",
                     )
+                require_signed_context = bool(self._gate.policy.get("require_signed_gate_context", False))
+                if require_signed_context:
+                    ctx_sig = str(getattr(ctx, "context_signature", "") or "")
+                    gate_sig = str(gate_ctx.get("context_signature", "") or "")
+                    if not ctx_sig or not gate_sig:
+                        return OrderResult(
+                            order_id="",
+                            symbol=request.symbol,
+                            side=request.side,
+                            volume=request.volume,
+                            fill_price=float(request.price or 0.0),
+                            commission=0.0,
+                            success=False,
+                            error_message="execution_gate_blocked:missing_context_signature",
+                        )
+                    if not hmac.compare_digest(ctx_sig, gate_sig):
+                        return OrderResult(
+                            order_id="",
+                            symbol=request.symbol,
+                            side=request.side,
+                            volume=request.volume,
+                            fill_price=float(request.price or 0.0),
+                            commission=0.0,
+                            success=False,
+                            error_message="execution_gate_blocked:context_signature_mismatch",
+                        )
+                    signing_secret = str(self._gate.policy.get("gate_context_signing_secret", "") or "")
+                    if signing_secret:
+                        expected_sig = hmac.new(
+                            signing_secret.encode("utf-8"),
+                            str(ctx.context_hash).encode("utf-8"),
+                            hashlib.sha256,
+                        ).hexdigest()
+                        if not hmac.compare_digest(expected_sig, ctx_sig):
+                            return OrderResult(
+                                order_id="",
+                                symbol=request.symbol,
+                                side=request.side,
+                                volume=request.volume,
+                                fill_price=float(request.price or 0.0),
+                                commission=0.0,
+                                success=False,
+                                error_message="execution_gate_blocked:context_signature_invalid",
+                            )
                 binding = validate_frozen_context_bindings(
                     request=request,
                     context=ctx,

@@ -46,6 +46,9 @@ def _ctx(**kwargs) -> dict:
         "broker_account_snapshot_hash": "acct_snap_hash_1",
         "risk_context_hash": "risk_hash_1",
         "unknown_orders_unresolved": False,
+        "stop_loss": 1.09,
+        "requested_volume": 0.01,
+        "approved_volume": 0.01,
     }
     base.update(kwargs)
     return base
@@ -92,6 +95,12 @@ def test_live_missing_quote_binding_blocked(gate):
     )
     assert result.action == "BLOCK"
     assert result.reason in {"quote_id_missing", "quote_timestamp_invalid"}
+
+
+def test_live_approved_volume_mismatch_blocked(gate):
+    result = gate.evaluate(_ctx(requested_volume=0.05, approved_volume=0.01))
+    assert result.action == "BLOCK"
+    assert result.reason == "approved_volume_mismatch"
 
 
 def test_kill_switch_blocks(gate):
