@@ -14,6 +14,10 @@ from .order_router import OrderRouter
 from .providers.base import BrokerProvider, ExecutionCommand, OrderRequest, OrderResult, PreExecutionContext
 from trading_core.runtime.pre_execution_gate import PreExecutionGate, hash_gate_context
 from trading_core.runtime.frozen_context_contract import validate_frozen_context_bindings
+from trading_core.runtime.live_failover_digest import (
+    build_live_failover_reason_digest,
+    normalize_live_failover_reason_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,18 +85,17 @@ class ExecutionEngine:
         backup_providers: List[str],
         signal_id: str | None,
     ) -> str:
-        payload = {
-            "bot_instance_id": str(getattr(context, "bot_instance_id", "") or ""),
-            "idempotency_key": str(getattr(context, "idempotency_key", "") or ""),
-            "brain_cycle_id": str(getattr(context, "brain_cycle_id", "") or ""),
-            "signal_id": str(signal_id or "") or None,
-            "symbol": str((getattr(context, "gate_context", {}) or {}).get("symbol") or "").upper(),
-            "side": str((getattr(context, "gate_context", {}) or {}).get("side") or "").lower(),
-            "primary_provider": str(primary_provider or "").strip().lower(),
-            "backup_providers": sorted(str(x or "").strip().lower() for x in backup_providers if str(x or "").strip()),
-        }
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        normalized = normalize_live_failover_reason_payload(
+            bot_instance_id=str(getattr(context, "bot_instance_id", "") or ""),
+            idempotency_key=str(getattr(context, "idempotency_key", "") or ""),
+            brain_cycle_id=str(getattr(context, "brain_cycle_id", "") or ""),
+            signal_id=str(signal_id or "") or None,
+            symbol=str((getattr(context, "gate_context", {}) or {}).get("symbol") or ""),
+            side=str((getattr(context, "gate_context", {}) or {}).get("side") or ""),
+            primary_provider=primary_provider,
+            backup_providers=list(backup_providers),
+        )
+        return build_live_failover_reason_digest(normalized)
 
     def _record_provider_latency(self, provider_name: str, latency_ms: float) -> None:
         name = str(provider_name or "").strip()

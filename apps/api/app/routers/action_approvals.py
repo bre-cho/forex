@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -8,6 +8,10 @@ from app.dependencies.auth import get_current_user
 from app.dependencies.permissions import require_workspace_role
 from app.models import User
 from app.services.action_approval_service import ACTION_POLICY, ActionApprovalService
+from trading_core.runtime.live_failover_digest import (
+    build_live_failover_reason_digest,
+    normalize_live_failover_reason_payload,
+)
 
 router = APIRouter(prefix="/v1/workspaces/{workspace_id}/approvals", tags=["action-approvals"])
 
@@ -58,6 +62,37 @@ async def create_approval_request(
         actor=current_user,
         expires_in_minutes=(payload or {}).get("expires_in_minutes"),
     )
+
+
+@router.post("/reason-digest/live-failover")
+async def compute_live_failover_reason_digest(
+    workspace_id: str,
+    payload: dict,
+    current_user: User = Depends(get_current_user),
+    _member=Depends(require_workspace_role("operator")),
+):
+    body = dict(payload or {})
+    try:
+        normalized = normalize_live_failover_reason_payload(
+            bot_instance_id=str(body.get("bot_instance_id") or body.get("bot_id") or "").strip(),
+            idempotency_key=str(body.get("idempotency_key") or "").strip(),
+            brain_cycle_id=str(body.get("brain_cycle_id") or "").strip(),
+            signal_id=str(body.get("signal_id") or "").strip() or None,
+            symbol=str(body.get("symbol") or "").strip(),
+            side=str(body.get("side") or "").strip(),
+            primary_provider=str(body.get("primary_provider") or "").strip(),
+            backup_providers=list(body.get("backup_providers") or []),
+        )
+        digest = build_live_failover_reason_digest(normalized)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid_live_failover_reason_payload:{exc}")
+
+    return {
+        "workspace_id": workspace_id,
+        "action_type": "live_provider_failover",
+        "reason_digest": digest,
+        "normalized_payload": normalized,
+    }
 
 
 @router.post("/{approval_id}/approve")

@@ -114,3 +114,104 @@ async def test_action_approval_request_approve_and_list_flow(monkeypatch: pytest
         )
         assert listed.status_code == 200
         assert any(int(item["id"]) == approval_id for item in listed.json())
+
+
+@pytest.mark.asyncio
+async def test_live_failover_reason_digest_helper_endpoint(monkeypatch: pytest.MonkeyPatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    app = FastAPI()
+    app.include_router(auth.router)
+    app.include_router(workspaces.router)
+    app.include_router(action_approvals.router)
+
+    async def _override_get_db():
+        async with session_maker() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    fake_redis = _FakeRedis()
+
+    async def _get_fake_redis():
+        return fake_redis
+
+    monkeypatch.setattr(token_revocation, "get_redis", _get_fake_redis)
+    monkeypatch.setattr(auth, "hash_password", lambda raw: f"hashed::{raw}")
+    monkeypatch.setattr(auth, "verify_password", lambda raw, hashed: hashed == f"hashed::{raw}")
+    app.dependency_overrides[get_db] = _override_get_db
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        owner_tokens = await _register_and_login(client, "owner-digest@example.com")
+        viewer_tokens = await _register_and_login(client, "viewer-digest@example.com")
+        owner_headers = {"Authorization": f"Bearer {owner_tokens['access_token']}"}
+        viewer_headers = {"Authorization": f"Bearer {viewer_tokens['access_token']}"}
+
+        ws_resp = await client.post(
+            "/v1/workspaces",
+            headers=owner_headers,
+            json={"name": "Digest WS", "slug": "digest-ws"},
+        )
+        assert ws_resp.status_code == 201
+        workspace_id = ws_resp.json()["id"]
+
+        add_member = await client.post(
+            f"/v1/workspaces/{workspace_id}/members",
+            headers=owner_headers,
+            json={"email": "viewer-digest@example.com", "role": "viewer"},
+        )
+        assert add_member.status_code == 200
+
+        payload = {
+            "bot_instance_id": "bot-live-1",
+            "idempotency_key": "idem-123",
+            "brain_cycle_id": "cycle-123",
+            "signal_id": "signal-123",
+            "symbol": "eurusd",
+            "side": "BUY",
+            "primary_provider": "CTRADER",
+            "backup_providers": ["MT5", "  ctrader_backup  "],
+        }
+
+        denied = await client.post(
+            f"/v1/workspaces/{workspace_id}/approvals/reason-digest/live-failover",
+            headers=viewer_headers,
+            json=payload,
+        )
+        assert denied.status_code == 403
+
+        digest_resp_1 = await client.post(
+            f"/v1/workspaces/{workspace_id}/approvals/reason-digest/live-failover",
+            headers=owner_headers,
+            json=payload,
+        )
+        assert digest_resp_1.status_code == 200
+        body_1 = digest_resp_1.json()
+        assert body_1["action_type"] == "live_provider_failover"
+        assert len(str(body_1["reason_digest"])) == 64
+        assert body_1["normalized_payload"]["symbol"] == "EURUSD"
+        assert body_1["normalized_payload"]["side"] == "buy"
+        assert body_1["normalized_payload"]["primary_provider"] == "ctrader"
+        assert body_1["normalized_payload"]["backup_providers"] == ["ctrader_backup", "mt5"]
+
+        digest_resp_2 = await client.post(
+            f"/v1/workspaces/{workspace_id}/approvals/reason-digest/live-failover",
+            headers=owner_headers,
+            json=payload,
+        )
+        assert digest_resp_2.status_code == 200
+        assert digest_resp_2.json()["reason_digest"] == body_1["reason_digest"]
+
+        invalid_resp = await client.post(
+            f"/v1/workspaces/{workspace_id}/approvals/reason-digest/live-failover",
+            headers=owner_headers,
+            json={"bot_instance_id": "bot-live-1"},
+        )
+        assert invalid_resp.status_code == 400
+        assert "invalid_live_failover_reason_payload" in str(invalid_resp.json().get("detail") or "")
