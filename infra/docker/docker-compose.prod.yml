@@ -65,7 +65,7 @@ services:
         condition: service_healthy
     restart: always
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h localhost -p 5432 -U ${POSTGRES_USER:-forex}"]
+      test: ["CMD-SHELL", "psql -h localhost -p 5432 -U ${POSTGRES_USER:-forex} -c 'SELECT 1' > /dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 3

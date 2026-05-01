@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
@@ -34,17 +35,6 @@ from .mt5_session import MT5Session, MT5SessionConfig
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# App setup
-# ---------------------------------------------------------------------------
-
-app = FastAPI(
-    title="MT5 HTTP Bridge",
-    version="0.1.0",
-    description="HTTP bridge exposing MetaTrader 5 SDK for Linux Docker consumers.",
-)
-
 
 # ---------------------------------------------------------------------------
 # Session singleton
@@ -62,6 +52,38 @@ def _get_session() -> MT5Session:
         live=os.getenv("MT5_LIVE", "false").strip().lower() == "true",
     )
     return MT5Session(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Lifespan context manager
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    session = _get_session()
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, session.connect)
+        logger.info("MT5 session connected on startup")
+    except Exception as exc:
+        logger.error("MT5 session connect failed on startup: %s", exc)
+        # Do not raise — let the /connect endpoint retry.
+    yield
+    session.disconnect()
+    logger.info("MT5 session disconnected on shutdown")
+
+
+# ---------------------------------------------------------------------------
+# App setup
+# ---------------------------------------------------------------------------
+
+app = FastAPI(
+    title="MT5 HTTP Bridge",
+    version="0.1.0",
+    description="HTTP bridge exposing MetaTrader 5 SDK for Linux Docker consumers.",
+    lifespan=_lifespan,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -97,30 +119,6 @@ class PlaceOrderRequest(BaseModel):
 
 class ClosePositionRequest(BaseModel):
     position_id: int
-
-
-# ---------------------------------------------------------------------------
-# Startup / shutdown
-# ---------------------------------------------------------------------------
-
-
-@app.on_event("startup")
-async def _startup() -> None:
-    session = _get_session()
-    loop = asyncio.get_event_loop()
-    try:
-        await loop.run_in_executor(None, session.connect)
-        logger.info("MT5 session connected on startup")
-    except Exception as exc:
-        logger.error("MT5 session connect failed on startup: %s", exc)
-        # Do not raise — let the /connect endpoint retry.
-
-
-@app.on_event("shutdown")
-async def _shutdown() -> None:
-    session = _get_session()
-    session.disconnect()
-    logger.info("MT5 session disconnected on shutdown")
 
 
 # ---------------------------------------------------------------------------

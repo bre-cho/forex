@@ -157,7 +157,7 @@ class MT5BridgeProvider(BrokerProvider):
         return df
 
     async def place_order(self, request: OrderRequest) -> OrderResult:
-        if self.mode == "live" and not str(getattr(request, "client_order_id", "") or ""):
+        if self.mode == "live" and not getattr(request, "client_order_id", None):
             return OrderResult(
                 order_id="", symbol=request.symbol, side=request.side,
                 volume=request.volume, fill_price=0.0, commission=0.0,

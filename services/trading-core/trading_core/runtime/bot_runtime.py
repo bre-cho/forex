@@ -1922,12 +1922,8 @@ class BotRuntime:
         """
         logger.info("Account sync loop started: %s", self.bot_instance_id)
 
-        # Allow one full tick interval before the first sync so startup isn't raced.
-        await asyncio.sleep(self._account_sync_interval)
-
         while True:
-            if self.state.status == RuntimeStatus.STOPPED:
-                break
+            # Wait before each sync (including the first) so startup isn't raced.
             await asyncio.sleep(self._account_sync_interval)
             if self.state.status == RuntimeStatus.STOPPED:
                 break
@@ -2033,7 +2029,7 @@ class BotRuntime:
 
         logger.info("Account sync loop stopped: %s", self.bot_instance_id)
 
-
+    async def _start_reconciliation_worker(self) -> None:
         if self._reconciliation_worker is not None:
             return
         missing_hooks = []

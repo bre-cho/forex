@@ -299,7 +299,7 @@ NEW_KEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.genera
 # 2. Update .env: set FERNET_KEY_OLD = current FERNET_KEY value, FERNET_KEY = $NEW_KEY
 
 # 3. Rolling restart API replicas (one at a time)
-docker service update --update-parallelism 1 forex_api
+docker compose -f infra/docker/docker-compose.prod.yml up -d --no-deps --scale api=2 api
 
 # 4. After all replicas are on new key: re-encrypt credentials
 # (run the key rotation admin script — see docs/runbooks/key-rotation.md)
