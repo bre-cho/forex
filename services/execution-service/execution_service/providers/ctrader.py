@@ -35,6 +35,7 @@ class CTraderProvider(BrokerProvider):
         live: bool = False,
         *,
         _allow_live_override: bool = False,
+        token_expires_in: int = 3600,
     ) -> None:
         if bool(live) and not bool(_allow_live_override):
             raise ValueError("CTraderProvider is demo-only; use CTraderLiveProvider for live mode")
@@ -51,6 +52,53 @@ class CTraderProvider(BrokerProvider):
         self._execution_adapter = CTraderUnavailableExecutionAdapter("execution_adapter_not_initialized")
         self._market_data_adapter = CTraderMarketDataAdapter(None)
         self._connected = False
+        # Token auto-refresh (initialised lazily on connect)
+        self._token_refresher = None
+        self._token_expires_in = int(token_expires_in or 3600)
+
+    # ------------------------------------------------------------------
+    # Token refresh callbacks (called by CTraderTokenRefresher)
+    # ------------------------------------------------------------------
+
+    async def _on_token_refreshed(self, access_token: str, refresh_token: str, expires_in: int) -> None:
+        """Update stored credentials and notify the underlying provider."""
+        self._access_token = access_token
+        self._refresh_token = refresh_token
+        if self._token_refresher is not None:
+            self._token_refresher.update_refresh_token(refresh_token, expires_in)
+        # Propagate to the live underlying provider if it supports credential update
+        if self._provider is not None:
+            update_fn = getattr(self._provider, "update_credentials", None)
+            if callable(update_fn):
+                try:
+                    update_fn(access_token=access_token, refresh_token=refresh_token)
+                except Exception as exc:
+                    logger.warning("CTraderProvider: provider credential update failed: %s", exc)
+        logger.info("CTraderProvider: OAuth2 token refreshed (expires_in=%ds)", expires_in)
+
+    async def _on_refresh_failed(self, reason: str) -> None:
+        """Mark provider degraded when token refresh exhausts all retries."""
+        logger.error("CTraderProvider: token refresh permanently failed: %s — pausing provider", reason)
+        self._connected = False
+
+    def _start_token_refresher(self) -> None:
+        """Initialise and start the background token refresh task."""
+        try:
+            from execution_service.ctrader_token_refresher import CTraderTokenRefresher
+        except ImportError:
+            logger.warning("CTraderTokenRefresher not available; token will not auto-refresh")
+            return
+        self._token_refresher = CTraderTokenRefresher(
+            client_id=self._client_id,
+            client_secret=self._client_secret,
+            refresh_token=self._refresh_token,
+            on_token_refreshed=self._on_token_refreshed,
+            on_refresh_failed=self._on_refresh_failed,
+        )
+        import asyncio
+        asyncio.ensure_future(
+            self._token_refresher.start(expires_in_seconds=self._token_expires_in),
+        )
 
     async def connect(self) -> None:
         try:
@@ -76,6 +124,8 @@ class CTraderProvider(BrokerProvider):
                 if candles is None or candles.empty:
                     raise RuntimeError("CTrader live stream not ready")
             self._connected = True
+            # Start token auto-refresh after successful connection
+            self._start_token_refresher()
             logger.info("CTraderProvider connected: %s", self.symbol)
         except ImportError:
             if self.live:
@@ -99,6 +149,12 @@ class CTraderProvider(BrokerProvider):
         return f"ctrader_error:{err}"
 
     async def disconnect(self) -> None:
+        if self._token_refresher is not None:
+            try:
+                await self._token_refresher.stop()
+            except Exception as exc:
+                logger.warning("CTraderProvider: token refresher stop failed: %s", exc)
+            self._token_refresher = None
         self._connected = False
         logger.info("CTraderProvider disconnected")
 
